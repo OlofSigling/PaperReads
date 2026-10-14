@@ -1057,11 +1057,12 @@ const Epubify = (() => {
         try {
           blob = await get();
         } catch {}
-        if (!blob || blob.size < 1024) {
+        let type = blob ? (blob.type || '').split(';')[0] : '';
+        // tiny files are spacers/pixels; text/html is a bot-check or error page
+        if (!blob || blob.size < 1024 || (type && type !== 'application/octet-stream' && !type.startsWith('image/'))) {
           img.remove();
           continue;
         }
-        let type = (blob.type || '').split(';')[0];
         if (!IMG_TYPES[type]) {
           const ext = ((bestSrc(img) || '').split(/[?#]/)[0].match(/\.[a-z]+$/i) || [''])[0].toLowerCase();
           type = EXT_TYPES[ext] || 'image/jpeg';
@@ -1241,41 +1242,58 @@ const Epubify = (() => {
     return { doc, root: node, baseUrl: res.url, title: getTitle(doc, arxivId), authors: getAuthors(doc), sourceUrl: res.url, label: 'arXiv HTML' };
   }
 
-  // Europe PMC serves open-access PubMed Central full text as JATS XML with
-  // permissive CORS. Figure images are behind a bot wall, so figures keep
-  // their captions only.
-  async function fromEuropePmc(doi, log) {
-    log('→ looking up open-access full text on Europe PMC');
+  // PubMed Central full text as JATS XML. NCBI's E-utilities serves it for
+  // open-access papers *and* author manuscripts (free to read, not openly
+  // licensed), with permissive CORS; Europe PMC's API only covers the
+  // open-access subset, so it's the fallback. Europe PMC also maps DOI → PMCID.
+  async function fromPubmedCentral(doi, log) {
+    log('→ looking for free full text in PubMed Central');
     const q = encodeURIComponent(`DOI:"${doi}"`);
     const s = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${q}&format=json&resultType=lite`).then((r) => r.json());
-    const hit = (s.resultList && s.resultList.result || []).find((r) => r.pmcid && r.isOpenAccess === 'Y') || (s.resultList && s.resultList.result || []).find((r) => r.pmcid);
+    const results = (s.resultList && s.resultList.result) || [];
+    const hit = results.find((r) => r.pmcid && r.isOpenAccess === 'Y') || results.find((r) => r.pmcid);
     if (!hit) {
       log('  ! not in PubMed Central');
       return null;
     }
-    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/${hit.pmcid}/fullTextXML`);
-    if (!res.ok) {
-      log(`  ! ${hit.pmcid} has no open full text`);
+    const pmcid = hit.pmcid;
+    const parse = async (res) => {
+      if (!res.ok) return null;
+      const xml = new DOMParser().parseFromString(await res.text(), 'application/xml');
+      return xml.querySelector('parsererror') || !xml.querySelector('article body') ? null : xml;
+    };
+    let xml = null;
+    let via = 'PubMed Central';
+    try {
+      xml = await parse(await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=${pmcid.replace(/^PMC/i, '')}&rettype=xml`));
+    } catch {}
+    if (!xml) {
+      log('  ! NCBI had no full text; trying Europe PMC');
+      try {
+        xml = await parse(await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/${pmcid}/fullTextXML`));
+        via = 'Europe PMC';
+      } catch {}
+    }
+    if (!xml) {
+      log(`  ! ${pmcid} has no full text available to apps (the publisher may only allow reading it on the PMC website)`);
       return null;
     }
-    const xml = new DOMParser().parseFromString(await res.text(), 'application/xml');
-    if (xml.querySelector('parsererror') || !xml.querySelector('body')) {
-      log('  ! full text has no body');
-      return null;
-    }
-    log(`  using Europe PMC full text (${hit.pmcid}); figure images not available`);
+    const kind = hit.isOpenAccess === 'Y' ? 'open access' : 'author manuscript / free to read';
+    log(`  using ${via} full text (${pmcid}, ${kind})`);
     const doc = document.implementation.createHTMLDocument('');
     const root = doc.createElement('div');
-    jatsToHtml(xml, doc, root);
-    const title = ws(xml.querySelector('article-meta title-group article-title')?.textContent || '').trim();
-    const authors = [...xml.querySelectorAll('article-meta contrib[contrib-type="author"] name')].map((n) =>
+    const article = xml.querySelector('article');
+    jatsToHtml(article, doc, root, `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcid}/bin/`);
+    const title = ws(article.querySelector('article-meta title-group article-title')?.textContent || '').trim();
+    const authors = [...article.querySelectorAll('article-meta contrib[contrib-type="author"] name')].map((n) =>
       [n.querySelector('given-names')?.textContent, n.querySelector('surname')?.textContent].filter(Boolean).join(' ')
     );
-    const url = `https://europepmc.org/article/PMC/${hit.pmcid}`;
-    return { doc, root, baseUrl: url, title, authors, sourceUrl: url, label: 'Europe PMC' };
+    const url = `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/`;
+    return { doc, root, baseUrl: url, title, authors, sourceUrl: url, label: 'PubMed Central' };
   }
 
-  function jatsToHtml(xml, doc, root) {
+  function jatsToHtml(xml, doc, root, imageBase = null) {
+    const xdoc = xml.ownerDocument || xml; // xml may be the <article> element
     const el = (tag, ...kids) => {
       const e = doc.createElement(tag);
       kids.forEach((k) => k && e.append(k));
@@ -1320,7 +1338,17 @@ const Epubify = (() => {
           const cap = el('figcaption', inline(c.querySelector('label') || doc.createElement('x'), el('strong')), ' ');
           const capNode = c.querySelector('caption');
           if (capNode) [...capNode.children].forEach((k) => cap.append(inline(k, el('span')), ' '));
-          into.append(el('figure', cap));
+          const fig = el('figure');
+          const g = c.querySelector('graphic');
+          const href = g && (g.getAttribute('xlink:href') || g.getAttributeNS('http://www.w3.org/1999/xlink', 'href'));
+          if (href && imageBase) {
+            // dropped later if the host won't serve it to us
+            const img = fig.appendChild(doc.createElement('img'));
+            img.setAttribute('src', imageBase + href + (/\.[a-z]{3,4}$/i.test(href) ? '' : '.jpg'));
+            img.setAttribute('alt', '');
+          }
+          fig.append(cap);
+          into.append(fig);
         } else if (n === 'table-wrap') {
           const fig = el('figure');
           const cap = el('figcaption', inline(c.querySelector('label') || doc.createElement('x'), el('strong')), ' ');
@@ -1377,11 +1405,11 @@ const Epubify = (() => {
       for (const sec of back.querySelectorAll(':scope > ack, :scope > sec, :scope > app-group > app')) {
         // an <ack> without a <title> still deserves a heading
         if (sec.localName === 'ack' && !sec.querySelector(':scope > title')) {
-          const t = xml.createElementNS(null, 'title');
+          const t = xdoc.createElementNS(null, 'title');
           t.textContent = 'Acknowledgements';
           sec.insertBefore(t, sec.firstChild);
         }
-        const holder = xml.createElementNS(null, 'holder');
+        const holder = xdoc.createElementNS(null, 'holder');
         holder.append(sec.cloneNode(true));
         block(holder, 0, root);
       }
@@ -1575,7 +1603,7 @@ ${manifest.join('\n')}
     const tryArxiv = (source === 'auto' || source === 'arxiv') && paper.arxiv;
     const tryPmc = (source === 'auto' || source === 'pmc') && paper.doi && !/^10\.48550\//i.test(paper.doi);
     if (tryArxiv) src = await fromArxivHtml(paper.arxiv, log).catch((e) => (log('  ! ' + e.message), null));
-    if (!src && tryPmc) src = await fromEuropePmc(paper.doi, log).catch((e) => (log('  ! ' + e.message), null));
+    if (!src && tryPmc) src = await fromPubmedCentral(paper.doi, log).catch((e) => (log('  ! ' + e.message), null));
     if (!src && (source === 'auto' || source === 'pdf') && pdf) {
       src = await fromPdf(pdf.blob, pdf.name, log);
       if (src.twoCol) {
@@ -1609,7 +1637,7 @@ ${manifest.join('\n')}
   function sources(paper, hasPdf) {
     const out = [];
     if (paper.arxiv) out.push(['arxiv', 'arXiv HTML']);
-    if (paper.doi && !/^10\.48550\//i.test(paper.doi)) out.push(['pmc', 'Europe PMC (open-access papers)']);
+    if (paper.doi && !/^10\.48550\//i.test(paper.doi)) out.push(['pmc', 'PubMed Central (free full text)']);
     if (hasPdf) out.push(['pdf', 'Stored PDF']);
     return out;
   }
