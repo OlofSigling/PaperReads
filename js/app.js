@@ -886,7 +886,7 @@
       </section>`}
       <form id="edit" class="stack card">
         <p class="muted small" id="dupe" hidden></p>
-        <label>Title <input name="title" required value="${esc(p.title || sharedTitle)}"></label>
+        <label>Title <input name="title" required value="${esc(p.title || Lookup.cleanTitle(sharedTitle))}"></label>
         <label>Authors <small class="muted">(one per line)</small><textarea name="authors" rows="3">${esc((p.authors || []).join('\n'))}</textarea></label>
         <div class="row">
           <label>Year <input name="year" type="number" inputmode="numeric" value="${esc(p.year || '')}"></label>
@@ -900,7 +900,7 @@
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
-        ${!(inbox && inbox.file) ? `<label class="check"><input type="checkbox" name="getpdf" checked> Save arXiv PDF for offline reading</label>` : ''}
+        ${!(inbox && inbox.file) ? `<label class="check"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv or a PDF link)</label>` : ''}
         ${!(inbox && inbox.file && isEpub(inbox.file)) ? `<label class="check"><input type="checkbox" name="getepub" checked> Make an EPUB for reading in the app</label>` : ''}`}
         <div class="row end"><a class="btn" href="${existing ? `#/paper/${p.id}` : '#/'}">Cancel</a><button class="btn primary">${existing ? 'Save' : 'Add paper'}</button></div>
       </form>`;
@@ -925,17 +925,87 @@
     form.doi.addEventListener('change', checkDupe);
     form.title.addEventListener('change', checkDupe);
 
+    let pdfLink = null; // shared link that points at a PDF
+    let pendingPdf = null; // that PDF, if already downloaded during lookup
+    let pdfError = null;
     const lookup = $('#lookup');
     if (lookup) {
       const status = $('#lookup-status');
+      const pick = async (r) => {
+        status.textContent = 'Fetching details…';
+        try {
+          fill({ ...(await Lookup.byDoi(r.doi)), url: form.url.value || null });
+        } catch {
+          fill(r);
+        }
+      };
+      const showList = (list) => {
+        $('#results').innerHTML = list
+          .map((r, i) => `<li class="paper-row"><button type="button" class="paper-link plain" data-i="${i}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${esc(authorsShort(r.authors))}${r.year ? ` · ${r.year}` : ''}${r.venue ? ` · ${esc(r.venue)}` : ''}${r.notice ? ' · correction notice' : ''}</span></button></li>`)
+          .join('');
+        $$('#results [data-i]').forEach((btn) =>
+          btn.addEventListener('click', async () => {
+            $('#results').innerHTML = '';
+            await pick(list[btn.dataset.i]);
+            status.textContent = 'Check the details and save.';
+          })
+        );
+      };
+      // Title search; true when an exact match was filled in.
+      const searchTitle = async (title) => {
+        const results = await Lookup.search(title);
+        if (!results.length) return false;
+        if (results[0].confident) {
+          // an exact title match: fill it in, but keep the alternatives a tap away
+          await pick(results[0]);
+          status.textContent = results.length > 1 ? 'Matched by title. Not the right paper? Pick another:' : 'Matched by title. Check the details and save.';
+          showList(results.slice(1));
+          return true;
+        }
+        if (!form.title.value) form.title.value = title;
+        status.textContent = 'Pick the matching paper:';
+        showList(results);
+        return true;
+      };
+      // Work out which paper a PDF is from its contents.
+      const identifyFromPdf = async (file) => {
+        status.textContent = 'Reading the PDF to find out which paper it is…';
+        let info;
+        try {
+          info = await Lookup.identifyPdf(file);
+        } catch {
+          return false;
+        }
+        if (info.doi || info.arxiv) {
+          try {
+            const { meta } = await Lookup.resolve(info.doi || `arXiv:${info.arxiv}`);
+            if (meta) {
+              fill(meta);
+              status.textContent = 'Found it from the PDF. Check the details and save.';
+              return true;
+            }
+          } catch {}
+        }
+        if (info.title) {
+          if (navigator.onLine && (await searchTitle(info.title).catch(() => false))) return true;
+          form.title.value = form.title.value || info.title;
+          status.textContent = 'Took the title from the PDF. Fill in the rest, or edit it later.';
+          return true;
+        }
+        return false;
+      };
+
       const run = async () => {
         const input = lookup.q.value.trim();
         if (!input) return;
         $('#results').innerHTML = '';
+        pendingPdf = null;
+        pdfError = null;
+        const ids0 = Lookup.parse(input);
+        pdfLink = ids0.url && Lookup.isPdfUrl(ids0.url) ? ids0.url : null;
         if (!navigator.onLine) {
           status.textContent = 'Offline: fill in the details by hand. You can edit them later.';
-          const ids = Lookup.parse(input);
-          fill({ doi: ids.doi, arxiv: ids.arxiv, url: ids.url || (ids.arxiv ? `https://arxiv.org/abs/${ids.arxiv}` : '') });
+          fill({ doi: ids0.doi, arxiv: ids0.arxiv, url: ids0.url || (ids0.arxiv ? `https://arxiv.org/abs/${ids0.arxiv}` : '') });
           return;
         }
         status.textContent = 'Looking up…';
@@ -947,44 +1017,24 @@
             return;
           }
           if (ids.url) form.url.value = ids.url;
+          // A link straight to a PDF: download it now and read it.
+          if (pdfLink) {
+            status.textContent = 'Downloading the PDF…';
+            try {
+              pendingPdf = await Lookup.fetchPdf(pdfLink);
+              if (await identifyFromPdf(pendingPdf)) return;
+            } catch (err) {
+              pdfError = err.message;
+            }
+          }
           // No identifier: search Crossref by title (use shared page title if we have it).
           const q2 = Lookup.cleanTitle(ids.url ? sharedTitle || input.replace(ids.url, '') : input);
-          if (!q2) {
-            status.textContent = 'No DOI or arXiv ID in that link. Paste the title to search, or fill in by hand.';
-            return;
-          }
-          const results = await Lookup.search(q2);
-          const pick = async (r) => {
-            status.textContent = 'Fetching details…';
-            try {
-              fill({ ...(await Lookup.byDoi(r.doi)), url: form.url.value || null });
-            } catch {
-              fill(r);
-            }
-          };
-          const showList = (list) => {
-            $('#results').innerHTML = list
-              .map((r, i) => `<li class="paper-row"><button type="button" class="paper-link plain" data-i="${i}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${esc(authorsShort(r.authors))}${r.year ? ` · ${r.year}` : ''}${r.venue ? ` · ${esc(r.venue)}` : ''}${r.notice ? ' · correction notice' : ''}</span></button></li>`)
-              .join('');
-            $$('#results [data-i]').forEach((btn) =>
-              btn.addEventListener('click', async () => {
-                $('#results').innerHTML = '';
-                await pick(list[btn.dataset.i]);
-                status.textContent = 'Check the details and save.';
-              })
-            );
-          };
-          if (!results.length) {
-            status.textContent = 'Nothing found. Fill in by hand.';
-          } else if (results[0].confident) {
-            // An exact title match: fill it in, but keep the alternatives a tap away.
-            await pick(results[0]);
-            status.textContent = results.length > 1 ? 'Matched by title. Not the right paper? Pick another:' : 'Matched by title. Check the details and save.';
-            showList(results.slice(1));
-          } else {
-            status.textContent = 'Pick the matching paper:';
-            showList(results);
-          }
+          if (q2 && (await searchTitle(q2))) return;
+          status.textContent = pdfError
+            ? `Couldn’t download that PDF (${pdfError}). Download it in your browser and share the file to PaperReads; the app will read the details from it.`
+            : q2
+              ? 'Nothing found. Fill in by hand.'
+              : 'No DOI or arXiv ID in that link. Paste the title to search, or fill in by hand.';
         } catch (err) {
           status.textContent = `Lookup failed (${err.message}). Fill in by hand.`;
         }
@@ -993,7 +1043,14 @@
         e.preventDefault();
         run();
       });
-      if (shared) run();
+      const sharedPdf = inbox && inbox.file && !isEpub(inbox.file) ? inbox.file : null;
+      (async () => {
+        if (shared) await run();
+        // A shared PDF file: if the link (if any) didn't identify it, read the PDF itself.
+        if (sharedPdf && !form.doi.value && !form.arxiv.value) {
+          if (!(await identifyFromPdf(sharedPdf))) status.textContent = 'Couldn’t tell which paper this PDF is. Paste its title or DOI above.';
+        }
+      })();
     }
 
     form.addEventListener('submit', async (e) => {
@@ -1035,15 +1092,16 @@
       if (inbox && inbox.file) {
         if (isEpub(inbox.file)) await attachEpub(p.id, inbox.file, { source: 'Shared file' });
         else await attachPdf(p.id, inbox.file);
-      } else if (p.arxiv && f.getpdf && f.getpdf.checked && navigator.onLine) {
+      } else if (f.getpdf && f.getpdf.checked && (pendingPdf || ((pdfLink || p.arxiv) && navigator.onLine))) {
         // Fire and forget so saving feels instant.
-        pdfJob = Lookup.fetchArxivPdf(p.arxiv)
+        const get = pendingPdf ? Promise.resolve(pendingPdf) : pdfLink ? Lookup.fetchPdf(pdfLink) : Lookup.fetchArxivPdf(p.arxiv);
+        pdfJob = get
           .then((file) => attachPdf(p.id, file))
           .then(() => {
-            toast('arXiv PDF saved offline');
+            toast('PDF saved offline');
             if (location.hash === `#/paper/${p.id}`) route();
           })
-          .catch(() => toast('Could not download the PDF'));
+          .catch((err) => toast(pdfLink ? `Couldn’t download the PDF: ${err.message}. Download it in your browser and attach it.` : 'Could not download the PDF'));
       }
       const wantsEpub = f.getepub && f.getepub.checked;
       if (wantsEpub && (p.arxiv || p.doi || (inbox && inbox.file)) && (navigator.onLine || (inbox && inbox.file))) {

@@ -13,18 +13,6 @@ const Lookup = (() => {
       .replace(/\.pdf$/i, '');
   }
 
-  // Publisher pages that hide the DOI behind bot checks often still encode
-  // it in the address. These DOIs are inferred, so callers treat them as a
-  // guess and fall back to a title search if they don't resolve.
-  function doiFromUrl(url) {
-    let m;
-    if ((m = /bmj\.com\/content\/[^?#]*?\b(bmj\.[a-z]?\d+)/i.exec(url))) return `10.1136/${m[1].toLowerCase()}`;
-    if ((m = /nature\.com\/articles\/([a-z0-9.-]+)/i.exec(url))) return `10.1038/${m[1].replace(/\.pdf$/i, '')}`;
-    // Elsevier PII in the formatted style used by The Lancet and Cell Press
-    if ((m = /\/(?:PII)?(S\d{4}-\d{3}[\dX]\(\d{2}\)\d{5}-[\dX])/i.exec(url))) return `10.1016/${m[1].toUpperCase()}`;
-    return null;
-  }
-
   // PubMed / PMC links → DOI via Europe PMC (NCBI's own converter has no CORS).
   async function doiFromPubmed(url) {
     let q = null;
@@ -38,18 +26,17 @@ const Lookup = (() => {
     return hit[0] && hit[0].doi ? hit[0].doi : null;
   }
 
-  // Page titles from the share sheet carry the site name ("… | The BMJ").
-  const SITE_WORDS = /journal|nature|science|bmj|pubmed|pmc|ncbi|springer|wiley|sciencedirect|lancet|jama|plos|frontiers|arxiv|biorxiv|medrxiv|oxford|cambridge|taylor|sage|acs|ieee|acm|cell|pnas|nejm|elsevier|mdpi|researchgate|semantic scholar/i;
+  // Page titles from the share sheet often end in " | Site name". Dash
+  // suffixes are ambiguous ("Title - a review"), so search() tries both.
   function cleanTitle(t) {
-    let s = (t || '').replace(/\s+/g, ' ').trim();
+    let s = (t || '').replace(/\s+/g, ' ').trim().replace(/\.pdf$/i, '');
     for (let i = 0; i < 2; i++) {
-      const pipe = /^(.{8,}?)\s+\|\s+[^|]{1,60}$/.exec(s);
-      const dash = /^(.{8,}?)\s+[-–—]\s+([^-–—]{1,60})$/.exec(s);
+      const pipe = /^(.{8,}?)\s+\|\s+[^|]{1,80}$/.exec(s);
       if (pipe) s = pipe[1];
-      else if (dash && SITE_WORDS.test(dash[2])) s = dash[1];
     }
     return s.replace(/\s*\[(PDF|HTML)\]\s*$/i, '').trim();
   }
+  const dropDashSuffix = (t) => t.replace(/\s+[-–—]\s+[^-–—]{1,80}$/, '');
 
   // Pull a DOI / arXiv id / URL out of free text (what the share sheet sends).
   function parse(input) {
@@ -74,10 +61,6 @@ const Lookup = (() => {
       if (ax) out.arxiv = ax[1];
     }
     if (out.arxiv && !out.doi) out.doi = `10.48550/arXiv.${out.arxiv}`;
-    if (!out.doi && out.url) {
-      out.doi = doiFromUrl(out.url);
-      out.inferred = !!out.doi;
-    }
     return out;
   }
 
@@ -119,7 +102,15 @@ const Lookup = (() => {
       headers: { Accept: 'application/vnd.citationstyles.csl+json' },
     });
     if (!res.ok) throw new Error(`DOI lookup failed (${res.status})`);
-    return fromCsl(await res.json());
+    const csl = await res.json();
+    // A DOI for part of a paper (abstract, figure): use the paper's DOI instead.
+    const parent = doi.replace(/\.[^./]+$/, '');
+    if (csl.type === 'component' && parent !== doi && /\/./.test(parent)) {
+      try {
+        return await byDoi(parent);
+      } catch {}
+    }
+    return fromCsl(csl);
   }
 
   async function search(query) {
@@ -139,16 +130,17 @@ const Lookup = (() => {
       return both / (q.size + w.size - both || 1);
     };
     const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const variants = new Set([norm(query), norm(dropDashSuffix(query))]);
     const results = json.message.items
       .filter((it) => it.title && it.title.length)
       .map((it) => ({
         ...fromCsl(it),
         doi: it.DOI,
-        score: Math.round(sim(it.title[0]) * 10),
+        score: Math.round(Math.max(sim(it.title[0]), variants.has(norm(it.title[0])) ? 1 : 0) * 10),
         cites: it['is-referenced-by-count'] || 0,
         // corrections/errata often repeat the original title word for word
         notice: !!(it['update-to'] && it['update-to'].length) || /^(correction|erratum|corrigendum|retraction|expression of concern)\b/i.test(it.title[0]),
-        exact: norm(it.title[0]) === norm(query),
+        exact: variants.has(norm(it.title[0])),
       }))
       .sort((a, b) => b.score - a.score || a.notice - b.notice || b.cites - a.cites)
       .slice(0, 8);
@@ -162,13 +154,7 @@ const Lookup = (() => {
     const ids = parse(input);
     if (!ids.doi && ids.url) ids.doi = await doiFromPubmed(ids.url).catch(() => null);
     if (ids.doi) {
-      let meta;
-      try {
-        meta = await byDoi(ids.doi);
-      } catch (err) {
-        if (!ids.inferred) throw err;
-        return { meta: null, ids: { ...ids, doi: null } }; // guessed DOI was wrong: let the caller search by title
-      }
+      const meta = await byDoi(ids.doi);
       if (ids.arxiv) {
         meta.arxiv = ids.arxiv;
         meta.url = `https://arxiv.org/abs/${ids.arxiv}`;
@@ -176,6 +162,76 @@ const Lookup = (() => {
       return { meta, ids };
     }
     return { meta: null, ids };
+  }
+
+  // Does this link point at a PDF? Generic URL shapes, no site list.
+  function isPdfUrl(url) {
+    return !!url && (/\.pdf($|[?#])/i.test(url) || /\/pdf(\/|$|[?#])/i.test(url) || /[?&](type=printable|pdf=render|download=pdf)/i.test(url));
+  }
+
+  // Download a PDF from any site that allows it. Many sites answer with a
+  // bot-check page instead, so check the bytes, not the status code.
+  async function fetchPdf(url) {
+    let res;
+    try {
+      res = await fetch(url);
+    } catch {
+      throw new Error('the site doesn’t let apps download its PDFs');
+    }
+    if (!res.ok) throw new Error(`the site answered ${res.status}`);
+    const blob = await res.blob();
+    const head = new TextDecoder('latin1').decode(await blob.slice(0, 1024).arrayBuffer());
+    if (!head.includes('%PDF-')) throw new Error('the site sent a web page instead of the PDF');
+    const name = decodeURIComponent((new URL(res.url || url).pathname.split('/').filter(Boolean).pop() || 'paper').replace(/\.pdf$/i, '')) + '.pdf';
+    return new File([blob], name, { type: 'application/pdf' });
+  }
+
+  // Work out which paper a PDF is: a DOI in its metadata or on page 1, an
+  // arXiv stamp, or failing that its title (metadata or biggest type on page 1).
+  async function identifyPdf(blob) {
+    const lib = await Epubify.pdfjs();
+    const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
+    try {
+      const md = await doc.getMetadata().catch(() => ({ info: {}, metadata: null }));
+      const info = md.info || {};
+      const xmp = md.metadata && md.metadata.getAll ? Object.values(md.metadata.getAll()).flat().join(' ') : '';
+      const page = await doc.getPage(1);
+      const tc = await page.getTextContent();
+      const text = tc.items.map((it) => it.str + (it.hasEOL ? '\n' : ' ')).join('');
+      const findDoi = (t) => {
+        // prefer DOIs labelled as such ("doi:", "doi.org/") over ones in citations
+        const labelled = [...t.matchAll(/(?:doi(?:\.org)?\s*[:/]\s*|DOI\s+)(10\.\d{4,9}\/[^\s"<>]+)/gi)].map((m) => cleanDoi(m[1]));
+        const found = labelled.length ? labelled : [DOI_RE.exec(t)].filter(Boolean).map((m) => cleanDoi(m[0]));
+        // a section's DOI extends the paper's (…05224.001 vs …05224): keep the parent
+        return found.find((d) => !found.some((o) => o !== d && d.toLowerCase().startsWith(o.toLowerCase() + '.'))) || null;
+      };
+      const doi = findDoi([info.Subject, info.Keywords, info.doi, xmp].filter(Boolean).join(' ')) || findDoi(text);
+      const ax = /arXiv:\s*(\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(v\d+)?/i.exec(text);
+
+      // Title: trust metadata only if it's actually printed on page 1
+      // (typesetters often leave labels like "pone.0024658 1..11" there).
+      // compare without spaces: small caps come out as "A DAM" in the text layer
+      const squash = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '');
+      let title = (info.Title || '').trim();
+      if (title.length < 12 || !squash(text).includes(squash(title).slice(0, 30))) {
+        // Biggest type in the top half of page 1, in reading order.
+        const vp = page.getViewport({ scale: 1 });
+        const items = tc.items
+          .filter((it) => it.str.trim())
+          .map((it) => {
+            const t = lib.Util.transform(vp.transform, it.transform);
+            return { str: it.str, size: Math.hypot(t[2], t[3]), x: t[4], y: t[5] };
+          })
+          .filter((it) => it.y < vp.height * 0.6 && it.str.trim().length > 1);
+        const max = Math.max(0, ...items.map((it) => it.size));
+        const big = items.filter((it) => it.size > max - 0.6).sort((a, b) => a.y - b.y || a.x - b.x);
+        title = big.map((it) => it.str).join(' ').replace(/\s+/g, ' ').trim();
+      }
+      if (title.length < 8 || title.length > 300) title = '';
+      return { doi, arxiv: ax ? ax[1] : null, title };
+    } finally {
+      doc.destroy();
+    }
   }
 
   // arXiv serves PDFs with permissive CORS, so we can keep a copy offline.
@@ -202,5 +258,5 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, resolve, search, byDoi, cleanTitle, fetchArxivPdf, countPdfPages };
+  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages };
 })();
