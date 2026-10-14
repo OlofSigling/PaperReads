@@ -209,6 +209,7 @@
     [/^#\/queue$/, viewQueue],
     [/^#\/stats$/, viewStats],
     [/^#\/collections$/, viewCollections],
+    [/^#\/backup$/, viewBackup],
     [/^#\/add$/, (q) => viewEdit(null, q)],
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
@@ -270,11 +271,18 @@
         <h2>Your paper shelf is empty</h2>
         <p>Add a paper by DOI, arXiv link or title, or install the app and share a link to it from your browser.</p>
         <a class="btn primary" href="#/add">Add a paper</a>
+        <a class="link" href="#/backup">Restore from a backup</a>
       </section>`;
       return;
     }
 
+    // Nudge when the only copy of the library has gone a while without a backup.
+    const lastBackup = await DB.setting('lastBackup', null);
+    const ageDays = lastBackup ? Math.floor((Date.now() - lastBackup) / 86400000) : null;
+    const nudge = lastBackup ? ageDays >= 30 : all.length >= 5;
+
     main.innerHTML = `
+      ${nudge ? `<section class="card nudge"><p>${lastBackup ? `Last backup was ${ageDays} days ago.` : 'Your library isn’t backed up yet.'}</p><a class="btn small" href="#/backup">Back up</a></section>` : ''}
       <section class="card goal-card">
         <div class="row between"><h2>${year} goal</h2><a href="#/stats" class="link">Stats →</a></div>
         ${goal ? `<p class="big">${done} <small>of ${goal} papers</small></p>
@@ -1188,6 +1196,105 @@
       // jump to the same point once locations are known.
       located.then(() => rendition.display(book.locations.cfiFromPercentage(startPct))).catch(() => {});
     }
+  }
+
+  // ---------- backup ----------
+  async function viewBackup() {
+    setTitle('Backup');
+    const [all, pdfs, epubs, lastBackup] = await Promise.all([papers(), DB.all('pdfs'), DB.all('epubs'), DB.setting('lastBackup', null)]);
+    const mb = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+    const fileBytes = [...pdfs, ...epubs].reduce((s, r) => s + (r.size || 0) + (r.cover ? r.cover.size : 0), 0);
+    let usage = '';
+    let persisted = null;
+    try {
+      const est = await navigator.storage.estimate();
+      usage = `${mb(est.usage || 0)} used`;
+      persisted = await navigator.storage.persisted();
+    } catch {}
+
+    main.innerHTML = `
+      <section class="card">
+        <h3>On this phone</h3>
+        <dl class="kv">
+          <dt>Papers</dt><dd>${all.length}</dd>
+          <dt>PDFs</dt><dd>${pdfs.length}</dd>
+          <dt>EPUBs</dt><dd>${epubs.length}</dd>
+          <dt>Files</dt><dd>${mb(fileBytes)}${usage ? ` (${usage} in total)` : ''}</dd>
+          <dt>Last backup</dt><dd>${lastBackup ? fmtDate(lastBackup) : 'Never'}</dd>
+          ${persisted === null ? '' : `<dt>Auto-clearing</dt><dd>${persisted ? 'Protected: the browser won’t clear it to free space' : 'Not protected. Chrome may clear it if storage runs low, so back up'}</dd>`}
+        </dl>
+      </section>
+      <section class="card">
+        <h3>Back up</h3>
+        <p class="muted small">Saves one .zip with everything. Keep it somewhere that isn’t this phone: Google Drive, email, a computer.</p>
+        <div class="stack">
+          <button class="btn primary" id="bk-full">Back up everything (~${mb(fileBytes)})</button>
+          <button class="btn" id="bk-data">Data only, without PDFs/EPUBs</button>
+        </div>
+        <p class="muted small" id="bk-status"></p>
+      </section>
+      <section class="card">
+        <h3>Restore</h3>
+        <p class="muted small">Pick a PaperReads backup .zip. You’ll see what’s in it before anything changes.</p>
+        <label class="btn">Choose backup file<input type="file" accept=".zip,application/zip" id="rs-file" hidden></label>
+        <div id="rs-confirm" class="stack" hidden></div>
+      </section>`;
+
+    const status = $('#bk-status');
+    const runBackup = async (includeFiles, btn) => {
+      $$('#bk-full, #bk-data').forEach((b) => (b.disabled = true));
+      status.textContent = 'Packing…';
+      try {
+        const file = await Backup.exportZip({ includeFiles, onProgress: (n, t) => (status.textContent = `Packing files ${n}/${t}…`) });
+        status.textContent = `Made ${file.name} (${mb(file.size)}).`;
+        await shareOrSave(file, 'PaperReads backup');
+      } catch (err) {
+        status.textContent = 'Backup failed: ' + err.message;
+      }
+      $$('#bk-full, #bk-data').forEach((b) => (b.disabled = false));
+    };
+    $('#bk-full').addEventListener('click', (e) => runBackup(true, e.target));
+    $('#bk-data').addEventListener('click', (e) => runBackup(false, e.target));
+
+    const input = $('#rs-file');
+    const box = $('#rs-confirm');
+    input.addEventListener('change', async () => {
+      const file = input.files[0];
+      if (!file) return;
+      box.hidden = false;
+      box.innerHTML = '<p class="muted small">Reading backup…</p>';
+      let info;
+      try {
+        info = await Backup.inspect(file);
+      } catch (err) {
+        box.innerHTML = `<p class="small">✗ ${esc(err.message)}</p>`;
+        return;
+      }
+      box.innerHTML = `
+        <p class="small">Backup from <strong>${fmtDate(Date.parse(info.exportedAt))}</strong>: ${info.papers} papers, ${info.pdfs} PDFs, ${info.epubs} EPUBs${info.includesFiles ? '' : ' (data-only backup)'}.</p>
+        <button class="btn primary" data-mode="merge">Merge into my library</button>
+        <p class="muted small">Adds what’s missing. For papers in both, the more recently edited copy wins.</p>
+        <button class="btn danger" data-mode="replace">Replace my library</button>
+        <p class="muted small">Deletes everything here first, then restores the backup exactly.</p>
+        <p class="small" id="rs-status"></p>`;
+      $$('[data-mode]', box).forEach((b) =>
+        b.addEventListener('click', async () => {
+          const mode = b.dataset.mode;
+          if (mode === 'replace' && all.length && !confirm(`Delete all ${all.length} papers here and replace them with the backup?`)) return;
+          $$('[data-mode]', box).forEach((x) => (x.disabled = true));
+          const st = $('#rs-status');
+          st.textContent = 'Restoring…';
+          try {
+            const res = await Backup.restore(file, mode, (n, t) => (st.textContent = `Restoring files ${n}/${t}…`));
+            toast(`Restored ${res.papers} papers, ${res.files} files`);
+            location.hash = '#/library';
+          } catch (err) {
+            st.textContent = '✗ Restore failed: ' + err.message;
+            $$('[data-mode]', box).forEach((x) => (x.disabled = false));
+          }
+        })
+      );
+    });
   }
 
   async function viewCollections() {

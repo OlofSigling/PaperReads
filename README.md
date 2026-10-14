@@ -35,8 +35,16 @@ A service worker and share target need HTTPS, so host the files anywhere static.
 
 After it's installed, **PaperReads** appears in the Android share sheet.
 
-> Your data lives in the app's browser storage on the phone. It is **not** backed up.
-> Clearing Chrome's site data for the app, or uninstalling it, deletes your library.
+> Your data lives in the app's browser storage on the phone, not in the cloud. Clearing Chrome's site
+> data for the app, or uninstalling it, deletes your library. Use **💾 Backup** (top right) regularly.
+
+### Backup and restore
+
+💾 makes one `.zip`: `data.json` holds every record, and `files/` holds the PDFs, EPUBs and covers
+(or choose *data only* for a small file). Save it to Google Drive, email it, or copy it to a computer.
+Restoring shows what's in the backup first, then either **merges** it (adds what's missing; for papers
+in both, the more recently edited copy wins) or **replaces** the library. The home screen reminds you
+when you've never backed up (5+ papers) or the last backup is over 30 days old.
 
 ### What the EPUB port doesn't do
 
@@ -62,6 +70,7 @@ After changing any file, bump `CACHE` in `sw.js` so installed copies pick up the
 | `js/app.js` | Views, routing, all UI logic |
 | `js/db.js` | IndexedDB wrapper (shared with the service worker) |
 | `js/lookup.js` | DOI / arXiv / title lookup, PDF download, page counting |
+| `js/backup.js` | Backup .zip export, inspect, merge/replace restore |
 | `js/epubify.js` | Browser port of epubify.py: covers, PDF → HTML, HTML clean-up, EPUB packaging |
 | `vendor/` | pdf.js 5.4.296, epub.js 0.3.93, JSZip 3.10.1 (bundled so everything works offline) |
 | `sw.js` | Offline cache and share-target handler |

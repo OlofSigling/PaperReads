@@ -70,6 +70,7 @@
     byIndex: (store, index, value) => tx(store, 'readonly', (s) => wrap(s.index(index).getAll(value))),
     put: (store, value) => tx(store, 'readwrite', (s) => wrap(s.put(value))),
     del: (store, key) => tx(store, 'readwrite', (s) => wrap(s.delete(key))),
+    clear: (store) => tx(store, 'readwrite', (s) => wrap(s.clear())),
     putMany: (store, values) => tx(store, 'readwrite', (s) => Promise.all(values.map((v) => wrap(s.put(v))))),
     async delWhere(store, index, value) {
       const rows = await DB.byIndex(store, index, value);

@@ -1614,5 +1614,5 @@ ${manifest.join('\n')}
     return out;
   }
 
-  return { make, sources, makeCover, epubjs, pdfToHtml };
+  return { make, sources, makeCover, epubjs, jszip, pdfToHtml };
 })();

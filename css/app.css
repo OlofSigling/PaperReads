@@ -81,6 +81,12 @@ a { color: var(--accent); }
 }
 .top h1 { font-size: 1.25rem; }
 .top-link { text-decoration: none; font-size: 1.3rem; padding: 4px 8px; }
+.top-links { display: flex; gap: 4px; }
+.nudge { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; border-color: #c98500; }
+.nudge p { margin: 0; font-size: .9rem; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 0; font-size: .9rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
 .offline { background: #6b4e00; color: #fff; font-size: .85rem; padding: 6px 16px; }
 
 main { max-width: 720px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 18px; outline: none; }
