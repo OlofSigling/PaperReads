@@ -69,6 +69,7 @@
           <span class="badge s-${p.status}">${STATUS[p.status]}</span>
           ${p.rating ? stars(p.rating) : ''}
           ${p.hasPdf ? '<span class="badge">PDF</span>' : ''}
+          ${p.hasEpub ? '<span class="badge">EPUB</span>' : ''}
           ${(p.tags || []).slice(0, 3).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}
         </span>
       </a>${extra}
@@ -133,6 +134,7 @@
   async function deletePaper(id) {
     await DB.del('papers', id);
     await DB.del('pdfs', id);
+    await DB.del('epubs', id);
     await DB.delWhere('progress', 'paperId', id);
     await DB.delWhere('highlights', 'paperId', id);
     await DB.delWhere('links', 'fromId', id);
@@ -152,6 +154,48 @@
     return p;
   }
 
+  async function attachEpub(id, file, { cover = null, source = 'Imported' } = {}) {
+    await DB.put('epubs', { paperId: id, blob: file, name: file.name || 'paper.epub', size: file.size, cover, source, addedAt: now() });
+    const p = await DB.get('papers', id);
+    p.hasEpub = true;
+    p.format = 'epub';
+    p.epubCfi = null; // a new file invalidates the old reading position
+    await savePaper(p);
+    return p;
+  }
+
+  const isEpub = (f) => f && (f.type === 'application/epub+zip' || /\.epub$/i.test(f.name || ''));
+
+  // Make an EPUB in the background and store it (used after adding a paper).
+  async function makeEpubFor(id, source = 'auto') {
+    const p = await DB.get('papers', id);
+    const pdf = await DB.get('pdfs', id);
+    const res = await Epubify.make(p, { source, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null });
+    await attachEpub(id, res.file, { cover: res.cover, source: res.source });
+    return res;
+  }
+
+  function downloadFile(file) {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  // Share sheet when the browser can share this file type, else save it.
+  async function shareOrSave(file, title) {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title });
+      } catch {}
+    } else {
+      downloadFile(file);
+      toast('Saved to Downloads. Open it from there with any reader app');
+    }
+  }
+
   async function allTags() {
     const counts = {};
     for (const p of await papers()) for (const t of p.tags || []) counts[t] = (counts[t] || 0) + 1;
@@ -168,9 +212,25 @@
     [/^#\/add$/, (q) => viewEdit(null, q)],
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
+    [/^#\/read\/(.+)$/, (q, id) => viewReader(id)],
   ];
 
-  async function route() {
+  // Views that hold resources (the EPUB reader) register a cleanup here.
+  let teardown = null;
+
+  // Renders run one at a time so a slow view can't paint over a newer one.
+  let routing = Promise.resolve();
+  function route() {
+    routing = routing.then(renderRoute, renderRoute);
+    return routing;
+  }
+
+  async function renderRoute() {
+    if (teardown) {
+      const t = teardown;
+      teardown = null;
+      await t();
+    }
     const [path, qs] = location.hash.split('?');
     const q = parseQuery(qs);
     for (const [re, fn] of routes) {
@@ -223,7 +283,7 @@
       </section>
       <section>
         <h2 class="section-h">Currently reading</h2>
-        ${reading.length ? `<ul class="list">${reading.map((p) => paperRow(p, `<button class="btn small" data-quick="${p.id}">Update</button>`)).join('')}</ul>` : '<p class="empty">Nothing in progress. Pick something from your queue.</p>'}
+        ${reading.length ? `<ul class="list">${reading.map((p) => paperRow(p, `<span class="q-actions col">${p.hasEpub ? `<a class="btn small primary" href="#/read/${p.id}">Read</a>` : ''}<button class="btn small" data-quick="${p.id}">Update</button></span>`)).join('')}</ul>` : '<p class="empty">Nothing in progress. Pick something from your queue.</p>'}
       </section>
       <section>
         <div class="row between"><h2 class="section-h">Next up</h2><a href="#/queue" class="link">Queue →</a></div>
@@ -411,12 +471,13 @@
       return;
     }
     setTitle('Paper');
-    const [cols, highlights, linksFrom, linksTo, pdf, log, all, tagCounts] = await Promise.all([
+    const [cols, highlights, linksFrom, linksTo, pdf, epub, log, all, tagCounts] = await Promise.all([
       DB.all('collections'),
       DB.byIndex('highlights', 'paperId', id),
       DB.byIndex('links', 'fromId', id),
       DB.byIndex('links', 'toId', id),
       DB.get('pdfs', id),
+      DB.get('epubs', id),
       DB.byIndex('progress', 'paperId', id),
       papers(),
       allTags(),
@@ -427,6 +488,8 @@
       ...linksTo.map((l) => ({ l, other: byId[l.fromId], label: LINK_INVERSE[l.type] })),
     ].filter((r) => r.other);
     const isPct = !p.totalPages;
+    const format = p.format || (epub && !pdf ? 'epub' : 'pdf');
+    const epubSources = Epubify.sources(p, !!pdf);
 
     main.innerHTML = `
       <article class="paper">
@@ -464,14 +527,36 @@
           ${stars(p.rating, true)}
         </section>
 
-        <section class="card">
-          <h3>PDF</h3>
-          ${pdf ? `<p class="muted small">${esc(pdf.name)} · ${(pdf.size / 1048576).toFixed(1)} MB, stored on this phone</p>
-            <div class="row wrap"><button class="btn primary" id="pdf-open">Open</button><button class="btn" id="pdf-share">Open with…</button><button class="btn danger-ghost" id="pdf-del">Remove</button></div>`
-          : `<div class="row wrap">
-              <label class="btn">Attach PDF<input type="file" accept="application/pdf" id="pdf-file" hidden></label>
-              ${p.arxiv ? '<button class="btn" id="pdf-arxiv">Download from arXiv</button>' : ''}
-            </div>`}
+        <section class="card files">
+          <div class="row between">
+            <h3>Read</h3>
+            <div class="seg seg-2" role="group" aria-label="Format">
+              <button type="button" data-format="pdf" class="${format === 'pdf' ? 'on' : ''}">PDF${pdf ? ' ✓' : ''}</button>
+              <button type="button" data-format="epub" class="${format === 'epub' ? 'on' : ''}">EPUB${epub ? ' ✓' : ''}</button>
+            </div>
+          </div>
+          ${format === 'pdf'
+            ? pdf
+              ? `<p class="muted small">${esc(pdf.name)} · ${(pdf.size / 1048576).toFixed(1)} MB, stored on this phone</p>
+                <div class="row wrap"><button class="btn primary" id="pdf-open">Open PDF</button><button class="btn" id="pdf-share">Open with…</button><button class="btn danger-ghost" id="pdf-del">Remove</button></div>`
+              : `<p class="muted small">No PDF stored.</p><div class="row wrap">
+                  <label class="btn">Attach PDF<input type="file" accept="application/pdf" id="pdf-file" hidden></label>
+                  ${p.arxiv ? '<button class="btn" id="pdf-arxiv">Download from arXiv</button>' : ''}
+                </div>`
+            : epub
+              ? `<div class="epub-info">${epub.cover ? '<img class="cover-thumb" id="cover-thumb" alt="">' : ''}<div>
+                  <p class="muted small">${esc(epub.name)} · ${Math.max(1, Math.round(epub.size / 1024))} KB · from ${esc(epub.source)}</p>
+                  <div class="row wrap"><a class="btn primary" href="#/read/${p.id}">Read EPUB</a><button class="btn" id="epub-share">Open with…</button></div>
+                  <div class="row wrap"><button class="btn small" id="epub-remake">Remake</button><button class="btn small danger-ghost" id="epub-del">Remove</button></div>
+                </div></div>`
+              : ''}
+          ${format === 'epub' ? `<form id="epub-make" class="stack"${epub ? ' hidden' : ''}>
+              ${epubSources.length ? `<label>Make an EPUB from
+                <select name="source">${epubSources.map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
+                <button class="btn primary">Make EPUB</button>` : '<p class="muted small">Add an arXiv ID or DOI, or attach the PDF, to make an EPUB.</p>'}
+              <label class="btn">Import .epub<input type="file" accept=".epub,application/epub+zip" id="epub-file" hidden></label>
+            </form>
+            <pre class="conv-log" id="conv-log" hidden></pre>` : ''}
         </section>
 
         <section class="card">
@@ -575,6 +660,71 @@
       })
     );
 
+    // Files: PDF / EPUB
+    $$('[data-format]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        p.format = b.dataset.format;
+        await savePaper(p);
+        rerender();
+      })
+    );
+    if (epub) {
+      const thumb = $('#cover-thumb');
+      if (thumb && epub.cover) {
+        thumb.src = URL.createObjectURL(epub.cover);
+        thumb.onload = () => URL.revokeObjectURL(thumb.src);
+      }
+      $('#epub-share').addEventListener('click', () => shareOrSave(new File([epub.blob], epub.name, { type: 'application/epub+zip' }), p.title));
+      $('#epub-remake').addEventListener('click', () => {
+        $('#epub-make').hidden = false;
+        $('#epub-remake').hidden = true;
+      });
+      $('#epub-del').addEventListener('click', async () => {
+        if (!confirm('Remove the stored EPUB?')) return;
+        await DB.del('epubs', id);
+        p.hasEpub = false;
+        p.epubCfi = null;
+        await savePaper(p);
+        rerender();
+      });
+    }
+    const epubFile = $('#epub-file');
+    if (epubFile)
+      epubFile.addEventListener('change', async () => {
+        const f = epubFile.files[0];
+        if (!f) return;
+        if (!isEpub(f)) return toast('That is not an .epub file');
+        await attachEpub(id, f, { source: 'Imported' });
+        toast('EPUB saved on this phone');
+        rerender();
+      });
+    const makeForm = $('#epub-make');
+    if (makeForm && makeForm.source)
+      makeForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = $('button', makeForm);
+        const out = $('#conv-log');
+        btn.disabled = true;
+        btn.textContent = 'Converting…';
+        out.hidden = false;
+        out.textContent = '';
+        const log = (m) => {
+          out.textContent += m + '\n';
+          out.scrollTop = out.scrollHeight;
+        };
+        try {
+          const res = await Epubify.make(p, { source: makeForm.source.value, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null, log });
+          await attachEpub(id, res.file, { cover: res.cover, source: res.source });
+          if (res.warnings.length) alert(res.warnings.join('\n\n'));
+          toast('EPUB ready');
+          if (location.hash === `#/paper/${id}`) rerender();
+        } catch (err) {
+          log('✗ ' + (navigator.onLine || makeForm.source.value === 'pdf' ? err.message : 'You are offline. Only the PDF route works offline.'));
+          btn.disabled = false;
+          btn.textContent = 'Make EPUB';
+        }
+      });
+
     // PDF
     const pdfFile = $('#pdf-file');
     if (pdfFile)
@@ -597,7 +747,7 @@
         }
         rerender();
       });
-    if (pdf) {
+    if (pdf && format === 'pdf') {
       const file = new File([pdf.blob], pdf.name, { type: 'application/pdf' });
       $('#pdf-open').addEventListener('click', () => {
         const url = URL.createObjectURL(file);
@@ -722,7 +872,7 @@
             <input name="q" placeholder="e.g. 10.1038/nature14539 or arxiv.org/abs/1706.03762" value="${esc(shared || '')}" autocomplete="off">
           </label>
           <button class="btn primary">Look up</button>
-          <p class="muted small" id="lookup-status">${inbox && inbox.file ? `Shared PDF: ${esc(inbox.file.name)}. It will be attached when you save.` : 'Fills in the details automatically (needs internet).'}</p>
+          <p class="muted small" id="lookup-status">${inbox && inbox.file ? `Shared ${isEpub(inbox.file) ? 'EPUB' : 'PDF'}: ${esc(inbox.file.name)}. It will be attached when you save.` : 'Fills in the details automatically (needs internet).'}</p>
           <ul class="list compact" id="results"></ul>
         </form>
       </section>`}
@@ -742,7 +892,8 @@
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
-        ${!(inbox && inbox.file) ? `<label class="check"><input type="checkbox" name="getpdf" checked> Save arXiv PDF for offline reading</label>` : ''}`}
+        ${!(inbox && inbox.file) ? `<label class="check"><input type="checkbox" name="getpdf" checked> Save arXiv PDF for offline reading</label>` : ''}
+        ${!(inbox && inbox.file && isEpub(inbox.file)) ? `<label class="check"><input type="checkbox" name="getepub" checked> Make an EPUB for reading in the app</label>` : ''}`}
         <div class="row end"><a class="btn" href="${existing ? `#/paper/${p.id}` : '#/'}">Cancel</a><button class="btn primary">${existing ? 'Save' : 'Add paper'}</button></div>
       </form>`;
 
@@ -858,11 +1009,13 @@
       await savePaper(p);
       await setStatus(p, f.status.value);
       if (inbox) await DB.del('inbox', inbox.id);
+      let pdfJob = Promise.resolve();
       if (inbox && inbox.file) {
-        await attachPdf(p.id, inbox.file);
+        if (isEpub(inbox.file)) await attachEpub(p.id, inbox.file, { source: 'Shared file' });
+        else await attachPdf(p.id, inbox.file);
       } else if (p.arxiv && f.getpdf && f.getpdf.checked && navigator.onLine) {
         // Fire and forget so saving feels instant.
-        Lookup.fetchArxivPdf(p.arxiv)
+        pdfJob = Lookup.fetchArxivPdf(p.arxiv)
           .then((file) => attachPdf(p.id, file))
           .then(() => {
             toast('arXiv PDF saved offline');
@@ -870,9 +1023,171 @@
           })
           .catch(() => toast('Could not download the PDF'));
       }
+      const wantsEpub = f.getepub && f.getepub.checked;
+      if (wantsEpub && (p.arxiv || p.doi || (inbox && inbox.file)) && (navigator.onLine || (inbox && inbox.file))) {
+        // After the PDF lands, so the PDF route is available as a fallback.
+        pdfJob
+          .then(() => makeEpubFor(p.id))
+          .then(() => {
+            toast('EPUB ready to read');
+            if (location.hash === `#/paper/${p.id}`) route();
+          })
+          .catch(() => toast('No EPUB made. Try “Make EPUB” on the paper page'));
+      }
       toast('Added to your library');
       location.hash = `#/paper/${p.id}`;
     });
+  }
+
+  // ---------- EPUB reader ----------
+  async function viewReader(id) {
+    const [p, rec] = await Promise.all([DB.get('papers', id), DB.get('epubs', id)]);
+    if (!p || !rec) {
+      location.hash = `#/paper/${id}`;
+      return;
+    }
+    setTitle(p.title);
+    document.body.classList.add('reading');
+    main.innerHTML = `<div class="reader">
+      <div class="r-bar">
+        <a href="#/paper/${p.id}" class="r-btn" aria-label="Back to paper">←</a>
+        <span class="r-title">${esc(p.title)}</span>
+        <button class="r-btn" id="r-smaller" aria-label="Smaller text">A−</button>
+        <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
+        <button class="r-btn" id="r-toc" aria-label="Contents">☰</button>
+      </div>
+      <div class="r-stage"><div id="r-view"></div>
+        <button class="r-zone left" id="r-prev" aria-label="Previous page"></button>
+        <button class="r-zone right" id="r-next" aria-label="Next page"></button>
+      </div>
+      <div class="r-foot"><input type="range" id="r-seek" min="0" max="1000" value="0" aria-label="Position in paper" disabled><span id="r-pct">…</span></div>
+      <nav class="r-toc" id="r-toc-panel" hidden></nav>
+    </div>`;
+
+    const ePub = await Epubify.epubjs();
+    const book = ePub(await rec.blob.arrayBuffer());
+    const rendition = book.renderTo('r-view', { width: '100%', height: '100%', flow: 'paginated', spread: 'none' });
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    rendition.themes.register('pr', {
+      body: { background: dark ? '#121211 !important' : '#fcfcfb !important', color: dark ? '#f0efec !important' : '#0b0b0b !important' },
+      a: { color: dark ? '#6aa7f0 !important' : '#2a78d6 !important' },
+      'img, svg': { 'max-width': '100% !important' },
+      'td, th': { 'border-color': '#8885 !important' },
+    });
+    rendition.themes.select('pr');
+    let fontSize = await DB.setting('readerFontSize', 100);
+    rendition.themes.fontSize(fontSize + '%');
+
+    const startPct = pct(p);
+    let lastPct = startPct;
+    let locationsReady = false;
+    let saveTimer = null;
+
+    const commit = async () => {
+      // Progress only moves forward on its own; flipping back to check a
+      // figure shouldn't undo it. Set it lower by hand on the paper page.
+      const fresh = await DB.get('papers', id);
+      if (!fresh) return;
+      if (lastPct > pct(fresh) + 0.001) {
+        const finished = fresh.totalPages ? await logProgress(fresh, Math.round(lastPct * fresh.totalPages), false) : await logProgress(fresh, Math.round(lastPct * 100), true);
+        if (finished) toast('🎉 Finished! Marked as read');
+      }
+    };
+
+    rendition.on('relocated', (loc) => {
+      let v = locationsReady ? book.locations.percentageFromCfi(loc.start.cfi) : loc.start.percentage || 0;
+      if (loc.atEnd) v = 1;
+      lastPct = v;
+      $('#r-pct').textContent = `${Math.round(v * 100)}%`;
+      if (locationsReady) $('#r-seek').value = Math.round(v * 1000);
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(async () => {
+        const fresh = await DB.get('papers', id);
+        if (!fresh) return;
+        fresh.epubCfi = loc.start.cfi;
+        if (fresh.status === 'want' || fresh.status === 'none') await setStatus(fresh, 'reading', true);
+        await savePaper(fresh);
+      }, 800);
+    });
+
+    const prev = () => rendition.prev();
+    const next = () => rendition.next();
+    $('#r-prev').addEventListener('click', prev);
+    $('#r-next').addEventListener('click', next);
+    const onKey = (e) => {
+      if (e.key === 'ArrowLeft') prev();
+      if (e.key === 'ArrowRight') next();
+    };
+    document.addEventListener('keydown', onKey);
+    rendition.on('keyup', onKey);
+    let touchX = null;
+    rendition.on('touchstart', (e) => (touchX = e.changedTouches[0].screenX));
+    rendition.on('touchend', (e) => {
+      if (touchX === null) return;
+      const dx = e.changedTouches[0].screenX - touchX;
+      touchX = null;
+      if (Math.abs(dx) > 50) (dx < 0 ? next : prev)();
+    });
+    const resize = async (delta) => {
+      fontSize = Math.max(70, Math.min(200, fontSize + delta));
+      rendition.themes.fontSize(fontSize + '%');
+      await DB.setSetting('readerFontSize', fontSize);
+    };
+    $('#r-smaller').addEventListener('click', () => resize(-10));
+    $('#r-bigger').addEventListener('click', () => resize(10));
+
+    const tocPanel = $('#r-toc-panel');
+    $('#r-toc').addEventListener('click', () => (tocPanel.hidden = !tocPanel.hidden));
+    book.loaded.navigation.then((nav) => {
+      const items = (list, depth) =>
+        list.map((t) => `<a href="#" data-href="${esc(t.href)}" style="padding-left:${12 + depth * 14}px">${esc(t.label.trim())}</a>${t.subitems && t.subitems.length ? items(t.subitems, depth + 1) : ''}`).join('');
+      tocPanel.innerHTML = items(nav.toc, 0) || '<p class="muted">No contents</p>';
+      $$('[data-href]', tocPanel).forEach((a) =>
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          tocPanel.hidden = true;
+          rendition.display(a.dataset.href);
+        })
+      );
+    });
+
+    const seek = $('#r-seek');
+    seek.addEventListener('change', () => rendition.display(book.locations.cfiFromPercentage(seek.value / 1000)));
+
+    const onHide = () => document.visibilityState === 'hidden' && commit();
+    document.addEventListener('visibilitychange', onHide);
+    teardown = async () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('visibilitychange', onHide);
+      document.body.classList.remove('reading');
+      clearTimeout(saveTimer);
+      await commit();
+      try {
+        book.destroy();
+      } catch {}
+    };
+
+    await rendition.display(p.epubCfi || undefined);
+    // Locations give a stable percentage across the whole book; generating
+    // them takes a moment, so the bar enables once they're ready.
+    const located = book.ready.then(() => book.locations.generate(1200));
+    located
+      .then(() => {
+        locationsReady = true;
+        seek.disabled = false;
+        const loc = rendition.currentLocation();
+        if (loc && loc.start) {
+          lastPct = loc.atEnd ? 1 : book.locations.percentageFromCfi(loc.start.cfi);
+          $('#r-pct').textContent = `${Math.round(lastPct * 100)}%`;
+          seek.value = Math.round(lastPct * 1000);
+        }
+      })
+      .catch(() => {});
+    if (!p.epubCfi && startPct > 0 && startPct < 1) {
+      // Opened for the first time but already part-read (e.g. in the PDF):
+      // jump to the same point once locations are known.
+      located.then(() => rendition.display(book.locations.cfiFromPercentage(startPct))).catch(() => {});
+    }
   }
 
   async function viewCollections() {

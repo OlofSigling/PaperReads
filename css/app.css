@@ -52,6 +52,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--bg);
@@ -237,3 +238,33 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   opacity: 0; pointer-events: none; transition: .2s; z-index: 20; max-width: calc(100vw - 32px);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+.seg.seg-2 { grid-template-columns: repeat(2, 1fr); min-width: 150px; }
+.q-actions.col { flex-direction: column; align-items: stretch; }
+.epub-info { display: flex; gap: 12px; align-items: flex-start; }
+.epub-info > div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.epub-info p { margin: 0; overflow-wrap: anywhere; }
+.cover-thumb { width: 72px; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.25); flex: none; }
+.conv-log {
+  background: var(--surface-2); color: var(--text-2); font-size: .75rem; padding: 8px 10px; border-radius: 8px;
+  max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0;
+}
+
+/* EPUB reader: full screen, app chrome hidden */
+body.reading { padding-bottom: 0; }
+body.reading .top, body.reading .nav, body.reading .offline { display: none; }
+body.reading main { padding: 0; max-width: none; }
+.reader { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--surface); z-index: 30; }
+.r-bar { display: flex; align-items: center; gap: 2px; padding: calc(env(safe-area-inset-top) + 4px) 4px 4px; border-bottom: 1px solid var(--border); }
+.r-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .9rem; color: var(--text-2); padding: 0 6px; }
+.r-btn { font: inherit; background: none; border: none; color: var(--text); padding: 8px 10px; min-width: 40px; min-height: 40px; text-decoration: none; text-align: center; cursor: pointer; }
+.r-stage { position: relative; flex: 1; min-height: 0; }
+#r-view { position: absolute; inset: 0; }
+.r-zone { position: absolute; top: 0; bottom: 0; width: 18%; background: transparent; border: none; z-index: 2; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.r-zone.left { left: 0; }
+.r-zone.right { right: 0; }
+.r-foot { display: flex; align-items: center; gap: 10px; padding: 6px 14px calc(env(safe-area-inset-bottom) + 8px); border-top: 1px solid var(--border); }
+.r-foot input { flex: 1; }
+.r-foot span { font-size: .8rem; color: var(--muted); min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+.r-toc { position: absolute; top: 49px; right: 0; bottom: 0; width: min(85vw, 340px); background: var(--surface); border-left: 1px solid var(--border); overflow: auto; z-index: 5; box-shadow: -4px 0 16px rgba(0,0,0,.15); padding: 8px 0; }
+.r-toc a { display: block; padding: 8px 12px; color: var(--text); text-decoration: none; font-size: .9rem; border-bottom: 1px solid var(--border); }

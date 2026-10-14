@@ -1,7 +1,7 @@
 // Service worker: caches the app shell for offline use and receives shares.
 importScripts('js/db.js');
 
-const CACHE = 'paperreads-v1';
+const CACHE = 'paperreads-v2';
 const SHELL = [
   './',
   'index.html',
@@ -9,6 +9,11 @@ const SHELL = [
   'js/db.js',
   'js/lookup.js',
   'js/app.js',
+  'js/epubify.js',
+  'vendor/pdf.min.mjs',
+  'vendor/pdf.worker.min.mjs',
+  'vendor/jszip.min.js',
+  'vendor/epub.min.js',
   'manifest.webmanifest',
   'icons/icon.svg',
   'icons/icon-192.png',
@@ -29,10 +34,11 @@ self.addEventListener('activate', (e) => {
 });
 
 // Android share sheet → POST multipart to ./share (see manifest share_target).
+// A shared file may be a PDF or an EPUB; the Add screen sorts out which.
 // Stash what was shared in IndexedDB, then hand off to the Add screen.
 async function handleShare(request) {
   const form = await request.formData();
-  const file = form.get('pdf');
+  const file = form.get('file');
   const id = await DB.put('inbox', {
     title: form.get('title') || '',
     text: form.get('text') || '',

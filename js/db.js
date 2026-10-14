@@ -2,7 +2,7 @@
 // service worker (importScripts) and the page share the same schema.
 (function (global) {
   const DB_NAME = 'paperreads';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
 
   const STORES = {
     papers: { keyPath: 'id', indexes: ['status', 'updatedAt'] },
@@ -11,6 +11,7 @@
     links: { keyPath: 'id', autoIncrement: true, indexes: ['fromId', 'toId'] },
     collections: { keyPath: 'id' },
     pdfs: { keyPath: 'paperId' },
+    epubs: { keyPath: 'paperId' },
     settings: { keyPath: 'key' },
     inbox: { keyPath: 'id', autoIncrement: true },
   };
@@ -29,7 +30,15 @@
           for (const idx of def.indexes || []) store.createIndex(idx, idx);
         }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Let a newer version (e.g. after an app update) upgrade the schema.
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
     });
     return dbPromise;

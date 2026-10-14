@@ -21,7 +21,7 @@
       "title": "title",
       "text": "text",
       "url": "url",
-      "files": [{ "name": "pdf", "accept": ["application/pdf", ".pdf"] }]
+      "files": [{ "name": "file", "accept": ["application/pdf", ".pdf", "application/epub+zip", ".epub"] }]
     }
   }
 }
