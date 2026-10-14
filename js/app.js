@@ -510,31 +510,6 @@
           ${p.url && !p.arxiv ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">Link</a>` : ''}
         </p>
 
-        <div class="seg" role="group" aria-label="Status">
-          ${['want', 'reading', 'read', 'none'].map((s) => `<button type="button" data-status="${s}" class="${p.status === s ? 'on' : ''}">${STATUS[s]}</button>`).join('')}
-        </div>
-
-        <section class="card">
-          <div class="row between"><h3>Progress</h3><span class="muted">${progressLabel(p)} · ${Math.round(pct(p) * 100)}%</span></div>
-          ${progressBar(p)}
-          <form id="prog" class="row prog-form">
-            <label>${isPct ? 'Percent' : 'Page'} <input type="number" name="v" inputmode="numeric" min="0" max="${isPct ? 100 : p.totalPages}" value="${isPct ? Math.round(p.percent || 0) : p.currentPage || 0}"></label>
-            <label>of <input type="number" name="total" inputmode="numeric" min="1" placeholder="pages" value="${p.totalPages || ''}"></label>
-            <button class="btn primary">Save</button>
-          </form>
-          <p class="muted small">${p.startedAt ? `Started ${fmtDate(p.startedAt)}` : ''}${p.finishedAt ? ` · Finished ${fmtDate(p.finishedAt)}` : ''} · Added ${fmtDate(p.addedAt)}</p>
-          ${log.length ? `<details><summary>Reading log (${log.length})</summary><ul class="log">${log
-            .sort((a, b) => b.ts - a.ts)
-            .map((e) => `<li>${e.date}: ${p.totalPages ? `page ${e.page}${e.delta ? ` (${e.delta > 0 ? '+' : ''}${e.delta})` : ''}` : `${Math.round(e.percent)}%`}</li>`)
-            .join('')}</ul></details>` : ''}
-          ${p.status === 'read' ? `<label class="small">Finished on <input type="date" id="finished" value="${p.finishedAt ? localDate(new Date(p.finishedAt)) : ''}"></label>` : ''}
-        </section>
-
-        <section class="card">
-          <h3>Rating</h3>
-          ${stars(p.rating, true)}
-        </section>
-
         <section class="card files">
           <div class="row between">
             <h3>Read</h3>
@@ -567,6 +542,31 @@
               <label class="btn">Import .epub<input type="file" accept=".epub,application/epub+zip" id="epub-file" hidden></label>
             </form>
             <pre class="conv-log" id="conv-log" hidden></pre>` : ''}
+        </section>
+
+        <div class="seg" role="group" aria-label="Status">
+          ${['want', 'reading', 'read', 'none'].map((s) => `<button type="button" data-status="${s}" class="${p.status === s ? 'on' : ''}">${STATUS[s]}</button>`).join('')}
+        </div>
+
+        <section class="card">
+          <div class="row between"><h3>Progress</h3><span class="muted">${progressLabel(p)} · ${Math.round(pct(p) * 100)}%</span></div>
+          ${progressBar(p)}
+          <form id="prog" class="row prog-form">
+            <label>${isPct ? 'Percent' : 'Page'} <input type="number" name="v" inputmode="numeric" min="0" max="${isPct ? 100 : p.totalPages}" value="${isPct ? Math.round(p.percent || 0) : p.currentPage || 0}"></label>
+            <label>of <input type="number" name="total" inputmode="numeric" min="1" placeholder="pages" value="${p.totalPages || ''}"></label>
+            <button class="btn primary">Save</button>
+          </form>
+          <p class="muted small">${p.startedAt ? `Started ${fmtDate(p.startedAt)}` : ''}${p.finishedAt ? ` · Finished ${fmtDate(p.finishedAt)}` : ''} · Added ${fmtDate(p.addedAt)}</p>
+          ${log.length ? `<details><summary>Reading log (${log.length})</summary><ul class="log">${log
+            .sort((a, b) => b.ts - a.ts)
+            .map((e) => `<li>${e.date}: ${p.totalPages ? `page ${e.page}${e.delta ? ` (${e.delta > 0 ? '+' : ''}${e.delta})` : ''}` : `${Math.round(e.percent)}%`}</li>`)
+            .join('')}</ul></details>` : ''}
+          ${p.status === 'read' ? `<label class="small">Finished on <input type="date" id="finished" value="${p.finishedAt ? localDate(new Date(p.finishedAt)) : ''}"></label>` : ''}
+        </section>
+
+        <section class="card">
+          <h3>Rating</h3>
+          ${stars(p.rating, true)}
         </section>
 
         <section class="card">
