@@ -13,6 +13,44 @@ const Lookup = (() => {
       .replace(/\.pdf$/i, '');
   }
 
+  // Publisher pages that hide the DOI behind bot checks often still encode
+  // it in the address. These DOIs are inferred, so callers treat them as a
+  // guess and fall back to a title search if they don't resolve.
+  function doiFromUrl(url) {
+    let m;
+    if ((m = /bmj\.com\/content\/[^?#]*?\b(bmj\.[a-z]?\d+)/i.exec(url))) return `10.1136/${m[1].toLowerCase()}`;
+    if ((m = /nature\.com\/articles\/([a-z0-9.-]+)/i.exec(url))) return `10.1038/${m[1].replace(/\.pdf$/i, '')}`;
+    // Elsevier PII in the formatted style used by The Lancet and Cell Press
+    if ((m = /\/(?:PII)?(S\d{4}-\d{3}[\dX]\(\d{2}\)\d{5}-[\dX])/i.exec(url))) return `10.1016/${m[1].toUpperCase()}`;
+    return null;
+  }
+
+  // PubMed / PMC links → DOI via Europe PMC (NCBI's own converter has no CORS).
+  async function doiFromPubmed(url) {
+    let q = null;
+    let m;
+    if ((m = /(?:pubmed\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov\/pubmed)\/(\d+)/i.exec(url))) q = `EXT_ID:${m[1]} AND SRC:MED`;
+    else if ((m = /\b(PMC\d+)\b/i.exec(url))) q = `PMCID:${m[1].toUpperCase()}`;
+    if (!q) return null;
+    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(q)}&format=json&resultType=lite`);
+    if (!res.ok) return null;
+    const hit = ((await res.json()).resultList || {}).result || [];
+    return hit[0] && hit[0].doi ? hit[0].doi : null;
+  }
+
+  // Page titles from the share sheet carry the site name ("… | The BMJ").
+  const SITE_WORDS = /journal|nature|science|bmj|pubmed|pmc|ncbi|springer|wiley|sciencedirect|lancet|jama|plos|frontiers|arxiv|biorxiv|medrxiv|oxford|cambridge|taylor|sage|acs|ieee|acm|cell|pnas|nejm|elsevier|mdpi|researchgate|semantic scholar/i;
+  function cleanTitle(t) {
+    let s = (t || '').replace(/\s+/g, ' ').trim();
+    for (let i = 0; i < 2; i++) {
+      const pipe = /^(.{8,}?)\s+\|\s+[^|]{1,60}$/.exec(s);
+      const dash = /^(.{8,}?)\s+[-–—]\s+([^-–—]{1,60})$/.exec(s);
+      if (pipe) s = pipe[1];
+      else if (dash && SITE_WORDS.test(dash[2])) s = dash[1];
+    }
+    return s.replace(/\s*\[(PDF|HTML)\]\s*$/i, '').trim();
+  }
+
   // Pull a DOI / arXiv id / URL out of free text (what the share sheet sends).
   function parse(input) {
     const text = (input || '').trim();
@@ -36,6 +74,10 @@ const Lookup = (() => {
       if (ax) out.arxiv = ax[1];
     }
     if (out.arxiv && !out.doi) out.doi = `10.48550/arXiv.${out.arxiv}`;
+    if (!out.doi && out.url) {
+      out.doi = doiFromUrl(out.url);
+      out.inferred = !!out.doi;
+    }
     return out;
   }
 
@@ -81,7 +123,8 @@ const Lookup = (() => {
   }
 
   async function search(query) {
-    const url = `https://api.crossref.org/works?rows=20&select=DOI,title,author,issued,container-title,publisher,is-referenced-by-count&query.bibliographic=${encodeURIComponent(query)}`;
+    query = cleanTitle(query);
+    const url = `https://api.crossref.org/works?rows=20&select=DOI,title,author,issued,container-title,publisher,is-referenced-by-count,update-to&query.bibliographic=${encodeURIComponent(query)}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Search failed (${res.status})`);
     const json = await res.json();
@@ -95,18 +138,37 @@ const Lookup = (() => {
       for (const x of w) if (q.has(x)) both++;
       return both / (q.size + w.size - both || 1);
     };
-    return json.message.items
+    const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const results = json.message.items
       .filter((it) => it.title && it.title.length)
-      .map((it) => ({ ...fromCsl(it), doi: it.DOI, score: Math.round(sim(it.title[0]) * 10), cites: it['is-referenced-by-count'] || 0 }))
-      .sort((a, b) => b.score - a.score || b.cites - a.cites)
+      .map((it) => ({
+        ...fromCsl(it),
+        doi: it.DOI,
+        score: Math.round(sim(it.title[0]) * 10),
+        cites: it['is-referenced-by-count'] || 0,
+        // corrections/errata often repeat the original title word for word
+        notice: !!(it['update-to'] && it['update-to'].length) || /^(correction|erratum|corrigendum|retraction|expression of concern)\b/i.test(it.title[0]),
+        exact: norm(it.title[0]) === norm(query),
+      }))
+      .sort((a, b) => b.score - a.score || a.notice - b.notice || b.cites - a.cites)
       .slice(0, 8);
+    // Confident when the best hit is an exact title match and not a notice.
+    if (results[0] && results[0].exact && !results[0].notice) results[0].confident = true;
+    return results;
   }
 
   // Resolve whatever the user pasted/shared into metadata.
   async function resolve(input) {
     const ids = parse(input);
+    if (!ids.doi && ids.url) ids.doi = await doiFromPubmed(ids.url).catch(() => null);
     if (ids.doi) {
-      const meta = await byDoi(ids.doi);
+      let meta;
+      try {
+        meta = await byDoi(ids.doi);
+      } catch (err) {
+        if (!ids.inferred) throw err;
+        return { meta: null, ids: { ...ids, doi: null } }; // guessed DOI was wrong: let the caller search by title
+      }
       if (ids.arxiv) {
         meta.arxiv = ids.arxiv;
         meta.url = `https://arxiv.org/abs/${ids.arxiv}`;
@@ -140,5 +202,5 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, resolve, search, byDoi, fetchArxivPdf, countPdfPages };
+  return { parse, resolve, search, byDoi, cleanTitle, fetchArxivPdf, countPdfPages };
 })();

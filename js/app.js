@@ -948,29 +948,43 @@
           }
           if (ids.url) form.url.value = ids.url;
           // No identifier: search Crossref by title (use shared page title if we have it).
-          const q2 = ids.url ? sharedTitle || input.replace(ids.url, '').trim() : input;
+          const q2 = Lookup.cleanTitle(ids.url ? sharedTitle || input.replace(ids.url, '') : input);
           if (!q2) {
             status.textContent = 'No DOI or arXiv ID in that link. Paste the title to search, or fill in by hand.';
             return;
           }
           const results = await Lookup.search(q2);
-          status.textContent = results.length ? 'Pick the matching paper:' : 'Nothing found. Fill in by hand.';
-          $('#results').innerHTML = results
-            .map((r, i) => `<li class="paper-row"><button type="button" class="paper-link plain" data-i="${i}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${esc(authorsShort(r.authors))}${r.year ? ` · ${r.year}` : ''}${r.venue ? ` · ${esc(r.venue)}` : ''}</span></button></li>`)
-            .join('');
-          $$('#results [data-i]').forEach((b) =>
-            b.addEventListener('click', async () => {
-              const r = results[b.dataset.i];
-              $('#results').innerHTML = '';
-              status.textContent = 'Fetching details…';
-              try {
-                fill({ ...(await Lookup.byDoi(r.doi)), url: form.url.value || null });
-              } catch {
-                fill(r);
-              }
-              status.textContent = 'Check the details and save.';
-            })
-          );
+          const pick = async (r) => {
+            status.textContent = 'Fetching details…';
+            try {
+              fill({ ...(await Lookup.byDoi(r.doi)), url: form.url.value || null });
+            } catch {
+              fill(r);
+            }
+          };
+          const showList = (list) => {
+            $('#results').innerHTML = list
+              .map((r, i) => `<li class="paper-row"><button type="button" class="paper-link plain" data-i="${i}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${esc(authorsShort(r.authors))}${r.year ? ` · ${r.year}` : ''}${r.venue ? ` · ${esc(r.venue)}` : ''}${r.notice ? ' · correction notice' : ''}</span></button></li>`)
+              .join('');
+            $$('#results [data-i]').forEach((btn) =>
+              btn.addEventListener('click', async () => {
+                $('#results').innerHTML = '';
+                await pick(list[btn.dataset.i]);
+                status.textContent = 'Check the details and save.';
+              })
+            );
+          };
+          if (!results.length) {
+            status.textContent = 'Nothing found. Fill in by hand.';
+          } else if (results[0].confident) {
+            // An exact title match: fill it in, but keep the alternatives a tap away.
+            await pick(results[0]);
+            status.textContent = results.length > 1 ? 'Matched by title. Not the right paper? Pick another:' : 'Matched by title. Check the details and save.';
+            showList(results.slice(1));
+          } else {
+            status.textContent = 'Pick the matching paper:';
+            showList(results);
+          }
         } catch (err) {
           status.textContent = `Lookup failed (${err.message}). Fill in by hand.`;
         }
