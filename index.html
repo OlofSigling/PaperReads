@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>PaperReads</title>
+  <meta name="description" content="Track the research papers you read, want to read, and are reading. Works offline.">
+  <meta name="theme-color" content="#2a78d6">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="top">
+    <h1 id="page-title">PaperReads</h1>
+    <span class="top-links"><a href="#/collections" class="top-link" aria-label="Collections and tags">📁</a><a href="#/backup" class="top-link" aria-label="Backup and restore">💾</a></span>
+  </header>
+  <div id="offline" class="offline" hidden>Offline: everything works except metadata lookup and PDF downloads.</div>
+  <main id="main" tabindex="-1"></main>
+  <nav class="nav" aria-label="Main">
+    <a href="#/"><span aria-hidden="true">⌂</span>Home</a>
+    <a href="#/library"><span aria-hidden="true">☰</span>Library</a>
+    <a href="#/add" class="add"><span aria-hidden="true">＋</span>Add</a>
+    <a href="#/queue"><span aria-hidden="true">⇅</span>Queue</a>
+    <a href="#/stats"><span aria-hidden="true">▤</span>Stats</a>
+  </nav>
+  <dialog id="dialog"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="js/db.js"></script>
+  <script src="js/lookup.js"></script>
+  <script src="js/epubify.js"></script>
+  <script src="js/backup.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
