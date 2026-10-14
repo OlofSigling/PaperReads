@@ -213,7 +213,7 @@
     [/^#\/add$/, (q) => viewEdit(null, q)],
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
-    [/^#\/read\/(.+)$/, (q, id) => viewReader(id)],
+    [/^#\/read\/(.+)$/, (q, id) => viewReader(id, q)],
   ];
 
   // Views that hold resources (the EPUB reader) register a cleanup here.
@@ -550,7 +550,9 @@
               : `<p class="muted small">No PDF stored.</p><div class="row wrap">
                   <label class="btn">Attach PDF<input type="file" accept="application/pdf" id="pdf-file" hidden></label>
                   ${p.arxiv ? '<button class="btn" id="pdf-arxiv">Download from arXiv</button>' : ''}
-                </div>`
+                  ${p.pdfUrl ? `<button class="btn" id="pdf-link">Download from the link</button>` : ''}
+                </div>
+                ${p.pdfUrl ? `<p class="muted small">This paper was added from <a href="${esc(p.pdfUrl)}" target="_blank" rel="noopener">a PDF link</a>. If the site won’t let the app download it, open the link, download the PDF in your browser, then tap Attach PDF and pick it from Downloads.</p>` : ''}`
             : epub
               ? `<div class="epub-info">${epub.cover ? '<img class="cover-thumb" id="cover-thumb" alt="">' : ''}<div>
                   <p class="muted small">${esc(epub.name)} · ${Math.max(1, Math.round(epub.size / 1024))} KB · from ${esc(epub.source)}</p>
@@ -589,7 +591,7 @@
           <h3>Highlights</h3>
           <ul class="highlights">${highlights
             .sort((a, b) => (a.page || 0) - (b.page || 0))
-            .map((h) => `<li><blockquote>${esc(h.quote)}</blockquote>${h.page ? `<span class="muted small">p. ${h.page}</span>` : ''}${h.note ? `<p class="small">${esc(h.note)}</p>` : ''}<button class="btn small danger-ghost" data-delh="${h.id}">Delete</button></li>`)
+            .map((h) => `<li><blockquote>${esc(h.quote)}</blockquote>${h.page ? `<span class="muted small">${h.cfi ? '≈ ' : ''}p. ${h.page}</span>` : ''}${h.note ? `<p class="small">${esc(h.note)}</p>` : ''}<div class="row">${h.cfi && epub ? `<a class="btn small" href="#/read/${p.id}?cfi=${encodeURIComponent(h.cfi)}">Show in reader</a>` : ''}<button class="btn small danger-ghost" data-delh="${h.id}">Delete</button></div></li>`)
             .join('') || '<li class="muted small">No highlights yet.</li>'}</ul>
           <details><summary>Add highlight</summary>
             <form id="hl-form" class="stack">
@@ -676,7 +678,7 @@
         rerender();
       })
     );
-    if (epub) {
+    if (epub && format === 'epub') {
       const thumb = $('#cover-thumb');
       if (thumb && epub.cover) {
         thumb.src = URL.createObjectURL(epub.cover);
@@ -752,6 +754,19 @@
           toast('PDF saved on this phone');
         } catch (err) {
           toast(navigator.onLine ? err.message : 'You are offline');
+        }
+        rerender();
+      });
+    const pdfLinkBtn = $('#pdf-link');
+    if (pdfLinkBtn)
+      pdfLinkBtn.addEventListener('click', async () => {
+        pdfLinkBtn.disabled = true;
+        pdfLinkBtn.textContent = 'Downloading…';
+        try {
+          await attachPdf(id, await Lookup.fetchPdf(p.pdfUrl));
+          toast('PDF saved on this phone');
+        } catch (err) {
+          toast(navigator.onLine ? `Couldn’t download it: ${err.message}` : 'You are offline');
         }
         rerender();
       });
@@ -1084,6 +1099,7 @@
         tags: f.tags.value.split(',').map((t) => t.trim().replace(/^#/, '')).filter(Boolean),
         collections: $$('input[name=col]:checked', f).map((c) => c.value),
         status: 'none',
+        pdfUrl: pdfLink || null,
       });
       await savePaper(p);
       await setStatus(p, f.status.value);
@@ -1120,7 +1136,7 @@
   }
 
   // ---------- EPUB reader ----------
-  async function viewReader(id) {
+  async function viewReader(id, q = {}) {
     const [p, rec] = await Promise.all([DB.get('papers', id), DB.get('epubs', id)]);
     if (!p || !rec) {
       location.hash = `#/paper/${id}`;
@@ -1139,6 +1155,11 @@
       <div class="r-stage"><div id="r-view"></div>
         <button class="r-zone left" id="r-prev" aria-label="Previous page"></button>
         <button class="r-zone right" id="r-next" aria-label="Next page"></button>
+      </div>
+      <div class="r-selbar" id="r-selbar" hidden>
+        <button class="btn small primary" id="hl-add">Highlight</button>
+        <button class="btn small" id="hl-note">Highlight + note</button>
+        <button class="r-btn" id="hl-cancel" aria-label="Cancel">✕</button>
       </div>
       <div class="r-foot"><input type="range" id="r-seek" min="0" max="1000" value="0" aria-label="Position in paper" disabled><span id="r-pct">…</span></div>
       <nav class="r-toc" id="r-toc-panel" hidden></nav>
@@ -1190,8 +1211,44 @@
       }, 800);
     });
 
-    const prev = () => rendition.prev();
-    const next = () => rendition.next();
+    // --- text selection ---
+    const selection = () => {
+      const c = rendition.getContents()[0];
+      return c ? c.window.getSelection() : null;
+    };
+    const hasSelection = () => {
+      const sel = selection();
+      return !!(sel && !sel.isCollapsed && sel.toString().trim());
+    };
+    const clearSelection = () => {
+      const sel = selection();
+      if (sel) sel.removeAllRanges();
+    };
+
+    // Keep the page put while selecting. Pages sit side by side in one wide
+    // strip; dragging a selection lets the browser scroll that strip, which
+    // left the view stranded between pages. Only page turns may move it.
+    let navigating = false;
+    let pageScroll = null;
+    const strip = () => rendition.manager && rendition.manager.container;
+    const go = async (fn) => {
+      navigating = true;
+      clearSelection();
+      hideBar();
+      try {
+        await fn();
+      } finally {
+        navigating = false;
+        if (strip()) pageScroll = strip().scrollLeft;
+      }
+    };
+    const onStripScroll = () => {
+      const c = strip();
+      if (!navigating && pageScroll !== null && hasSelection() && Math.abs(c.scrollLeft - pageScroll) > 1) c.scrollLeft = pageScroll;
+    };
+
+    const prev = () => go(() => rendition.prev());
+    const next = () => go(() => rendition.next());
     $('#r-prev').addEventListener('click', prev);
     $('#r-next').addEventListener('click', next);
     const onKey = (e) => {
@@ -1201,16 +1258,105 @@
     document.addEventListener('keydown', onKey);
     rendition.on('keyup', onKey);
     let touchX = null;
-    rendition.on('touchstart', (e) => (touchX = e.changedTouches[0].screenX));
+    let touchT = 0;
+    rendition.on('touchstart', (e) => {
+      touchX = e.changedTouches[0].screenX;
+      touchT = Date.now();
+    });
     rendition.on('touchend', (e) => {
       if (touchX === null) return;
       const dx = e.changedTouches[0].screenX - touchX;
       touchX = null;
+      // a long press, or a drag while text is selected, is selecting, not swiping
+      if (Date.now() - touchT > 450 || hasSelection()) return;
       if (Math.abs(dx) > 50) (dx < 0 ? next : prev)();
     });
+
+    // --- highlights ---
+    const HL_STYLE = { fill: '#f5c518', 'fill-opacity': '0.35', 'mix-blend-mode': 'multiply' };
+    const selbar = $('#r-selbar');
+    let pending = null;
+    function hideBar() {
+      selbar.hidden = true;
+      pending = null;
+    }
+    rendition.on('selected', (cfiRange, contents) => {
+      const text = contents.window.getSelection().toString().replace(/\s+/g, ' ').trim();
+      if (!text) return;
+      pending = { cfiRange, text };
+      selbar.hidden = false;
+    });
+    rendition.hooks.content.register((contents) => {
+      contents.document.addEventListener('selectionchange', () => {
+        if (!hasSelection()) setTimeout(() => !hasSelection() && hideBar(), 300);
+      });
+    });
+    const drawHighlight = (h) => {
+      try {
+        rendition.annotations.highlight(h.cfi, { id: h.id }, () => openHighlight(h.id), 'pr-hl', HL_STYLE);
+      } catch {} // e.g. a highlight made in an earlier version of this EPUB
+    };
+    const pageOf = (cfi) => {
+      if (!p.totalPages) return null;
+      const f = locationsReady ? book.locations.percentageFromCfi(cfi) : lastPct;
+      return Math.min(p.totalPages, Math.max(1, Math.round(f * p.totalPages)));
+    };
+    const addHighlight = async (note = '') => {
+      if (!pending) return;
+      const h = { paperId: id, quote: pending.text, page: pageOf(pending.cfiRange), note, cfi: pending.cfiRange, createdAt: now() };
+      h.id = await DB.put('highlights', h);
+      drawHighlight(h);
+      clearSelection();
+      hideBar();
+      toast('Highlighted');
+      refreshPanel();
+    };
+    const askNote = (title, initial = '') =>
+      new Promise((resolve) => {
+        const dlg = $('#dialog');
+        dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${esc(title)}</h3>
+          <textarea name="note" rows="4" placeholder="Your note">${esc(initial)}</textarea>
+          <div class="row end"><button value="cancel" class="btn" formnovalidate>Cancel</button><button value="ok" class="btn primary">Save</button></div></form>`;
+        dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('[name=note]', dlg).value.trim() : null);
+        dlg.showModal();
+        $('[name=note]', dlg).focus();
+      });
+    $('#hl-add').addEventListener('click', () => addHighlight());
+    $('#hl-note').addEventListener('click', async () => {
+      const keep = pending;
+      const note = await askNote('Note for this highlight');
+      pending = keep;
+      if (note !== null) await addHighlight(note);
+    });
+    $('#hl-cancel').addEventListener('click', () => {
+      clearSelection();
+      hideBar();
+    });
+    async function openHighlight(hid) {
+      const h = await DB.get('highlights', hid);
+      if (!h) return;
+      const dlg = $('#dialog');
+      dlg.innerHTML = `<form method="dialog" class="dlg"><blockquote class="hl-quote">${esc(h.quote)}</blockquote>
+        <textarea name="note" rows="3" placeholder="Add a note">${esc(h.note || '')}</textarea>
+        <div class="row between"><button value="delete" class="btn danger-ghost">Delete</button>
+        <span class="row"><button value="cancel" class="btn" formnovalidate>Close</button><button value="ok" class="btn primary">Save</button></span></div></form>`;
+      dlg.onclose = async () => {
+        if (dlg.returnValue === 'ok') {
+          h.note = $('[name=note]', dlg).value.trim();
+          await DB.put('highlights', h);
+          toast('Note saved');
+        } else if (dlg.returnValue === 'delete') {
+          await DB.del('highlights', h.id);
+          rendition.annotations.remove(h.cfi, 'highlight');
+          toast('Highlight deleted');
+        }
+        refreshPanel();
+      };
+      dlg.showModal();
+    }
     const resize = async (delta) => {
       fontSize = Math.max(70, Math.min(200, fontSize + delta));
-      rendition.themes.fontSize(fontSize + '%');
+      await go(() => rendition.themes.fontSize(fontSize + '%'));
       await DB.setSetting('readerFontSize', fontSize);
     };
     $('#r-smaller').addEventListener('click', () => resize(-10));
@@ -1218,25 +1364,39 @@
 
     const tocPanel = $('#r-toc-panel');
     $('#r-toc').addEventListener('click', () => (tocPanel.hidden = !tocPanel.hidden));
-    book.loaded.navigation.then((nav) => {
-      const items = (list, depth) =>
-        list.map((t) => `<a href="#" data-href="${esc(t.href)}" style="padding-left:${12 + depth * 14}px">${esc(t.label.trim())}</a>${t.subitems && t.subitems.length ? items(t.subitems, depth + 1) : ''}`).join('');
-      tocPanel.innerHTML = items(nav.toc, 0) || '<p class="muted">No contents</p>';
+    let tocHtml = '';
+    async function refreshPanel() {
+      const hls = (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi);
+      const order = (h) => (locationsReady ? book.locations.percentageFromCfi(h.cfi) : h.createdAt);
+      hls.sort((a, b) => order(a) - order(b));
+      tocPanel.innerHTML =
+        '<h4>Contents</h4>' +
+        (tocHtml || '<p class="muted small">No contents</p>') +
+        `<h4>Highlights (${hls.length})</h4>` +
+        (hls.map((h) => `<a href="#" data-href="${esc(h.cfi)}" class="hl-item"><q>${esc(h.quote.length > 140 ? h.quote.slice(0, 140) + '…' : h.quote)}</q>${h.note ? `<small>${esc(h.note)}</small>` : ''}</a>`).join('') ||
+          '<p class="muted small">Select text to highlight it.</p>');
       $$('[data-href]', tocPanel).forEach((a) =>
         a.addEventListener('click', (e) => {
           e.preventDefault();
           tocPanel.hidden = true;
-          rendition.display(a.dataset.href);
+          go(() => rendition.display(a.dataset.href));
         })
       );
+    }
+    book.loaded.navigation.then((nav) => {
+      const items = (list, depth) =>
+        list.map((t) => `<a href="#" data-href="${esc(t.href)}" style="padding-left:${12 + depth * 14}px">${esc(t.label.trim())}</a>${t.subitems && t.subitems.length ? items(t.subitems, depth + 1) : ''}`).join('');
+      tocHtml = items(nav.toc, 0);
+      refreshPanel();
     });
 
     const seek = $('#r-seek');
-    seek.addEventListener('change', () => rendition.display(book.locations.cfiFromPercentage(seek.value / 1000)));
+    seek.addEventListener('change', () => go(() => rendition.display(book.locations.cfiFromPercentage(seek.value / 1000))));
 
     const onHide = () => document.visibilityState === 'hidden' && commit();
     document.addEventListener('visibilitychange', onHide);
     teardown = async () => {
+      if (strip()) strip().removeEventListener('scroll', onStripScroll);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('visibilitychange', onHide);
       document.body.classList.remove('reading');
@@ -1247,7 +1407,9 @@
       } catch {}
     };
 
-    await rendition.display(p.epubCfi || undefined);
+    await go(() => rendition.display(q.cfi || p.epubCfi || undefined));
+    if (strip()) strip().addEventListener('scroll', onStripScroll);
+    (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi).forEach(drawHighlight);
     // Locations give a stable percentage across the whole book; generating
     // them takes a moment, so the bar enables once they're ready.
     const located = book.ready.then(() => book.locations.generate(1200));
@@ -1261,12 +1423,13 @@
           $('#r-pct').textContent = `${Math.round(lastPct * 100)}%`;
           seek.value = Math.round(lastPct * 1000);
         }
+        refreshPanel(); // highlights can now be listed in reading order
       })
       .catch(() => {});
-    if (!p.epubCfi && startPct > 0 && startPct < 1) {
+    if (!q.cfi && !p.epubCfi && startPct > 0 && startPct < 1) {
       // Opened for the first time but already part-read (e.g. in the PDF):
       // jump to the same point once locations are known.
-      located.then(() => rendition.display(book.locations.cfiFromPercentage(startPct))).catch(() => {});
+      located.then(() => go(() => rendition.display(book.locations.cfiFromPercentage(startPct)))).catch(() => {});
     }
   }
 

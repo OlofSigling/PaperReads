@@ -274,3 +274,9 @@ body.reading main { padding: 0; max-width: none; }
 .r-foot span { font-size: .8rem; color: var(--muted); min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
 .r-toc { position: absolute; top: 49px; right: 0; bottom: 0; width: min(85vw, 340px); background: var(--surface); border-left: 1px solid var(--border); overflow: auto; z-index: 5; box-shadow: -4px 0 16px rgba(0,0,0,.15); padding: 8px 0; }
 .r-toc a { display: block; padding: 8px 12px; color: var(--text); text-decoration: none; font-size: .9rem; border-bottom: 1px solid var(--border); }
+
+.r-selbar { position: absolute; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 56px); z-index: 6; display: flex; gap: 8px; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 6px 8px; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+.r-toc h4 { margin: 12px 12px 4px; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.r-toc .hl-item q { display: block; font-style: italic; }
+.r-toc .hl-item small { display: block; color: var(--muted); margin-top: 2px; }
+.hl-quote { margin: 0; padding-left: 10px; border-left: 3px solid #f5c518; font-style: italic; max-height: 30vh; overflow: auto; }
