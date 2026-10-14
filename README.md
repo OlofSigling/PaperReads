@@ -6,7 +6,7 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
 ## Features
 
 - **Shelves:** Want to read, Reading, Read, or Catalogued (in your library but not on a reading shelf).
-- **Share to the app:** share a link (arXiv, DOI, publisher page) or a PDF file from any app's share sheet.
+- **Share to the app:** share a link (arXiv, DOI, publisher page) or a PDF or EPUB file from any app's share sheet.
 - **Metadata lookup:** a DOI, an arXiv ID/link, or a title fills in title, authors, year, venue and abstract.
   Lookup uses doi.org and Crossref, and only needs internet when you add a paper.
 - **Offline PDFs:** arXiv PDFs download automatically, or you can attach any PDF. The page count is read from the PDF.
