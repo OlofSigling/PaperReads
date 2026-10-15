@@ -373,6 +373,24 @@ const Epubify = (() => {
     return boxes;
   }
 
+  // Which "Figure N" caption on this page belongs to an image? The nearest
+  // one, preferring captions below the image (the usual layout).
+  const CAPTION = /^\s*(?:Fig(?:ure)?\.?|FIGURE)\s*(\d+)/;
+  function captionNumber(box, rows) {
+    let best = null;
+    let bestD = Infinity;
+    for (const r of rows) {
+      const m = CAPTION.exec(r.text);
+      if (!m) continue;
+      const below = r.y0 - box[3];
+      const above = box[1] - r.y1;
+      const d = below >= -6 ? below : above >= -6 ? above + 40 : Infinity;
+      if (d < bestD) [best, bestD] = [m[1], d];
+    }
+    return bestD < 250 ? best : null;
+  }
+  const imgTag = (n, fig) => `<p><img src="pdfimg:${n}" alt=""${fig ? ` data-fig="${fig}"` : ''}/></p>`;
+
   // Render the page once and crop each image box (PyMuPDF get_pixmap(clip=…)).
   async function cropImages(pg, boxes) {
     const scale = 2;
@@ -590,10 +608,11 @@ const Epubify = (() => {
       const keep = pg.images.filter(([x0, y0, x1, y1]) => x1 - x0 >= 4 && y1 - y0 >= 4 && !(y1 < ph * 0.1 || y0 > ph * 0.92));
       if (keep.length) {
         const blobs = await cropImages(pg, keep).catch(() => []);
+        const rowsForCaptions = items.map((it) => ({ text: it.text, y0: it.y0, y1: it.y1 }));
         blobs.forEach((blob, k) => {
           if (!blob) return;
           images.push(blob);
-          items.push({ kind: 'img', y0: keep[k][1], y1: keep[k][3], src: `pdfimg:${images.length - 1}` });
+          items.push({ kind: 'img', y0: keep[k][1], y1: keep[k][3], n: images.length - 1, fig: captionNumber(keep[k], rowsForCaptions) });
         });
       }
       items.sort((a, b) => a.y0 - b.y0);
@@ -669,7 +688,7 @@ const Epubify = (() => {
         }
         if (it.kind === 'img') {
           flush();
-          parts.push(`<p><img src="${it.src}" alt=""/></p>`);
+          parts.push(imgTag(it.n, it.fig));
           pageStart = false;
           continue;
         }
@@ -964,11 +983,12 @@ const Epubify = (() => {
       const keep = pg.images.filter(([x0, y0, x1, y1]) => x1 - x0 >= 24 && y1 - y0 >= 24 && !(y1 < ph * 0.1 || y0 > ph * 0.92));
       if (keep.length) {
         const blobs = await cropImages(pg, keep).catch(() => []);
-        for (const blob of blobs) {
-          if (!blob) continue;
+        const capRows = rows.map((r) => ({ text: joinSpans([...r].sort((a, b) => a.x0 - b.x0)), y0: Math.min(...r.map((z) => z.y - z.size / 2)), y1: Math.max(...r.map((z) => z.y + z.size / 2)) }));
+        blobs.forEach((blob, k) => {
+          if (!blob) return;
           images.push(blob);
-          parts.push(`<p><img src="pdfimg:${images.length - 1}" alt=""/></p>`);
-        }
+          parts.push(imgTag(images.length - 1, captionNumber(keep[k], capRows)));
+        });
       }
     }
     pdf.doc.destroy();
@@ -1233,6 +1253,110 @@ const Epubify = (() => {
     fixDanglingFragments(root);
   }
 
+  // ================================================================ figure placement
+  // Put every figure (and table) right after the paragraph that first refers
+  // to it, whatever the source: text sources often collect figures at the
+  // end, and PDFs put them wherever they fell on the page.
+  const REF_RE = /\b(Figs?\.?|Figures?|Tables?|Tabs?\.)\s*((?:\d+[A-Za-z]?(?:\s*(?:,|and|&|–|-|to)\s*)?)+)/gi;
+  const kindOf = (word) => (/^t/i.test(word) ? 'table' : 'figure');
+  function numbersIn(list) {
+    const out = new Set();
+    for (const m of list.matchAll(/(\d+)[A-Za-z]?(?:\s*(?:–|-|to)\s*(\d+))?/g)) {
+      const a = +m[1];
+      const b = m[2] ? +m[2] : a;
+      for (let n = a; n <= Math.min(b, a + 30); n++) out.add(n);
+    }
+    return out;
+  }
+
+  // PDF output: join each caption paragraph ("Figure 3. …") with the images
+  // tagged as belonging to it into one <figure>.
+  function groupPdfFigures(root) {
+    const doc = root.ownerDocument;
+    for (const p of [...root.querySelectorAll('p')]) {
+      if (p.querySelector('img')) continue;
+      const m = CAPTION.exec(p.textContent);
+      if (!m) continue;
+      const imgs = [...root.querySelectorAll(`img[data-fig="${m[1]}"]`)];
+      if (!imgs.length) continue;
+      const fig = doc.createElement('figure');
+      for (const img of imgs) {
+        const holder = img.closest('p');
+        fig.append(img);
+        if (holder && !holder.textContent.trim() && !holder.querySelector('img')) holder.remove();
+      }
+      const cap = doc.createElement('figcaption');
+      cap.append(...p.childNodes);
+      fig.append(cap);
+      p.replaceWith(fig);
+    }
+    // Images whose caption got merged into running text still know their
+    // number: wrap them as "Figure N" so they can be placed all the same.
+    const leftover = new Map();
+    for (const img of root.querySelectorAll('img[data-fig]')) {
+      const n = img.getAttribute('data-fig');
+      if (!leftover.has(n)) leftover.set(n, []);
+      leftover.get(n).push(img);
+    }
+    for (const [n, imgs] of leftover) {
+      const fig = doc.createElement('figure');
+      const first = imgs[0].closest('p') || imgs[0];
+      first.before(fig);
+      for (const img of imgs) {
+        const holder = img.closest('p');
+        fig.append(img);
+        if (holder && !holder.textContent.trim() && !holder.querySelector('img')) holder.remove();
+      }
+      const cap = fig.appendChild(doc.createElement('figcaption'));
+      cap.appendChild(doc.createElement('strong')).textContent = `Figure ${n}`;
+    }
+    root.querySelectorAll('[data-fig]').forEach((el) => el.removeAttribute('data-fig'));
+  }
+
+  function placeFigures(root, log) {
+    const figures = [...root.querySelectorAll('figure')].filter((f) => !f.parentElement.closest('figure'));
+    if (!figures.length) return;
+    // stop at the reference list: "see Figure 2" there is someone else's figure
+    const blocks = [];
+    for (const el of root.querySelectorAll('h1, h2, h3, h4, p, li')) {
+      if (/^h/.test(el.localName) && /^(references|bibliography|literature cited|works cited)\b/i.test(el.textContent.trim())) break;
+      if (el.localName === 'li' && el.querySelector('p')) continue;
+      if (!/^h/.test(el.localName) && !el.closest('figure, table, .ltx_bibliography')) blocks.push(el);
+    }
+    const after = new Map(); // block → last figure placed after it (keeps order)
+    let moved = 0;
+    for (const fig of figures) {
+      const cap = fig.querySelector('figcaption') || fig;
+      const m = /^\s*(Figs?\.?|Figures?|FIGURE|Tables?|TABLE)\s*(\d+)/i.exec(cap.textContent.replace(/^\s*\S*?(?=(Fig|Tab))/i, ''));
+      const ids = new Set([fig.id, ...[...fig.querySelectorAll('[id]')].map((e) => e.id)].filter(Boolean));
+      const kind = m ? kindOf(m[1]) : null;
+      const num = m ? +m[2] : null;
+      const target = blocks.find((b) => {
+        if ([...b.querySelectorAll('a[href^="#"]')].some((a) => ids.has(a.getAttribute('href').slice(1)))) return true;
+        if (!m) return false;
+        for (const r of b.textContent.matchAll(REF_RE)) if (kindOf(r[1]) === kind && numbersIn(r[2]).has(num)) return true;
+        return false;
+      });
+      if (!target) continue;
+      // insert at block level: a figure can't go inside a list
+      let anchor = target;
+      while (anchor.parentElement && anchor.parentElement !== root && /^(ul|ol|li)$/.test(anchor.parentElement.localName)) anchor = anchor.parentElement;
+      if (anchor.localName === 'li') anchor = anchor.closest('ul, ol') || anchor;
+      const prev = after.get(anchor) || anchor;
+      if (prev.nextElementSibling !== fig) {
+        prev.after(fig);
+        moved++;
+      }
+      after.set(anchor, fig);
+    }
+    // headings left with nothing under them ("Figures", "Tables")
+    for (const h of [...root.querySelectorAll('h2, h3, h4')]) {
+      const next = h.nextElementSibling;
+      if (/^(figures?|tables?|figures and tables|figure legends)$/i.test(h.textContent.trim()) && (!next || /^h[1-4]$/.test(next.localName))) h.remove();
+    }
+    if (moved) log(`→ placed ${moved} figure(s)/table(s) after their first mention`);
+  }
+
   // ================================================================ sources
   async function fromArxivHtml(arxivId, log) {
     log(`→ fetching arXiv HTML for ${arxivId}`);
@@ -1326,6 +1450,11 @@ const Epubify = (() => {
         if (c.nodeType !== 1) continue;
         const n = c.localName;
         if (INLINE[n]) inline(c, into.appendChild(doc.createElement(INLINE[n])));
+        else if (n === 'xref' && /^(fig|table)$/.test(c.getAttribute('ref-type') || '') && c.getAttribute('rid')) {
+          const a = into.appendChild(doc.createElement('a'));
+          a.setAttribute('href', '#' + c.getAttribute('rid').split(/\s+/)[0]);
+          inline(c, a);
+        }
         else if (n === 'ext-link' || n === 'uri') {
           const a = into.appendChild(doc.createElement('a'));
           const href = c.getAttribute('xlink:href') || c.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || c.textContent;
@@ -1356,6 +1485,7 @@ const Epubify = (() => {
           const capNode = c.querySelector('caption');
           if (capNode) [...capNode.children].forEach((k) => cap.append(inline(k, el('span')), ' '));
           const fig = el('figure');
+          if (c.getAttribute('id')) fig.setAttribute('id', c.getAttribute('id'));
           const g = c.querySelector('graphic');
           const href = g && (g.getAttribute('xlink:href') || g.getAttributeNS('http://www.w3.org/1999/xlink', 'href'));
           if (href && imageBase) {
@@ -1368,6 +1498,7 @@ const Epubify = (() => {
           into.append(fig);
         } else if (n === 'table-wrap') {
           const fig = el('figure');
+          if (c.getAttribute('id')) fig.setAttribute('id', c.getAttribute('id'));
           const cap = el('figcaption', inline(c.querySelector('label') || doc.createElement('x'), el('strong')), ' ');
           const capNode = c.querySelector('caption');
           if (capNode) [...capNode.children].forEach((k) => cap.append(inline(k, el('span')), ' '));
@@ -1638,6 +1769,8 @@ ${manifest.join('\n')}
     log(`→ extracted ~${words} words`);
     if (words < 120) warnings.push('Very little text was extracted.');
 
+    if (src.label === 'PDF') groupPdfFigures(src.root);
+    placeFigures(src.root, log);
     const wanted = src.root.querySelectorAll('img, object[data]').length;
     const media = await localizeImages(src.root, src.baseUrl, src.pdfImages || [], log);
     const missingFigures = src.root.querySelectorAll('figure').length && src.label !== 'PDF' ? Math.max(0, wanted - media.length) : 0;
