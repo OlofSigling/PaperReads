@@ -70,6 +70,7 @@
           ${p.rating ? stars(p.rating) : ''}
           ${p.hasPdf ? '<span class="badge">PDF</span>' : ''}
           ${p.hasEpub ? '<span class="badge">EPUB</span>' : ''}
+          ${openConcerns(p) ? `<span class="badge s-concern">⚠ ${openConcerns(p)}</span>` : ''}
           ${(p.tags || []).slice(0, 3).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}
         </span>
       </a>${extra}
@@ -194,6 +195,75 @@
       downloadFile(file);
       toast('Saved to Downloads. Open it from there with any reader app');
     }
+  }
+
+  // ---------- concerns: a per-paper list, shared by the paper page and reader ----------
+  // Stored on the paper record (so backups and merges carry it along).
+  const openConcerns = (p) => (p.concerns || []).filter((c) => !c.done).length;
+
+  function concernsUI(root, paperId, { jump = null, onChange = () => {} } = {}) {
+    const mutate = async (fn) => {
+      const p = await DB.get('papers', paperId);
+      p.concerns = p.concerns || [];
+      fn(p.concerns, p);
+      await savePaper(p);
+      await draw();
+      onChange(p);
+    };
+    async function draw() {
+      const p = await DB.get('papers', paperId);
+      const list = [...(p.concerns || [])].sort((a, b) => a.done - b.done || a.createdAt - b.createdAt);
+      const open = openConcerns(p);
+      root.innerHTML = `<h3>Concerns ${list.length ? `<span class="badge ${open ? 's-concern' : ''}">${open} open${list.length - open ? ` · ${list.length - open} resolved` : ''}</span>` : ''}</h3>
+        <ul class="concerns">${
+          list
+            .map(
+              (c) => `<li class="${c.done ? 'done' : ''}" data-id="${c.id}">
+                <input type="checkbox" class="c-done" ${c.done ? 'checked' : ''} aria-label="Resolved">
+                <div class="c-body">
+                  ${c.quote ? `<q class="c-quote">${esc(c.quote.length > 220 ? c.quote.slice(0, 220) + '…' : c.quote)}</q>` : ''}
+                  <span class="c-text" role="button" tabindex="0" title="Tap to edit">${c.text ? esc(c.text) : '<em class="muted">Add a note…</em>'}</span>
+                  ${c.cfi ? (jump ? '<button type="button" class="link small c-jump">Show in text</button>' : p.hasEpub ? `<a class="link small" href="#/read/${paperId}?cfi=${encodeURIComponent(c.cfi)}">Show in reader</a>` : '') : ''}
+                </div>
+                <button type="button" class="btn small danger-ghost c-del" aria-label="Delete concern">×</button>
+              </li>`
+            )
+            .join('') || '<li class="muted small">No concerns yet. Note doubts, methodological issues, things to check.</li>'
+        }</ul>
+        <form class="row c-add"><input name="t" placeholder="Add a concern…" autocomplete="off" aria-label="New concern"><button class="btn">Add</button></form>`;
+      const byId = (el) => el.closest('li').dataset.id;
+      $$('.c-done', root).forEach((cb) => cb.addEventListener('change', () => mutate((cs) => (cs.find((c) => c.id === byId(cb)).done = cb.checked))));
+      $$('.c-del', root).forEach((b) =>
+        b.addEventListener('click', () => {
+          if (confirm('Delete this concern?')) mutate((cs) => cs.splice(cs.findIndex((c) => c.id === byId(b)), 1));
+        })
+      );
+      $$('.c-text', root).forEach((span) => {
+        const edit = () => {
+          const id = byId(span);
+          const current = (list.find((c) => c.id === id) || {}).text || '';
+          const ta = document.createElement('textarea');
+          ta.rows = 3;
+          ta.value = current;
+          span.replaceWith(ta);
+          ta.focus();
+          ta.addEventListener('blur', () => mutate((cs) => (cs.find((c) => c.id === id).text = ta.value.trim())));
+        };
+        span.addEventListener('click', edit);
+        span.addEventListener('keydown', (e) => e.key === 'Enter' && edit());
+      });
+      if (jump) $$('.c-jump', root).forEach((b) => b.addEventListener('click', () => jump((list.find((c) => c.id === byId(b)) || {}).cfi)));
+      $('.c-add', root).addEventListener('submit', (e) => {
+        e.preventDefault();
+        const text = e.target.t.value.trim();
+        if (text) mutate((cs) => cs.push({ id: uid(), text, done: false, createdAt: now() }));
+      });
+    }
+    draw();
+    return {
+      refresh: draw,
+      add: (c) => mutate((cs) => cs.push({ id: uid(), done: false, createdAt: now(), text: '', ...c })),
+    };
   }
 
   async function allTags() {
@@ -545,6 +615,8 @@
             <pre class="conv-log" id="conv-log" hidden></pre>` : ''}
         </section>
 
+        <section class="card" id="concerns-card"></section>
+
         <div class="seg" role="group" aria-label="Status">
           ${['want', 'reading', 'read', 'none'].map((s) => `<button type="button" data-status="${s}" class="${p.status === s ? 'on' : ''}">${STATUS[s]}</button>`).join('')}
         </div>
@@ -670,6 +742,8 @@
         rerender();
       })
     );
+
+    concernsUI($('#concerns-card'), id);
 
     // Files: PDF / EPUB
     $$('[data-format]').forEach((b) =>
@@ -1183,6 +1257,7 @@
         <span class="r-title">${esc(p.title)}</span>
         <button class="r-btn" id="r-smaller" aria-label="Smaller text">A−</button>
         <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
+        <button class="r-btn" id="r-concerns" aria-label="Concerns">⚠<span class="r-count" id="r-ccount"></span></button>
         <button class="r-btn" id="r-toc" aria-label="Contents">☰</button>
       </div>
       <div class="r-stage"><div id="r-view"></div>
@@ -1192,10 +1267,12 @@
       <div class="r-selbar" id="r-selbar" hidden>
         <button class="btn small primary" id="hl-add">Highlight</button>
         <button class="btn small" id="hl-note">Highlight + note</button>
+        <button class="btn small" id="hl-concern">Concern</button>
         <button class="r-btn" id="hl-cancel" aria-label="Cancel">✕</button>
       </div>
       <div class="r-foot"><input type="range" id="r-seek" min="0" max="1000" value="0" aria-label="Position in paper" disabled><span id="r-pct">…</span></div>
       <nav class="r-toc" id="r-toc-panel" hidden></nav>
+      <section class="r-toc r-concerns" id="r-concerns-panel" hidden></section>
     </div>`;
 
     const ePub = await Epubify.epubjs();
@@ -1411,7 +1488,53 @@
     $('#r-bigger').addEventListener('click', () => resize(10));
 
     const tocPanel = $('#r-toc-panel');
-    $('#r-toc').addEventListener('click', () => (tocPanel.hidden = !tocPanel.hidden));
+    const concernsPanel = $('#r-concerns-panel');
+    $('#r-toc').addEventListener('click', () => {
+      tocPanel.hidden = !tocPanel.hidden;
+      concernsPanel.hidden = true;
+    });
+    // Concerns: same list as the paper page, in a side panel
+    const CONCERN_STYLE = { fill: '#f97316', 'fill-opacity': '0.22', 'mix-blend-mode': 'multiply' };
+    const drawConcern = (c) => {
+      try {
+        rendition.annotations.highlight(c.cfi, { id: c.id }, () => {
+          concernsPanel.hidden = false;
+          tocPanel.hidden = true;
+        }, 'pr-concern', CONCERN_STYLE);
+      } catch {}
+    };
+    const setCount = (paper) => {
+      const n = openConcerns(paper);
+      $('#r-ccount').textContent = n ? String(n) : '';
+    };
+    const concerns = concernsUI(concernsPanel, id, {
+      jump: (cfi) => {
+        concernsPanel.hidden = true;
+        go(() => rendition.display(cfi));
+      },
+      onChange: (paper) => {
+        setCount(paper);
+        // redraw underlines (a concern may have been deleted)
+        for (const c of paper.concerns || []) if (c.cfi) try { rendition.annotations.remove(c.cfi, 'highlight'); } catch {}
+        // (removing by range also drops a yellow highlight on the same words: redraw those)
+        DB.byIndex('highlights', 'paperId', id).then((hs) => hs.filter((h) => h.cfi && (paper.concerns || []).some((c) => c.cfi === h.cfi)).forEach(drawHighlight));
+        (paper.concerns || []).filter((c) => c.cfi && !c.done).forEach(drawConcern);
+      },
+    });
+    setCount(p);
+    $('#r-concerns').addEventListener('click', () => {
+      concernsPanel.hidden = !concernsPanel.hidden;
+      tocPanel.hidden = true;
+    });
+    $('#hl-concern').addEventListener('click', async () => {
+      const keep = pending;
+      const text = await askNote('What’s the concern?');
+      if (text === null || !keep) return;
+      await concerns.add({ text, quote: keep.text, cfi: keep.cfiRange, page: pageOf(keep.cfiRange) });
+      clearSelection();
+      hideBar();
+      toast('Concern added');
+    });
     let tocHtml = '';
     async function refreshPanel() {
       const hls = (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi);
@@ -1459,6 +1582,7 @@
     await go(() => rendition.display(q.cfi || p.epubCfi || undefined));
     if (strip()) strip().addEventListener('scroll', onStripScroll);
     (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi).forEach(drawHighlight);
+    (p.concerns || []).filter((c) => c.cfi && !c.done).forEach(drawConcern);
     // Locations give a stable percentage across the whole book; generating
     // them takes a moment, so the bar enables once they're ready.
     const located = book.ready.then(() => book.locations.generate(1200));

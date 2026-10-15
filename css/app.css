@@ -282,3 +282,19 @@ body.reading main { padding: 0; max-width: none; }
 .hl-quote { margin: 0; padding-left: 10px; border-left: 3px solid #f5c518; font-style: italic; max-height: 30vh; overflow: auto; }
 
 .note { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--text); }
+
+.badge.s-concern { background: #fde8dc; color: #9a3412; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .badge.s-concern { background: #3d2318; color: #fdba8c; } }
+.concerns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.concerns li { display: flex; gap: 8px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.concerns li:last-child { border-bottom: none; }
+.concerns input[type=checkbox] { margin-top: 2px; flex: none; }
+.concerns .c-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.concerns .c-text { cursor: text; }
+.concerns .c-quote { font-style: italic; color: var(--text-2); font-size: .9rem; border-left: 3px solid #d9480f; padding-left: 8px; }
+.concerns li.done .c-text, .concerns li.done .c-quote { text-decoration: line-through; color: var(--muted); }
+.concerns textarea { width: 100%; }
+.link.small, button.link { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-size: .85rem; text-align: left; cursor: pointer; }
+.r-concerns { padding: 12px; }
+.r-count { font-size: .7rem; vertical-align: super; color: #d9480f; margin-left: 1px; }
+#r-concerns-panel h3 { margin-top: 0; }

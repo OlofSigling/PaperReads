@@ -20,6 +20,9 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
   reading log. Reaching the last page marks the paper as read.
 - **Catalogue:** collections, tags (rename or merge), search across title, authors, notes and abstract, plus filters and sorting.
 - **Notes & review, 1–5 star rating, and highlights** (quote + page + comment).
+- **Concerns:** a per-paper checklist of doubts and things to verify, on the paper page and in the reader
+  (⚠ in the top bar). Select text in the reader and tap **Concern** to attach the passage; tick items off
+  as resolved. Papers with open concerns show a ⚠ badge in the library.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
 - **Queue:** drag to prioritise your want-to-read list. The top items show as "Next up" on the home screen.
 - **Stats:** yearly goal with on-pace indicator, papers per month, pages read, day streaks, average rating, top tags.
