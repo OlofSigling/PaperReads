@@ -411,6 +411,34 @@ const Epubify = (() => {
   }
 
   // ================================================================ PDF → HTML
+  // Where is the gap between two columns? Not always the page centre: BMJ,
+  // for one, has a wide left margin, so its gutter sits at ~60% of the width.
+  // Scan for the vertical line that body-text lines don't cross.
+  function findGutter(pdf, pageW) {
+    const sizes = new Counter();
+    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size));
+    const body = sizes.mostCommon();
+    const lines = [];
+    for (const pg of pdf.pages)
+      for (const l of pg.lines) if (horizontal(l) && l.spans.map((s) => s.text).join('').trim().length >= 20 && Math.abs(pyRound(l.spans[0].size) - body) <= 1) lines.push(l.bbox);
+    if (lines.length < 40) return null;
+    let best = null;
+    for (let x = pageW * 0.3; x <= pageW * 0.72; x += 2) {
+      let cross = 0;
+      let left = 0;
+      let right = 0;
+      for (const [x0, , x1] of lines) {
+        if (x0 < x - 3 && x1 > x + 3) cross++;
+        else if (x1 <= x + 3) left++;
+        else right++;
+      }
+      if (left < lines.length * 0.2 || right < lines.length * 0.2 || cross > lines.length * 0.12) continue;
+      if (!best || cross < best.cross) best = { x, cross, run: [x] };
+      else if (cross === best.cross && x - best.run.at(-1) <= 2) best.run.push(x); // widen the gap
+    }
+    return best ? best.run[best.run.length >> 1] : null;
+  }
+
   function pdfIsTwoColumn(pdf, pageW) {
     const bins = new Array(20).fill(0);
     let n = 0;
@@ -480,11 +508,36 @@ const Epubify = (() => {
 
   const horizontal = (l) => Math.abs(l.dir[0] - 1) <= 0.01;
 
-  // Join wrapped lines, de-hyphenating "sam-" + "ple" (from the simple flow).
+  // Small-caps headings extract as "cOnclusiOn" / "WhAt Is AlreAdy knoWn":
+  // capitals mid-word in several words of a short line. Normalise to
+  // sentence case. (One odd word, like "McDonald", is left alone.)
+  // Headings get the small-caps fix even as a single word ("AbstrAct"),
+  // and a capital first letter ("results" → "Results").
+  function headingCase(txt) {
+    let t = txt;
+    if (/^\p{L}+$/u.test(t) && /\p{Ll}\p{Lu}/u.test(t)) t = t.toLowerCase();
+    else t = fixSmallCaps(t);
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  }
+
+  function fixSmallCaps(txt) {
+    const words = txt.split(/\s+/);
+    const odd = words.filter((w) => /\p{Ll}\p{Lu}/u.test(w) || /^\p{Ll}+\p{Lu}/u.test(w)).length;
+    if (words.length > 14 || odd < Math.max(1, Math.ceil(words.length / 3)) || (words.length === 1 && !/^\p{Ll}/u.test(txt))) return txt;
+    const lower = txt.toLowerCase();
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  }
+
+  // Join wrapped lines, de-hyphenating "sam-" + "ple" (from the simple flow),
+  // but keeping hyphens the document uses elsewhere ("meta-" + "analyses").
+  let hyphenVocab = new Set();
   function joinWrapped(lines) {
     let out = '';
     for (const ln of lines) {
-      if (out.endsWith('-') && out.length > 1 && /\p{L}/u.test(out.at(-2)) && /^\p{Ll}/u.test(ln)) out = out.slice(0, -1) + ln;
+      const a = out.endsWith('-') ? (/([\p{L}\d]+)-$/u.exec(out) || [])[1] : null;
+      const b = a ? (/^[\p{L}\d]+/u.exec(ln) || [])[0] : null;
+      if (a && b && hyphenVocab.has(`${a}-${b}`.toLowerCase())) out += ln;
+      else if (out.endsWith('-') && out.length > 1 && /\p{L}/u.test(out.at(-2)) && /^\p{Ll}/u.test(ln)) out = out.slice(0, -1) + ln;
       else if (out.endsWith('-') && /\d/.test(out.at(-2) || '') && /^\p{L}/u.test(ln)) out += ln; // "152-" + "layer"
       else out = out ? out + ' ' + ln : ln;
     }
@@ -667,12 +720,29 @@ const Epubify = (() => {
         title = run.map((it) => it.text).join(' ');
         run.forEach((it) => (it.kind = 'title'));
         const after = first.filter((it) => it.y0 > run.at(-1).y1);
-        if (after.length && after[0].boldish && after[0].size < big && after[0].y0 - run.at(-1).y1 < 40) {
+        // (but a numbered or standard section heading is not an author line)
+        const looksLikeSection = (t) => /^((\d+(\.\d+)*\.?|[IVX]+\.)\s+\S|(abstract|introduction|background|summary)\b)/i.test(t);
+        if (after.length && after[0].boldish && after[0].size < big && after[0].y0 - run.at(-1).y1 < 40 && !looksLikeSection(after[0].text)) {
           author = after[0].text;
           after[0].kind = 'skip';
         }
       }
     }
+
+    // ---- the document's usual gap between lines of body text: 1.5- or
+    // double-spaced manuscripts have big gaps everywhere, so a fixed
+    // threshold split their paragraphs every few lines
+    const gaps = [];
+    for (const items of pages) {
+      const body = items.filter((it) => it.kind === 'text' && Math.abs(it.size - bodySize) <= 0.5);
+      for (let i = 1; i < body.length; i++) {
+        const g = body[i].y0 - body[i - 1].y1;
+        if (g > -2 && g < bodySize * 3) gaps.push(g);
+      }
+    }
+    gaps.sort((a, b) => a - b);
+    const usualGap = gaps.length ? gaps[gaps.length >> 1] : 0;
+    const paraGap = Math.max(4.0, 0.5 * bodySize, usualGap + Math.max(3, 0.35 * bodySize));
 
     // ---- emit
     let parts = [];
@@ -683,14 +753,7 @@ const Epubify = (() => {
     const LABEL = /^(Fig\.?|Figure|Table|Box)\s*\d+[A-Za-z]?\.?$/i;
     const NUMITEM = /^\d{1,3}\.\s+\S/;
 
-    const joinLines = (lines) => {
-      let out = '';
-      for (const ln of lines) {
-        if (out.endsWith('-') && out.length > 1 && /\p{L}/u.test(out.at(-2)) && /^\p{Ll}/u.test(ln)) out = out.slice(0, -1) + ln;
-        else out = out ? out + ' ' + ln : ln;
-      }
-      return ws(out).trim();
-    };
+    const joinLines = joinWrapped;
     const flush = () => {
       if (buf.length) {
         const txt = joinLines(buf);
@@ -765,7 +828,7 @@ const Epubify = (() => {
           if (endsWithAny(last.text.trimEnd(), TERMINAL) || Math.abs(sz - last.size) >= 1) newPara = true;
         } else {
           const gap = it.y0 - last.y1;
-          if (gap > Math.max(4.0, 0.5 * bodySize)) newPara = true;
+          if (gap > paraGap) newPara = true;
           else if (Math.abs(sz - last.size) >= 1) newPara = true;
           else if (it.x0 > last.x0 + 3 && !state.list && endsWithAny(last.text.trimEnd(), TERMINAL)) newPara = true; // first-line indent
         }
@@ -811,7 +874,22 @@ const Epubify = (() => {
     const bodySize = sizes.mostCommon() ?? 11;
     // global body-text left edge (per-page voting fails on box-dominated pages)
     const globalBodyLeft = globX0.mostCommon() ?? 0;
-    const twoCol = pdfIsTwoColumn(pdf, pageW);
+    const gutter = findGutter(pdf, pageW);
+    const twoCol = gutter !== null || pdfIsTwoColumn(pdf, pageW);
+    const mid = gutter ?? pageW / 2;
+    // In two-column mode, text left of the left column (BMJ's affiliations
+    // and notes margin) is a margin column, kept apart from the body text.
+    let leftEdge = -Infinity;
+    if (twoCol) {
+      const c = new Counter();
+      for (const pg of pdf.pages)
+        for (const l of pg.lines) if (horizontal(l) && l.bbox[2] <= mid + 3 && l.spans.map((s) => s.text).join('').trim().length >= 20 && Math.abs(pyRound(l.spans[0].size) - bodySize) <= 1) c.add(pyRound(l.bbox[0] / 5) * 5);
+      leftEdge = c.mostCommon() ?? -Infinity;
+    }
+    // Hyphenated words as the document writes them mid-line ("meta-analyses"),
+    // to tell a real hyphen from a line-break one when rejoining lines.
+    hyphenVocab = new Set();
+    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) for (const m of s.text.matchAll(/[\p{L}\d]+(?:-[\p{L}\d]+)+/gu)) hyphenVocab.add(m[0].toLowerCase());
     const stem = (filename || 'paper').replace(/\.[^.]+$/, '');
 
     if (!twoCol && !pdfHasSideMargin(pdf, globalBodyLeft)) {
@@ -826,21 +904,40 @@ const Epubify = (() => {
     const ph = pdf.pages[0].height;
     // (digits normalised so "page 3" and "page 4" match, and a third of the
     // pages is enough since journals alternate left/right-page headers)
-    const edgeKey = (t) => ws(t).trim().toLowerCase().replace(/\d+/g, '#');
+    const edgeKey = (t) => t.toLowerCase().replace(/\s+/g, '').replace(/\d+/g, '#');
     const edgeLines = new Counter();
     for (const pg of pdf.pages) {
       const seen = new Set();
+      const edge = [];
       for (const l of pg.lines) {
         const y = l.bbox[1];
         if (y < ph * 0.1 || y > ph * 0.9) {
           const t = edgeKey(l.spans.map((s) => s.text).join(''));
           if (t) seen.add(t);
+          if (horizontal(l)) for (const sp of l.spans) if (sp.text.trim()) edge.push({ y: (sp.bbox[1] + sp.bbox[3]) / 2, x: sp.bbox[0], text: sp.text });
         }
       }
+      // whole visual rows too: a footer can be several runs ("the bmj" logo +
+      // text + page number), and rows are what the text is compared by later
+      edge.sort((a, b) => a.y - b.y || a.x - b.x);
+      let row = [];
+      const addRow = () => {
+        if (!row.length) return;
+        const sorted = row.sort((a, b) => a.x - b.x).map((r) => r.text).join(' ');
+        seen.add(edgeKey(sorted));
+        seen.add(edgeKey(sorted.replace(/^\s*[\divxlc]{1,4}\s+|\s+[\divxlc]{1,4}\s*$/gi, '')));
+        row = [];
+      };
+      for (const e of edge) {
+        if (row.length && Math.abs(e.y - row.at(-1).y) > 3) addRow();
+        row.push(e);
+      }
+      addRow();
       seen.forEach((t) => edgeLines.add(t));
     }
     const repeatedKeys = new Set(edgeLines.entries().filter(([, c]) => c >= Math.max(3, Math.floor(pdf.pages.length / 3))).map(([t]) => t));
-    const repeated = { has: (t) => repeatedKeys.has(edgeKey(t)) };
+    // (a footer row can pick up the page number beside it: "… | doi … 7")
+    const repeated = { has: (t) => repeatedKeys.has(edgeKey(t)) || repeatedKeys.has(edgeKey(t.replace(/^\s*[\divxlc]{1,4}\s+|\s+[\divxlc]{1,4}\s*$/gi, ''))) };
     const parts = [];
     let title = null;
 
@@ -884,7 +981,7 @@ const Epubify = (() => {
         if (!horizontal(l)) continue;
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
-          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: /Bold|-Bd|Medi|Semibold|Black|Heavy|CMBX/i.test(s.font) || !!(s.flags & 16) });
+          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: /Bold|-Bd|Medi|Semibold|Black|Heavy|CMBX/i.test(s.font) || !!(s.flags & 16), line: l });
         }
       }
       if (!spans.length && !pg.images.length) continue;
@@ -919,10 +1016,33 @@ const Epubify = (() => {
       // two-column page, split by column first: lines of the two columns sit
       // at slightly different heights and would otherwise chain into one row.
       // Spans crossing the centre (title, wide captions) form their own group.
-      const mid = pageW / 2;
-      const colOf = (sp) => (!twoCol ? 0 : sp.x0 < mid - 12 && sp.x1 > mid + 12 ? -1 : (sp.x0 + sp.x1) / 2 < mid ? 0 : 1);
+      // Lines starting left of the left column are either a margin column
+      // (affiliations, notes: stays narrow) or a boxed insert that starts
+      // further left but runs into the column. Decide per block of lines.
+      const lineKind = new Map();
+      if (twoCol && leftEdge > -Infinity) {
+        const outer = pg.lines.filter((l) => horizontal(l) && l.bbox[0] < leftEdge - 6).sort((a, b) => a.bbox[1] - b.bbox[1]);
+        let block = [];
+        const close = () => {
+          const wide = block.filter((l) => l.bbox[2] > leftEdge + 20).length;
+          for (const l of block) lineKind.set(l, wide >= block.length * 0.4 ? 'box' : 'margin');
+          block = [];
+        };
+        for (const l of outer) {
+          if (block.length && l.bbox[1] - block.at(-1).bbox[3] > (l.bbox[3] - l.bbox[1]) * 1.5) close();
+          block.push(l);
+        }
+        close();
+      }
+      const colOf = (sp) => {
+        if (!twoCol) return 0;
+        const kind = lineKind.get(sp.line);
+        if (kind === 'margin') return -2;
+        if (kind === 'box') return -3;
+        return sp.x0 < mid - 12 && sp.x1 > mid + 12 ? -1 : (sp.x0 + sp.x1) / 2 < mid ? 0 : 1;
+      };
       const rows = [];
-      for (const c of [-1, 0, 1]) {
+      for (const c of [-3, -2, -1, 0, 1]) {
         const group = spans.filter((sp) => colOf(sp) === c).sort((a, b) => a.y - b.y || a.x0 - b.x0);
         let cur = null;
         for (const s of group) {
@@ -938,16 +1058,26 @@ const Epubify = (() => {
       if (twoCol) {
         // a full-width span's row also takes same-height spans from the columns
         for (const r of rows.filter((x) => x.col === -1)) {
-          for (const o of rows.filter((x) => x.col !== -1 && x.length && Math.abs(x[0].y - r[0].y) <= 5)) r.push(...o.splice(0));
+          for (const o of rows.filter((x) => x.col >= 0 && x.length && Math.abs(x[0].y - r[0].y) <= 5)) r.push(...o.splice(0));
         }
         for (let i = rows.length - 1; i >= 0; i--) if (!rows[i].length) rows.splice(i, 1);
       }
 
       let ordered = [];
       const pageAsides = [];
+      const marginRows = [];
+      const boxRows = [];
       const leftBlockRows = [];
       for (let row of rows) {
         const rowCol = row.col; // (row gets replaced by filtered copies below)
+        if (rowCol === -2 || rowCol === -3) {
+          // margin notes and boxed inserts: after the page's text, so they
+          // don't interrupt the narrative (as the script does for boxes)
+          const mtxt = fixSmallCaps(joinSorted(row));
+          if (mtxt.length > 1 && !repeated.has(mtxt) && !ROMAN_OR_DIGITS.test(mtxt))
+            (rowCol === -2 ? marginRows : boxRows).push({ txt: mtxt, y: row[0].y, x1: Math.max(...row.map((z) => z.x1)), bold: row.every((z) => z.bold), sz: row[0].size });
+          continue;
+        }
         const leftPart = row.filter((sp) => sp.x1 < bodyLeft - 8);
         const bodyPart = row.filter((sp) => sp.x1 >= bodyLeft - 8);
         let txt, aside, sz;
@@ -984,13 +1114,14 @@ const Epubify = (() => {
           if (!txt) continue;
         }
         if (repeated.has(txt) || ROMAN_OR_DIGITS.test(txt)) continue;
+        txt = fixSmallCaps(txt);
         // Labels inside vector figures ("weight layer", "iter. (1e4)"): short
         // runs of smaller type, or rows that are mostly numbers.
         const letters = (txt.match(/\p{L}/gu) || []).length;
         if (!CAPTION.test(txt) && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4) || letters < txt.replace(/\s/g, '').length * 0.4)) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
         const bold = row.every((sp) => sp.bold || !sp.text.trim());
-        ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold]);
+        ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold, Math.max(...row.map((sp) => sp.x1))]);
         if (aside && aside.length > 3 && !repeated.has(aside)) pageAsides.push([aside, sz]);
       }
       if (twoCol) {
@@ -1008,6 +1139,7 @@ const Epubify = (() => {
       // right column is not "indented" relative to the left one), and a larger
       // vertical gap than usual also starts a paragraph.
       const bodyX0 = new Map();
+      const bodyX1 = new Map();
       const lineGap = new Map();
       for (const c of new Set(ordered.map((t) => t[0]))) {
         const lines = ordered.filter((t) => t[0] === c && t[3] < bodySize + 3);
@@ -1015,6 +1147,9 @@ const Epubify = (() => {
         const cnt = new Counter();
         lines.forEach((t) => cnt.add(pyRound(t[4])));
         bodyX0.set(c, cnt.mostCommon());
+        const ends = new Counter();
+        lines.forEach((t) => ends.add(pyRound(t[6] / 4) * 4));
+        bodyX1.set(c, ends.mostCommon());
         const gaps = lines.slice(1).map((t, i) => t[1] - lines[i][1]).filter((g) => g > 0).sort((a, b) => a - b);
         if (gaps.length) lineGap.set(c, gaps[gaps.length >> 1]);
       }
@@ -1027,7 +1162,8 @@ const Epubify = (() => {
         capBuf = null;
       };
       const SECTION = /^((\d+(\.\d+)*\.?|[A-Z]\.|[IVX]+\.)\s+\S|(abstract|introduction|background|related work|methods?|materials and methods|results|discussion|conclusions?|acknowledge?ments?|references|appendix)\b)/i;
-      for (const [c, y, txt, sz, x0, bold] of ordered) {
+      let lastHeading = null;
+      for (const [c, y, txt, sz, x0, bold, x1] of ordered) {
         if (capBuf) {
           const gapBreak = c !== capBuf.c || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
           if (!gapBreak) {
@@ -1042,29 +1178,46 @@ const Epubify = (() => {
           continue;
         }
         // bold, body-sized, short and numbered (or a standard name): a section heading
-        if (bold && sz >= bodySize - 0.5 && sz < bodySize + 3 && txt.split(/\s+/).length <= 12 && SECTION.test(txt) && !endsWithAny(txt, ',;')) {
+        const nWords = txt.split(/\s+/).length;
+        const standalone = !paraBuf.length || endsWithAny(paraBuf.at(-1).trimEnd(), TERMINAL);
+        if (
+          bold && sz >= bodySize - 0.5 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
+          ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))
+        ) {
           flushPara();
-          parts.push(`<h3>${esc(txt)}</h3>`);
+          parts.push(`<h3>${esc(headingCase(txt))}</h3>`);
           prev = null;
+          lastHeading = null;
           continue;
         }
         if (sz >= bodySize + 3) {
           flushPara();
-          if (title === null && sz >= bodySize + 6) {
-            title = txt;
-            parts.push(`<h1>${esc(txt)}</h1>`);
-          } else parts.push(`<h2>${esc(txt)}</h2>`);
+          // a heading wrapped onto two lines is one heading
+          if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, '.:')) {
+            lastHeading.text += ' ' + txt;
+            lastHeading.y = y;
+            parts[lastHeading.i] = `<${lastHeading.tag}>${esc(lastHeading.text)}</${lastHeading.tag}>`;
+            if (lastHeading.tag === 'h1') title = lastHeading.text;
+            continue;
+          }
+          const tag = title === null && sz >= bodySize + 6 ? 'h1' : 'h2';
+          if (tag === 'h1') title = txt;
+          parts.push(`<${tag}>${esc(txt)}</${tag}>`);
+          lastHeading = { i: parts.length - 1, tag, text: txt, sz, y, c };
           prev = null;
           continue;
         }
+        lastHeading = null;
         const x = bodyX0.get(c);
         let startsPara = x !== undefined && x0 > x + 3;
         if (prev && prev.c === c && lineGap.has(c) && y - prev.y > lineGap.get(c) * 1.6) startsPara = true;
         if (prev && Math.abs(sz - prev.sz) >= 2) startsPara = true;
+        // the previous line stopped well short of the column edge: its paragraph ended
+        if (prev && prev.c === c && bodyX1.has(c) && prev.x1 < bodyX1.get(c) - (bodyX1.get(c) - (bodyX0.get(c) ?? 0)) * 0.15 && endsWithAny(prev.txt.trimEnd(), TERMINAL)) startsPara = true;
         if (startsWithAny(txt.trimStart(), ['•', '–', '- ', '* '])) startsPara = true;
         if (startsPara) flushPara();
         paraBuf.push(txt);
-        prev = { c, y, sz };
+        prev = { c, y, sz, x1, txt };
       }
       endCaption();
       // keep an unfinished paragraph open across the page break
@@ -1100,6 +1253,43 @@ const Epubify = (() => {
         if (tableLines.length) emit('<p>' + tableLines.map(esc).join('<br/>') + '</p>');
       }
       for (const [aside] of pageAsides) emit(`<p><small>${esc(aside)}</small></p>`);
+      // boxed inserts: bold short lines are their headings; a short line ends an item
+      if (boxRows.length) {
+        const ends = new Counter();
+        boxRows.forEach((r) => ends.add(pyRound(r.x1 / 6) * 6));
+        const right = Math.max(ends.mostCommon(), ...boxRows.map((r) => r.x1).filter((x) => x < ends.mostCommon() + 12));
+        let buf = [];
+        const out = () => {
+          if (buf.length) emit(`<p>${esc(joinWrapped(buf))}</p>`);
+          buf = [];
+        };
+        boxRows.forEach((r, i) => {
+          if (r.bold && r.txt.split(/\s+/).length <= 10) {
+            out();
+            emit(`<h4>${esc(headingCase(r.txt))}</h4>`);
+            return;
+          }
+          buf.push(r.txt);
+          const next = boxRows[i + 1];
+          if (r.x1 < right - 40 || !next || next.bold) out();
+        });
+        out();
+      }
+      // margin notes: consecutive lines joined into small paragraphs
+      if (marginRows.length) {
+        let buf = [];
+        let lastY = null;
+        const out = () => {
+          if (buf.length) emit(`<p><small>${esc(joinWrapped(buf))}</small></p>`);
+          buf = [];
+        };
+        for (const r of marginRows) {
+          if (lastY !== null && r.y - lastY > r.sz * 2) out();
+          buf.push(r.txt);
+          lastY = r.y;
+        }
+        out();
+      }
       // The script's multi-column branch dropped images entirely; keep them,
       // after the page's text (column order makes exact placement guesswork).
       const keep = pg.images.filter(([x0, y0, x1, y1]) => x1 - x0 >= 24 && y1 - y0 >= 24 && !(y1 < ph * 0.1 || y0 > ph * 0.92));
