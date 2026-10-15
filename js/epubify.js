@@ -338,9 +338,14 @@ const Epubify = (() => {
         const f = fontInfo(it.fontName);
         const x0 = tx[4];
         const yb = tx[5];
+        // corners along the baseline direction and the "up" direction, so
+        // sideways text (rotated tables) gets a true bounding box as well
+        const ulen = Math.hypot(tx[2], tx[3]) || 1;
+        const up = [tx[2] / ulen, tx[3] / ulen];
+        const corners = [0, it.width].flatMap((a) => [f.asc, f.desc].map((h) => [x0 + dir[0] * a + up[0] * h * size, yb + dir[1] * a + up[1] * h * size]));
         const span = {
           text: it.str,
-          bbox: [x0, yb - f.asc * size, x0 + it.width, yb - f.desc * size],
+          bbox: [Math.min(...corners.map((c) => c[0])), Math.min(...corners.map((c) => c[1])), Math.max(...corners.map((c) => c[0])), Math.max(...corners.map((c) => c[1]))],
           size,
           font: f.name,
           flags: f.bold || /Bold|-Bd|Medi|Semibold|Demi|Black|Heavy|CMBX/i.test(f.name) ? 16 : 0,
@@ -359,7 +364,25 @@ const Epubify = (() => {
           Math.max(...l.spans.map((s) => s.bbox[3])),
         ];
       }
-      pages.push({ page, vp, width: vp.width, height: vp.height, lines, images: imageBoxes(lib, ops, vp) });
+      const raster = imageBoxes(lib, ops, vp);
+      const regions = vectorRegions(lib, ops, vp, lines);
+      // text drawn inside a figure region is part of the picture: keep it
+      // out of the running text (labels of a flow diagram, table cells)
+      if (regions.length) {
+        const inside = (b) => regions.some((r) => (b[0] + b[2]) / 2 > r[0] && (b[0] + b[2]) / 2 < r[2] && (b[1] + b[3]) / 2 > r[1] && (b[1] + b[3]) / 2 < r[3]);
+        for (const l of lines) l.spans = l.spans.filter((sp) => !inside(sp.bbox));
+        for (let i = lines.length - 1; i >= 0; i--) if (!lines[i].spans.length) lines.splice(i, 1);
+        for (const l of lines) {
+          l.bbox = [
+            Math.min(...l.spans.map((s) => s.bbox[0])),
+            Math.min(...l.spans.map((s) => s.bbox[1])),
+            Math.max(...l.spans.map((s) => s.bbox[2])),
+            Math.max(...l.spans.map((s) => s.bbox[3])),
+          ];
+        }
+      }
+      const images = [...raster.filter((b) => !regions.some((r) => b[0] >= r[0] - 2 && b[1] >= r[1] - 2 && b[2] <= r[2] + 2 && b[3] <= r[3] + 2)), ...regions];
+      pages.push({ page, vp, width: vp.width, height: vp.height, lines, images });
     }
     let meta = { title: '', author: '' };
     try {
@@ -367,6 +390,90 @@ const Epubify = (() => {
       meta = { title: md.info.Title || '', author: md.info.Author || '' };
     } catch {}
     return { doc, pages, meta };
+  }
+
+  // Figures drawn as vector graphics (charts, flow diagrams, ruled tables)
+  // and sideways tables have no image to extract. Find them as clusters of
+  // drawing operations and/or rotated text, to be rendered as pictures.
+  function vectorRegions(lib, ops, vp, lines) {
+    const O = lib.OPS;
+    const W = vp.width;
+    const H = vp.height;
+    let ctm = [1, 0, 0, 1, 0, 0];
+    const stack = [];
+    const boxes = [];
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      const fn = ops.fnArray[i];
+      const args = ops.argsArray[i];
+      if (fn === O.save) stack.push(ctm);
+      else if (fn === O.restore) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      else if (fn === O.transform) ctm = lib.Util.transform(ctm, args);
+      else if (fn === O.paintFormXObjectBegin) {
+        stack.push(ctm);
+        if (args && Array.isArray(args[0]) && args[0].length === 6) ctm = lib.Util.transform(ctm, args[0]);
+      } else if (fn === O.paintFormXObjectEnd) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      else if (fn === O.constructPath && args) {
+        const mm = args[args.length - 1];
+        if (!mm || mm.length !== 4 || !isFinite(mm[0])) continue;
+        const m = lib.Util.transform(vp.transform, ctm);
+        const pts = [[mm[0], mm[1]], [mm[2], mm[1]], [mm[0], mm[3]], [mm[2], mm[3]]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+        const b = [Math.min(...pts.map((p) => p[0])), Math.min(...pts.map((p) => p[1])), Math.max(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[1]))];
+        const area = (b[2] - b[0]) * (b[3] - b[1]);
+        if (area > W * H * 0.5) continue; // page background
+        if (b[3] < H * 0.07 || b[1] > H * 0.93) continue; // header/footer bars, logos
+        if (b[2] - b[0] > W * 0.85 && b[3] - b[1] < 3) continue; // full-width rules
+        boxes.push({ b, w: 1, rot: 0 });
+      }
+    }
+    for (const l of lines) {
+      if (Math.abs(l.dir[0] - 1) <= 0.01) continue;
+      // sideways text in the outer margin is page furniture ("first published as …")
+      if ((l.bbox[0] + l.bbox[2]) / 2 > W * 0.94 || (l.bbox[0] + l.bbox[2]) / 2 < W * 0.06) continue;
+      for (const sp of l.spans) if (sp.text.trim()) boxes.push({ b: sp.bbox, w: 2, rot: l.dir[1] < 0 ? 90 : -90, text: l.spans.map((x) => x.text).join(''), line: l });
+    }
+    if (!boxes.length) return [];
+    // cluster boxes that touch or nearly touch
+    const parent = boxes.map((_, i) => i);
+    const find = (i) => {
+      while (parent[i] !== i) i = parent[i] = parent[parent[i]];
+      return i;
+    };
+    const near = (a, c, g = 8) => a[0] - g < c[2] && c[0] - g < a[2] && a[1] - g < c[3] && c[1] - g < a[3];
+    boxes.sort((a, c) => a.b[0] - c.b[0]); // sweep by x: stop once a box starts past this one's right edge
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length && boxes[j].b[0] - 8 < boxes[i].b[2]; j++) if (near(boxes[i].b, boxes[j].b)) parent[find(i)] = find(j);
+    }
+    const groups = new Map();
+    boxes.forEach((bx, i) => {
+      const k = find(i);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(bx);
+    });
+    const out = [];
+    for (const g of groups.values()) {
+      const r = [Infinity, Infinity, -Infinity, -Infinity];
+      for (const { b } of g) r.splice(0, 4, Math.min(r[0], b[0]), Math.min(r[1], b[1]), Math.max(r[2], b[2]), Math.max(r[3], b[3]));
+      const weight = sum(g.map((x) => x.w));
+      const rotated = g.filter((x) => x.rot);
+      const w = r[2] - r[0];
+      const h = r[3] - r[1];
+      const drawn = weight >= 15 && w >= 80 && h >= 50;
+      const sideways = rotated.length >= 6 && w >= 60 && h >= 60;
+      if (!drawn && !sideways) continue;
+      const box = [Math.max(0, r[0] - 3), Math.max(0, r[1] - 3), Math.min(W, r[2] + 3), Math.min(H, r[3] + 3)];
+      if (sideways && rotated.length * 2 > weight * 0.4) {
+        const rot = new Counter();
+        rotated.forEach((x) => rot.add(x.rot));
+        box.rotate = rot.mostCommon();
+        // a sideways caption ("Table 1 | …") is inside the region: lift it out
+        const cap = rotated.map((x) => x.text).find((t) => CAPTION.test(t));
+        if (cap) box.caption = ws(cap).trim();
+      }
+      box.vector = true;
+      out.push(box);
+    }
+    // a region inside another is part of it
+    return out.filter((r, i) => !out.some((o, j) => j !== i && o[0] <= r[0] && o[1] <= r[1] && o[2] >= r[2] && o[3] >= r[3] && (o[2] - o[0]) * (o[3] - o[1]) > (r[2] - r[0]) * (r[3] - r[1])));
   }
 
   // Walk the operator list tracking the transform matrix to find where each
@@ -400,21 +507,29 @@ const Epubify = (() => {
 
   // Which "Figure N" caption on this page belongs to an image? The nearest
   // one, preferring captions below the image (the usual layout).
-  const CAPTION = /^\s*(?:Fig(?:ure)?\.?|FIGURE)\s*(\d+)/;
+  // (case-insensitive: small-caps captions extract as "fig 1 |", "table 2 |")
+  const CAPTION = /^\s*(fig(?:ure)?\.?|table)\s*(\d+)\s*(?:[.:|]|$)/i;
+  const captionKey = (m) => `${/^t/i.test(m[1]) ? 'table' : 'figure'}-${m[2]}`;
   function captionNumber(box, rows) {
+    if (box.caption) {
+      const m = CAPTION.exec(box.caption);
+      if (m) return captionKey(m);
+    }
     let best = null;
     let bestD = Infinity;
     for (const r of rows) {
-      const m = CAPTION.exec(r.text);
+      const m = CAPTION.exec(stripMarks(r.text));
       if (!m) continue;
       const below = r.y0 - box[3];
       const above = box[1] - r.y1;
       const d = below >= -6 ? below : above >= -6 ? above + 40 : Infinity;
-      if (d < bestD) [best, bestD] = [m[1], d];
+      if (d < bestD) [best, bestD] = [captionKey(m), d];
     }
     return bestD < 250 ? best : null;
   }
-  const imgTag = (n, fig) => `<p><img src="pdfimg:${n}" alt=""${fig ? ` data-fig="${fig}"` : ''}/></p>`;
+  // a sideways caption lifted out of a region comes right after its picture
+  const imgTag = (n, fig, box) =>
+    `<p><img src="pdfimg:${n}" alt=""${fig ? ` data-fig="${fig}"` : ''}/></p>` + (box && box.caption ? `<p>${escRich(box.caption)}</p>` : '');
 
   // Render the page once and crop each image box (PyMuPDF get_pixmap(clip=…)).
   async function cropImages(pg, boxes) {
@@ -425,11 +540,24 @@ const Epubify = (() => {
     canvas.height = Math.ceil(vp.height);
     await pg.page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
     const out = [];
-    for (const [x0, y0, x1, y1] of boxes) {
+    for (const box of boxes) {
+      const [x0, y0, x1, y1] = box;
+      const w = Math.max(1, Math.round((x1 - x0) * scale));
+      const h = Math.max(1, Math.round((y1 - y0) * scale));
       const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round((x1 - x0) * scale));
-      c.height = Math.max(1, Math.round((y1 - y0) * scale));
-      c.getContext('2d').drawImage(canvas, x0 * scale, y0 * scale, c.width, c.height, 0, 0, c.width, c.height);
+      const ctx = c.getContext('2d');
+      if (box.rotate) {
+        // sideways content: turn it upright
+        c.width = h;
+        c.height = w;
+        ctx.translate(h / 2, w / 2);
+        ctx.rotate((box.rotate * Math.PI) / 180);
+        ctx.drawImage(canvas, x0 * scale, y0 * scale, w, h, -w / 2, -h / 2, w, h);
+      } else {
+        c.width = w;
+        c.height = h;
+        ctx.drawImage(canvas, x0 * scale, y0 * scale, w, h, 0, 0, w, h);
+      }
       out.push(await new Promise((resolve) => c.toBlob(resolve, 'image/png')));
     }
     return out;
@@ -735,7 +863,7 @@ const Epubify = (() => {
         blobs.forEach((blob, k) => {
           if (!blob) return;
           images.push(blob);
-          items.push({ kind: 'img', y0: keep[k][1], y1: keep[k][3], n: images.length - 1, fig: captionNumber(keep[k], rowsForCaptions) });
+          items.push({ kind: 'img', y0: keep[k][1], y1: keep[k][3], n: images.length - 1, fig: captionNumber(keep[k], rowsForCaptions), box: keep[k] });
         });
       }
       items.sort((a, b) => a.y0 - b.y0);
@@ -821,7 +949,7 @@ const Epubify = (() => {
         }
         if (it.kind === 'img') {
           flush();
-          parts.push(imgTag(it.n, it.fig));
+          parts.push(imgTag(it.n, it.fig, it.box));
           pageStart = false;
           continue;
         }
@@ -1338,7 +1466,7 @@ const Epubify = (() => {
         blobs.forEach((blob, k) => {
           if (!blob) return;
           images.push(blob);
-          emit(imgTag(images.length - 1, captionNumber(keep[k], capRows)));
+          emit(imgTag(images.length - 1, captionNumber(keep[k], capRows), keep[k]));
         });
       }
     }
@@ -1629,7 +1757,7 @@ const Epubify = (() => {
       if (p.querySelector('img')) continue;
       const m = CAPTION.exec(p.textContent);
       if (!m) continue;
-      const imgs = [...root.querySelectorAll(`img[data-fig="${m[1]}"]`)];
+      const imgs = [...root.querySelectorAll(`img[data-fig="${captionKey(m)}"]`)].filter((img) => !img.closest('figure'));
       if (!imgs.length) continue;
       const fig = doc.createElement('figure');
       for (const img of imgs) {
@@ -1639,6 +1767,9 @@ const Epubify = (() => {
       }
       const cap = doc.createElement('figcaption');
       cap.append(...p.childNodes);
+      // small-caps labels extract lowercase ("fig 1 |")
+      const t0 = cap.firstChild;
+      if (t0 && t0.nodeType === 3) t0.data = t0.data.replace(/^(\s*)(fig|table)\b/, (_, sp, w) => sp + w[0].toUpperCase() + w.slice(1));
       fig.append(cap);
       p.replaceWith(fig);
     }
@@ -1646,6 +1777,7 @@ const Epubify = (() => {
     // number: wrap them as "Figure N" so they can be placed all the same.
     const leftover = new Map();
     for (const img of root.querySelectorAll('img[data-fig]')) {
+      if (img.closest('figure')) continue;
       const n = img.getAttribute('data-fig');
       if (!leftover.has(n)) leftover.set(n, []);
       leftover.get(n).push(img);
@@ -1660,7 +1792,8 @@ const Epubify = (() => {
         if (holder && !holder.textContent.trim() && !holder.querySelector('img')) holder.remove();
       }
       const cap = fig.appendChild(doc.createElement('figcaption'));
-      cap.appendChild(doc.createElement('strong')).textContent = `Figure ${n}`;
+      const [kind, num] = n.split('-');
+      cap.appendChild(doc.createElement('strong')).textContent = `${kind === 'table' ? 'Table' : 'Figure'} ${num}`;
     }
     root.querySelectorAll('[data-fig]').forEach((el) => el.removeAttribute('data-fig'));
   }
