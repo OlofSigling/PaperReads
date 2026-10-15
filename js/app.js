@@ -901,7 +901,7 @@
         </form>
       </section>`}
       <form id="edit" class="stack card">
-        <p class="muted small" id="dupe" hidden></p>
+        <div class="note small stack" id="dupe" hidden></div>
         <label>Title <input name="title" required value="${esc(p.title || Lookup.cleanTitle(sharedTitle))}"></label>
         <label>Authors <small class="muted">(one per line)</small><textarea name="authors" rows="3">${esc((p.authors || []).join('\n'))}</textarea></label>
         <div class="row">
@@ -928,15 +928,47 @@
       checkDupe();
     };
     const checkDupe = async () => {
+      const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
       const doi = form.doi.value.trim().toLowerCase();
-      const ax = form.arxiv.value.trim().toLowerCase();
-      const title = form.title.value.trim().toLowerCase();
+      const ax = form.arxiv.value.trim().toLowerCase().replace(/v\d+$/, '');
+      const title = squash(form.title.value);
       const dupe = (await papers()).find(
-        (x) => x.id !== p.id && ((doi && (x.doi || '').toLowerCase() === doi) || (ax && (x.arxiv || '').toLowerCase() === ax) || (title && (x.title || '').toLowerCase() === title))
+        (x) =>
+          x.id !== p.id &&
+          ((doi && (x.doi || '').toLowerCase() === doi) || (ax && (x.arxiv || '').toLowerCase().replace(/v\d+$/, '') === ax) || (title.length > 10 && squash(x.title) === title))
       );
       const el = $('#dupe');
       el.hidden = !dupe;
-      if (dupe) el.innerHTML = `⚠️ Already in your library: <a href="#/paper/${dupe.id}">${esc(dupe.title)}</a>`;
+      if (!dupe || existing) return;
+      // A file that came with this share (or was downloaded from its link)
+      // can go straight onto the paper that's already here.
+      const file = inbox && inbox.file ? inbox.file : typeof pendingPdf !== 'undefined' ? pendingPdf : null;
+      const kind = file ? (isEpub(file) ? 'EPUB' : 'PDF') : null;
+      const has = kind === 'EPUB' ? dupe.hasEpub : dupe.hasPdf;
+      el.innerHTML = `<span>⚠️ Already in your library: <a href="#/paper/${dupe.id}">${esc(dupe.title)}</a></span>${
+        kind ? `<button type="button" class="btn small primary" id="dupe-attach">${has ? `Replace its ${kind} with this one` : `Add this ${kind} to it`}</button>` : ''
+      }`;
+      const btn = $('#dupe-attach');
+      if (!btn) return;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        if (kind === 'EPUB') await attachEpub(dupe.id, file, { source: 'Shared file' });
+        else await attachPdf(dupe.id, file);
+        if (inbox) await DB.del('inbox', inbox.id);
+        toast(`${kind} added to the paper`);
+        location.hash = `#/paper/${dupe.id}`;
+        // Its EPUB lacked figure images? The PDF has them: rebuild in the background.
+        const ep = kind === 'PDF' && (await DB.get('epubs', dupe.id));
+        if (ep && ep.missingFigures) {
+          toast('Remaking the EPUB with the figures from the PDF…');
+          makeEpubFor(dupe.id)
+            .then((res) => {
+              toast(res.missingFigures ? 'EPUB remade, but some figures are still missing' : 'EPUB remade with figures');
+              if (location.hash === `#/paper/${dupe.id}`) route();
+            })
+            .catch(() => toast('Couldn’t remake the EPUB. Try Remake on the paper page'));
+        }
+      });
     };
     form.doi.addEventListener('change', checkDupe);
     form.title.addEventListener('change', checkDupe);
