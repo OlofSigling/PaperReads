@@ -813,7 +813,13 @@ const Epubify = (() => {
           if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font });
         }
       }
-      if (!spans.length) continue;
+      if (!spans.length && !pg.images.length) continue;
+      if (!spans.length) {
+        // a page that is only a figure
+        const blobs = await cropImages(pg, pg.images.filter(([x0, y0, x1, y1]) => x1 - x0 >= 24 && y1 - y0 >= 24)).catch(() => []);
+        for (const blob of blobs) if (blob) parts.push(`<p><img src="pdfimg:${images.push(blob) - 1}" alt=""/></p>`);
+        continue;
+      }
       const bodyLeft = globalBodyLeft;
 
       // margin note, boxed insert, or data table left of the body column?
@@ -953,6 +959,17 @@ const Epubify = (() => {
         if (tableLines.length) parts.push('<p>' + tableLines.map(esc).join('<br/>') + '</p>');
       }
       for (const [aside] of pageAsides) parts.push(`<p><small>${esc(aside)}</small></p>`);
+      // The script's multi-column branch dropped images entirely; keep them,
+      // after the page's text (column order makes exact placement guesswork).
+      const keep = pg.images.filter(([x0, y0, x1, y1]) => x1 - x0 >= 24 && y1 - y0 >= 24 && !(y1 < ph * 0.1 || y0 > ph * 0.92));
+      if (keep.length) {
+        const blobs = await cropImages(pg, keep).catch(() => []);
+        for (const blob of blobs) {
+          if (!blob) continue;
+          images.push(blob);
+          parts.push(`<p><img src="pdfimg:${images.length - 1}" alt=""/></p>`);
+        }
+      }
     }
     pdf.doc.destroy();
     return { parts, images, title: title || pdf.meta.title.trim() || stem, author: pdf.meta.author.trim(), twoCol };
@@ -1621,7 +1638,24 @@ ${manifest.join('\n')}
     log(`→ extracted ~${words} words`);
     if (words < 120) warnings.push('Very little text was extracted.');
 
+    const wanted = src.root.querySelectorAll('img, object[data]').length;
     const media = await localizeImages(src.root, src.baseUrl, src.pdfImages || [], log);
+    const missingFigures = src.root.querySelectorAll('figure').length && src.label !== 'PDF' ? Math.max(0, wanted - media.length) : 0;
+    // Text sources whose figure images are off-limits to apps (PubMed Central
+    // manuscripts, Europe PMC): the stored PDF has the pictures, so use it,
+    // unless it's two-column, where the text route reads far better.
+    if (missingFigures && pdf && source === 'auto' && src.label !== 'arXiv HTML') {
+      log(`→ ${missingFigures} figure image(s) unavailable from ${src.label}; trying the stored PDF`);
+      try {
+        const alt = await make(paper, { source: 'pdf', pdf, log });
+        if (alt.twoCol) log('  the PDF is two-column, so keeping the text version');
+        else if (!alt.images) log('  no images found in the PDF either, so keeping the text version');
+        else return { ...alt, source: `PDF (${src.label} had no figure images)` };
+      } catch (err) {
+        log('  ! ' + err.message);
+      }
+    }
+    if (missingFigures) log(`  ! ${missingFigures} figure(s) will show their caption only`);
     absolutizeLinks(src.root, src.baseUrl);
     cleanFragment(src.root, title);
     log('→ generating cover');
@@ -1630,7 +1664,7 @@ ${manifest.join('\n')}
     const blob = await buildEpub({ title, authors, sourceUrl: src.sourceUrl, root: src.root, media, cover, id: paper.doi ? `doi:${paper.doi}` : `urn:paperreads:${paper.id}` });
     const file = new File([blob], safeName(title) + '.epub', { type: 'application/epub+zip' });
     log(`✓ ${file.name} (${Math.round(file.size / 1024)} KB)`);
-    return { file, cover, source: src.label, warnings };
+    return { file, cover, source: src.label, warnings, missingFigures, twoCol: !!src.twoCol, images: media.length };
   }
 
   // Which sources could work for this paper, for the UI.

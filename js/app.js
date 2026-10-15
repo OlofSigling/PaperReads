@@ -154,8 +154,8 @@
     return p;
   }
 
-  async function attachEpub(id, file, { cover = null, source = 'Imported' } = {}) {
-    await DB.put('epubs', { paperId: id, blob: file, name: file.name || 'paper.epub', size: file.size, cover, source, addedAt: now() });
+  async function attachEpub(id, file, { cover = null, source = 'Imported', missingFigures = 0 } = {}) {
+    await DB.put('epubs', { paperId: id, blob: file, name: file.name || 'paper.epub', size: file.size, cover, source, missingFigures, addedAt: now() });
     const p = await DB.get('papers', id);
     p.hasEpub = true;
     p.format = 'epub';
@@ -171,7 +171,7 @@
     const p = await DB.get('papers', id);
     const pdf = await DB.get('pdfs', id);
     const res = await Epubify.make(p, { source, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null });
-    await attachEpub(id, res.file, { cover: res.cover, source: res.source });
+    await attachEpub(id, res.file, { cover: res.cover, source: res.source, missingFigures: res.missingFigures });
     return res;
   }
 
@@ -531,6 +531,7 @@
             : epub
               ? `<div class="epub-info">${epub.cover ? '<img class="cover-thumb" id="cover-thumb" alt="">' : ''}<div>
                   <p class="muted small">${esc(epub.name)} · ${Math.max(1, Math.round(epub.size / 1024))} KB · from ${esc(epub.source)}</p>
+                  ${epub.missingFigures ? `<p class="small note">${epub.missingFigures} figure${epub.missingFigures > 1 ? 's show' : ' shows'} only a caption: the site doesn’t let apps download the images. ${pdf ? 'Tap <b>Remake</b> and choose <b>Stored PDF</b> to take the figures from the PDF.' : 'Attach the PDF (download it in your browser first), then tap <b>Remake</b> and choose <b>Stored PDF</b>.'}</p>` : ''}
                   <div class="row wrap"><a class="btn primary" href="#/read/${p.id}">Read EPUB</a><button class="btn" id="epub-share">Open with…</button></div>
                   <div class="row wrap"><button class="btn small" id="epub-remake">Remake</button><button class="btn small danger-ghost" id="epub-del">Remove</button></div>
                 </div></div>`
@@ -724,7 +725,7 @@
         };
         try {
           const res = await Epubify.make(p, { source: makeForm.source.value, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null, log });
-          await attachEpub(id, res.file, { cover: res.cover, source: res.source });
+          await attachEpub(id, res.file, { cover: res.cover, source: res.source, missingFigures: res.missingFigures });
           if (res.warnings.length) alert(res.warnings.join('\n\n'));
           toast('EPUB ready');
           if (location.hash === `#/paper/${id}`) rerender();

@@ -280,3 +280,5 @@ body.reading main { padding: 0; max-width: none; }
 .r-toc .hl-item q { display: block; font-style: italic; }
 .r-toc .hl-item small { display: block; color: var(--muted); margin-top: 2px; }
 .hl-quote { margin: 0; padding-left: 10px; border-left: 3px solid #f5c518; font-style: italic; max-height: 30vh; overflow: auto; }
+
+.note { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--text); }
