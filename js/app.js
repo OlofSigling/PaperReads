@@ -1217,31 +1217,46 @@
     let locationsReady = false;
     let saveTimer = null;
 
-    const commit = async () => {
-      // Progress only moves forward on its own; flipping back to check a
-      // figure shouldn't undo it. Set it lower by hand on the paper page.
+    // Save position and progress as you read, a moment after each page turn,
+    // not only when leaving: Android can freeze or close the app first.
+    // Progress only moves forward on its own (flipping back to check a
+    // figure shouldn't undo it); set it lower by hand on the paper page.
+    // One reading-log entry per session, updated as it grows.
+    let sessionLog = null;
+    let lastCfi = null;
+    const saveNow = async () => {
+      clearTimeout(saveTimer);
+      saveTimer = null;
       const fresh = await DB.get('papers', id);
       if (!fresh) return;
-      if (lastPct > pct(fresh) + 0.001) {
-        const finished = fresh.totalPages ? await logProgress(fresh, Math.round(lastPct * fresh.totalPages), false) : await logProgress(fresh, Math.round(lastPct * 100), true);
-        if (finished) toast('🎉 Finished! Marked as read');
+      if (lastCfi) fresh.epubCfi = lastCfi;
+      const before = fresh.totalPages ? fresh.currentPage || 0 : Math.round(fresh.percent || 0);
+      const reached = fresh.totalPages ? Math.min(fresh.totalPages, Math.round(lastPct * fresh.totalPages)) : Math.min(100, Math.round(lastPct * 100));
+      if (reached > before) {
+        if (fresh.totalPages) fresh.currentPage = reached;
+        else fresh.percent = reached;
+        if (!sessionLog || sessionLog.date !== today()) sessionLog = { paperId: id, date: today(), startPage: fresh.totalPages ? before : fresh.currentPage || 0 };
+        Object.assign(sessionLog, { ts: now(), page: fresh.currentPage || 0, percent: fresh.percent || 0, delta: (fresh.currentPage || 0) - sessionLog.startPage });
+        sessionLog.id = await DB.put('progress', sessionLog);
+        if (fresh.status === 'want' || fresh.status === 'none') await setStatus(fresh, 'reading', true);
+        if (pct(fresh) >= 1 && fresh.status !== 'read') {
+          await setStatus(fresh, 'read', true);
+          toast('🎉 Finished! Marked as read');
+        }
       }
+      await savePaper(fresh);
     };
+    const commit = saveNow;
 
     rendition.on('relocated', (loc) => {
       let v = locationsReady ? book.locations.percentageFromCfi(loc.start.cfi) : loc.start.percentage || 0;
       if (loc.atEnd) v = 1;
       lastPct = v;
+      lastCfi = loc.start.cfi;
       $('#r-pct').textContent = `${Math.round(v * 100)}%`;
       if (locationsReady) $('#r-seek').value = Math.round(v * 1000);
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(async () => {
-        const fresh = await DB.get('papers', id);
-        if (!fresh) return;
-        fresh.epubCfi = loc.start.cfi;
-        if (fresh.status === 'want' || fresh.status === 'none') await setStatus(fresh, 'reading', true);
-        await savePaper(fresh);
-      }, 800);
+      saveTimer = setTimeout(saveNow, 700);
     });
 
     // --- text selection ---
@@ -1428,12 +1443,13 @@
 
     const onHide = () => document.visibilityState === 'hidden' && commit();
     document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', commit);
     teardown = async () => {
       if (strip()) strip().removeEventListener('scroll', onStripScroll);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', commit);
       document.body.classList.remove('reading');
-      clearTimeout(saveTimer);
       await commit();
       try {
         book.destroy();
