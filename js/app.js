@@ -1264,6 +1264,7 @@
         <button class="r-zone left" id="r-prev" aria-label="Previous page"></button>
         <button class="r-zone right" id="r-next" aria-label="Next page"></button>
       </div>
+      <button class="r-backchip" id="r-back" hidden>↩ Back</button>
       <div class="r-selbar" id="r-selbar" hidden>
         <button class="btn small primary" id="hl-add">Highlight</button>
         <button class="btn small" id="hl-note">Highlight + note</button>
@@ -1415,7 +1416,60 @@
       contents.document.addEventListener('selectionchange', () => {
         if (!hasSelection()) setTimeout(() => !hasSelection() && hideBar(), 300);
       });
+      // In-document links: a citation shows its reference in a pop-up instead
+      // of jumping away; other links (figures, sections) jump, with a Back button.
+      contents.document.addEventListener(
+        'click',
+        (e) => {
+          const a = e.target.closest && e.target.closest('a[href]');
+          if (!a || hasSelection()) return;
+          const href = a.getAttribute('href');
+          const idx = href.indexOf('#');
+          if (idx < 0 || /^[a-z]+:/i.test(href)) return;
+          const target = contents.document.getElementById(decodeURIComponent(href.slice(idx + 1)));
+          if (!target) return;
+          e.preventDefault();
+          e.stopPropagation();
+          rememberSpot();
+          // jump by the target's exact position (bare "#id" links don't resolve on their own)
+          let cfi = null;
+          try {
+            cfi = contents.cfiFromNode(target);
+          } catch {}
+          if (target.closest('.refs, .ltx_bibliography, .ref-entry, .ltx_bibitem')) showReference(target, cfi);
+          else if (cfi) {
+            backBtn.hidden = false;
+            go(() => rendition.display(cfi));
+          }
+        },
+        true
+      );
     });
+    const backBtn = $('#r-back');
+    let backTo = null;
+    const rememberSpot = () => {
+      const loc = rendition.currentLocation();
+      if (loc && loc.start) backTo = loc.start.cfi;
+    };
+    backBtn.addEventListener('click', () => {
+      backBtn.hidden = true;
+      if (backTo) go(() => rendition.display(backTo));
+      backTo = null;
+    });
+    function showReference(target, cfi) {
+      const dlg = $('#dialog');
+      const item = target.closest('li, p, .ltx_bibitem') || target;
+      dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
+        <p class="ref-pop">${esc(item.textContent.replace(/\s+/g, ' ').trim())}</p>
+        <div class="row end"><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
+      dlg.onclose = () => {
+        if (dlg.returnValue === 'go' && cfi) {
+          backBtn.hidden = false;
+          go(() => rendition.display(cfi));
+        }
+      };
+      dlg.showModal();
+    }
     const drawHighlight = (h) => {
       try {
         rendition.annotations.highlight(h.cfi, { id: h.id }, () => openHighlight(h.id), 'pr-hl', HL_STYLE);

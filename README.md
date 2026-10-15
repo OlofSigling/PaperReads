@@ -15,7 +15,8 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
   arXiv's HTML version, Europe PMC full text (open-access PubMed Central papers; text and captions, no
   figure images), then the stored PDF. You can also import or share in an `.epub` made elsewhere.
 - **Built-in EPUB reader:** paginated, with contents, text size, and a position slider. It resumes where you left
-  off, and reading moves the paper's progress forward automatically.
+  off, and reading moves the paper's progress forward automatically. Citations, figures, tables and sections are
+  links: a citation shows its reference in a pop-up, other links jump there with a **↩ Back** button.
 - **Reading progress:** tracked per paper by page (or percent if the page count is unknown), with a dated
   reading log. Reaching the last page marks the paper as read.
 - **Catalogue:** collections, tags (rename or merge), search across title, authors, notes and abstract, plus filters and sorting.

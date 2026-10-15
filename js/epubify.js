@@ -74,8 +74,33 @@ const Epubify = (() => {
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' }[c]));
   const ws = (s) => s.replace(/\s+/g, ' ');
   const sum = (a) => a.reduce((x, y) => x + y, 0);
-  const ROMAN_OR_DIGITS = /^[\divxlcIVXLC]{1,6}$/;
-  const endsWithAny = (s, chars) => chars.includes(s.slice(-1));
+  // Superscript/subscript runs are carried through the text pipeline as
+  // private-use markers and become <sup>/<sub> only when escaped to HTML,
+  // so string checks keep working ("trials.³" still ends a sentence).
+  const SUP = ['\uE010', '\uE011'];
+  const SUB = ['\uE012', '\uE013'];
+  const MARKS = /[\uE010-\uE013]/g;
+  const stripMarks = (t) => String(t ?? '').replace(MARKS, '');
+  const dropScripts = (t) => String(t ?? '').replace(/\uE010[^\uE011]*\uE011|\uE012[^\uE013]*\uE013/g, '').replace(MARKS, '');
+  const ROMAN_OR_DIGITS = { test: (t) => /^[\divxlcIVXLC]{1,6}$/.test(stripMarks(t).trim()) };
+  const endsWithAny = (s, chars) => chars.includes(dropScripts(s).trimEnd().slice(-1));
+  // HTML-escape, then turn markers into balanced <sup>/<sub> tags
+  function escRich(t) {
+    let out = '';
+    let open = null;
+    for (const ch of esc(t)) {
+      if (ch === SUP[0] || ch === SUB[0]) {
+        if (open) out += `</${open}>`;
+        open = ch === SUP[0] ? 'sup' : 'sub';
+        out += `<${open}>`;
+      } else if (ch === SUP[1] || ch === SUB[1]) {
+        if (open) out += `</${open}>`;
+        open = null;
+      } else out += ch;
+    }
+    if (open) out += `</${open}>`;
+    return out.replace(/<(sup|sub)>\s*<\/\1>/g, '');
+  }
   const startsWithAny = (s, prefixes) => prefixes.some((p) => s.startsWith(p));
 
   // ================================================================ cover art
@@ -548,14 +573,28 @@ const Epubify = (() => {
   // small caps ("A DAM : A M ETHOD") and superscripts; only insert a space
   // where there is a visible gap between the spans.
   function joinSpans(spans) {
+    // the row's main text: the size with the most characters, and its height
+    const bySize = new Counter();
+    spans.forEach((s) => bySize.add(Math.round(s.size * 2) / 2, s.text.length));
+    const mainSize = bySize.mostCommon();
+    const main = spans.filter((s) => Math.abs(s.size - mainSize) < 0.6);
+    const mainY = main.length ? sum(main.map((s) => s.yc ?? s.y)) / main.length : null;
     let out = '';
     let prev = null;
     for (const s of spans) {
+      let text = s.text;
+      if (mainY !== null && s.size < mainSize * 0.86 && text.trim()) {
+        const dy = (s.yc ?? s.y) - mainY;
+        if (dy < -0.12 * mainSize) text = SUP[0] + text.trim() + SUP[1];
+        else if (dy > 0.08 * mainSize) text = SUB[0] + text.trim() + SUB[1];
+      }
       if (prev) {
         const gap = s.x0 - prev.x1;
-        if (gap > 0.12 * Math.min(prev.size, s.size) || /\s$/.test(out) || /^\s/.test(s.text)) out += ' ';
+        const script = text.startsWith(SUP[0]) || text.startsWith(SUB[0]);
+        if (!script && (gap > 0.12 * Math.min(prev.size, s.size) || /\s$/.test(out) || /^\s/.test(text))) out += ' ';
+        else if (script && gap > 0.5 * s.size) out += ' ';
       }
-      out += s.text;
+      out += text;
       prev = s;
     }
     return out;
@@ -758,9 +797,9 @@ const Epubify = (() => {
       if (buf.length) {
         const txt = joinLines(buf);
         if (state.label) {
-          parts.push(`<p><strong>${esc(state.label)}</strong> ${esc(txt)}</p>`);
+          parts.push(`<p><strong>${escRich(state.label)}</strong> ${escRich(txt)}</p>`);
           state.label = null;
-        } else parts.push(`<p>${esc(txt)}</p>`);
+        } else parts.push(`<p>${escRich(txt)}</p>`);
         buf.length = 0;
       }
       state.last = null;
@@ -775,7 +814,7 @@ const Epubify = (() => {
         if (it.kind === 'title') {
           flush();
           if (!state.titleDone) {
-            parts.push(`<h1>${esc(title)}</h1>`);
+            parts.push(`<h1>${escRich(title)}</h1>`);
             state.titleDone = true;
           }
           continue;
@@ -790,7 +829,7 @@ const Epubify = (() => {
         const sz = it.size;
         // footnotes: small type near the page bottom
         if (sz <= bodySize - 2 && it.y0 > ph * 0.78) {
-          if (fnCur.length && !/^([a-z*†‡§]|\d{1,2})[A-Z]/.test(txt) && !txt.startsWith('Correspondence')) fnCur.push(txt);
+          if (fnCur.length && !/^\uE010?([a-z*†‡§]|\d{1,2})\uE011?\s*[A-Z]/.test(txt) && !txt.startsWith('Correspondence')) fnCur.push(txt);
           else {
             if (fnCur.length) notes.push(joinLines(fnCur));
             fnCur = [txt];
@@ -804,7 +843,7 @@ const Epubify = (() => {
         // headings
         if ((sz >= bodySize + 2 && it.bold) || sz >= bodySize + 3) {
           flush();
-          parts.push(`<h2>${esc(txt)}</h2>`);
+          parts.push(`<h2>${escRich(txt)}</h2>`);
           pageStart = false;
           continue;
         }
@@ -816,7 +855,7 @@ const Epubify = (() => {
         }
         if (it.bold && txt.length <= 40 && sz >= bodySize - 1) {
           flush();
-          parts.push(`<h3>${esc(txt)}</h3>`);
+          parts.push(`<h3>${escRich(txt)}</h3>`);
           pageStart = false;
           continue;
         }
@@ -847,7 +886,7 @@ const Epubify = (() => {
       parts.push('<h2>Notes</h2>');
       for (let n of notes) {
         n = n.replace(/^([a-z]|\d{1,2}|[*†‡§])(?=[A-Z])/, '$1. ');
-        parts.push(`<p><small>${esc(n)}</small></p>`);
+        parts.push(`<p><small>${escRich(n)}</small></p>`);
       }
     }
     return { parts, title, author };
@@ -896,7 +935,7 @@ const Epubify = (() => {
       log('  single-column layout');
       const { parts, title, author } = await pdfSimpleFlow(pdf, bodySize, images, log);
       pdf.doc.destroy();
-      return { parts, images, title: title || pdf.meta.title.trim() || stem, author: author || pdf.meta.author.trim(), twoCol: false };
+      return { parts, images, title: dropScripts(title) || pdf.meta.title.trim() || stem, author: dropScripts(author) || pdf.meta.author.trim(), twoCol: false };
     }
     log(twoCol ? '  two-column layout' : '  layout with a side-margin column');
 
@@ -904,7 +943,7 @@ const Epubify = (() => {
     const ph = pdf.pages[0].height;
     // (digits normalised so "page 3" and "page 4" match, and a third of the
     // pages is enough since journals alternate left/right-page headers)
-    const edgeKey = (t) => t.toLowerCase().replace(/\s+/g, '').replace(/\d+/g, '#');
+    const edgeKey = (t) => stripMarks(t).toLowerCase().replace(/\s+/g, '').replace(/\d+/g, '#');
     const edgeLines = new Counter();
     for (const pg of pdf.pages) {
       const seen = new Set();
@@ -965,7 +1004,7 @@ const Epubify = (() => {
     const flushPara = () => {
       if (paraBuf.length) {
         const joined = joinWrapped(paraBuf);
-        if (joined) parts.push(`<p>${esc(joined)}</p>`);
+        if (joined) parts.push(`<p>${escRich(joined)}</p>`);
         paraBuf.length = 0;
       }
       if (pending.length) {
@@ -1158,7 +1197,7 @@ const Epubify = (() => {
       // collected on the side, so the paragraph around it stays in one piece.
       let capBuf = null;
       const endCaption = () => {
-        if (capBuf) emit(`<p>${esc(joinWrapped(capBuf.lines))}</p>`);
+        if (capBuf) emit(`<p>${escRich(joinWrapped(capBuf.lines))}</p>`);
         capBuf = null;
       };
       const SECTION = /^((\d+(\.\d+)*\.?|[A-Z]\.|[IVX]+\.)\s+\S|(abstract|introduction|background|related work|methods?|materials and methods|results|discussion|conclusions?|acknowledge?ments?|references|appendix)\b)/i;
@@ -1185,7 +1224,7 @@ const Epubify = (() => {
           ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))
         ) {
           flushPara();
-          parts.push(`<h3>${esc(headingCase(txt))}</h3>`);
+          parts.push(`<h3>${escRich(headingCase(txt))}</h3>`);
           prev = null;
           lastHeading = null;
           continue;
@@ -1196,13 +1235,13 @@ const Epubify = (() => {
           if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, '.:')) {
             lastHeading.text += ' ' + txt;
             lastHeading.y = y;
-            parts[lastHeading.i] = `<${lastHeading.tag}>${esc(lastHeading.text)}</${lastHeading.tag}>`;
+            parts[lastHeading.i] = `<${lastHeading.tag}>${escRich(lastHeading.text)}</${lastHeading.tag}>`;
             if (lastHeading.tag === 'h1') title = lastHeading.text;
             continue;
           }
           const tag = title === null && sz >= bodySize + 6 ? 'h1' : 'h2';
           if (tag === 'h1') title = txt;
-          parts.push(`<${tag}>${esc(txt)}</${tag}>`);
+          parts.push(`<${tag}>${escRich(txt)}</${tag}>`);
           lastHeading = { i: parts.length - 1, tag, text: txt, sz, y, c };
           prev = null;
           continue;
@@ -1232,7 +1271,7 @@ const Epubify = (() => {
         const flushBox = () => {
           if (bbuf.length) {
             const j = joinWrapped(bbuf);
-            if (j) emit(`<p>${esc(j)}</p>`);
+            if (j) emit(`<p>${escRich(j)}</p>`);
             bbuf.length = 0;
           }
         };
@@ -1243,16 +1282,16 @@ const Epubify = (() => {
             continue;
           }
           if (tableLines.length) {
-            emit('<p>' + tableLines.map(esc).join('<br/>') + '</p>');
+            emit('<p>' + tableLines.map(escRich).join('<br/>') + '</p>');
             tableLines = [];
           }
           if (lx0 > boxBase + 3 || startsWithAny(ltxt.trimStart(), ['•', '–', '-', '*'])) flushBox();
           bbuf.push(ltxt);
         }
         flushBox();
-        if (tableLines.length) emit('<p>' + tableLines.map(esc).join('<br/>') + '</p>');
+        if (tableLines.length) emit('<p>' + tableLines.map(escRich).join('<br/>') + '</p>');
       }
-      for (const [aside] of pageAsides) emit(`<p><small>${esc(aside)}</small></p>`);
+      for (const [aside] of pageAsides) emit(`<p><small>${escRich(aside)}</small></p>`);
       // boxed inserts: bold short lines are their headings; a short line ends an item
       if (boxRows.length) {
         const ends = new Counter();
@@ -1260,13 +1299,13 @@ const Epubify = (() => {
         const right = Math.max(ends.mostCommon(), ...boxRows.map((r) => r.x1).filter((x) => x < ends.mostCommon() + 12));
         let buf = [];
         const out = () => {
-          if (buf.length) emit(`<p>${esc(joinWrapped(buf))}</p>`);
+          if (buf.length) emit(`<p>${escRich(joinWrapped(buf))}</p>`);
           buf = [];
         };
         boxRows.forEach((r, i) => {
           if (r.bold && r.txt.split(/\s+/).length <= 10) {
             out();
-            emit(`<h4>${esc(headingCase(r.txt))}</h4>`);
+            emit(`<h4>${escRich(headingCase(r.txt))}</h4>`);
             return;
           }
           buf.push(r.txt);
@@ -1280,7 +1319,7 @@ const Epubify = (() => {
         let buf = [];
         let lastY = null;
         const out = () => {
-          if (buf.length) emit(`<p><small>${esc(joinWrapped(buf))}</small></p>`);
+          if (buf.length) emit(`<p><small>${escRich(joinWrapped(buf))}</small></p>`);
           buf = [];
         };
         for (const r of marginRows) {
@@ -1305,7 +1344,7 @@ const Epubify = (() => {
     }
     flushPara();
     pdf.doc.destroy();
-    return { parts, images, title: title || pdf.meta.title.trim() || stem, author: pdf.meta.author.trim(), twoCol };
+    return { parts, images, title: dropScripts(title) || pdf.meta.title.trim() || stem, author: pdf.meta.author.trim(), twoCol };
   }
 
   // ================================================================ HTML clean-up
@@ -1670,6 +1709,214 @@ const Epubify = (() => {
     if (moved) log(`→ placed ${moved} figure(s)/table(s) after their first mention`);
   }
 
+  // ================================================================ in-document links
+  // Turn citations, figure/table and section mentions into links. Sources
+  // that already link (arXiv HTML, PMC cross-references) keep theirs.
+  function replaceInText(root, re, make, skip = 'a, h1, h2, h3, h4, h5, h6, .refs, script, style, math') {
+    const doc = root.ownerDocument;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const n = walker.currentNode;
+      if (!re.test(n.data) || (n.parentElement && n.parentElement.closest(skip))) continue;
+      nodes.push(n);
+    }
+    let count = 0;
+    for (const node of nodes) {
+      const frag = doc.createDocumentFragment();
+      let last = 0;
+      for (const m of node.data.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))) {
+        const made = make(m, doc);
+        if (!made) continue;
+        frag.append(node.data.slice(last, m.index), ...made);
+        last = m.index + m[0].length;
+        count++;
+      }
+      if (!last) continue;
+      frag.append(node.data.slice(last));
+      node.replaceWith(frag);
+    }
+    return count;
+  }
+  const anchor = (doc, href, text) => {
+    const a = doc.createElement('a');
+    a.setAttribute('href', '#' + href);
+    a.textContent = text;
+    return a;
+  };
+  const surnameKey = (t) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z]/g, '');
+
+  function linkify(root, log) {
+    const doc = root.ownerDocument;
+    let links = 0;
+    // ---- the reference list
+    let container = root.querySelector('.ltx_bibliography, ol.refs');
+    if (container) container.classList.add('refs');
+    const REF_TITLE = /^(references|bibliography|literature cited|works cited|reference list|cited literature)\b/i;
+    let refHead = [...root.querySelectorAll('h1, h2, h3, h4')].find((h) => REF_TITLE.test(h.textContent.trim()));
+    // set smaller than body text, "References" can come out as a plain line
+    if (!refHead) refHead = [...root.querySelectorAll('p')].find((p) => REF_TITLE.test(p.textContent.trim()) && p.textContent.trim().length < 30);
+    // no title at all: a closing run of paragraphs that mostly start "12 Surname AB" / "[12]"
+    if (!refHead) {
+      const ps = [...root.children].filter((e) => e.localName === 'p');
+      const starts = (e) => /^\[?\d{1,3}[\].]?\s+[\p{Lu}][\p{L}'’-]+/u.test(e.textContent.trim());
+      let i = ps.length - 1;
+      let hits = 0;
+      let first = null;
+      for (; i >= 0 && ps.length - i <= 400; i--) {
+        if (starts(ps[i])) {
+          hits++;
+          first = ps[i];
+        } else if (ps.length - i > 6 && hits < (ps.length - i) * 0.5) break;
+      }
+      if (first && hits >= 5) {
+        refHead = doc.createElement('h2');
+        refHead.textContent = 'References';
+        first.before(refHead);
+      }
+    }
+    let rebuilt = false;
+    if (!container && refHead) {
+      const level = +refHead.tagName[1];
+      container = doc.createElement('div');
+      container.className = 'refs';
+      let n = refHead.nextElementSibling;
+      const take = [];
+      while (n && !(/^H[1-4]$/.test(n.tagName) && +n.tagName[1] <= level) && n.localName !== 'figure') {
+        take.push(n);
+        n = n.nextElementSibling;
+      }
+      refHead.after(container);
+      container.append(...take);
+      // PDF-sourced lists arrive as paragraphs, sometimes several entries per
+      // paragraph: split at "[12]" or "12 Surname X" / "12. Surname" starts.
+      const out = [];
+      for (const t of [...container.children].map((e) => e.textContent.trim()).filter(Boolean)) {
+        out.push(
+          ...t
+            .split(/(?=\[\d{1,3}\]\s)|(?<=\s)(?=\d{1,3}\.?\s+[\p{Lu}][\p{L}'’-]+,?\s+(?:[\p{Lu}]{1,3}[,\s]|[\p{Lu}]\.))/u)
+            .map((x) => x.trim())
+            .filter(Boolean)
+        );
+      }
+      container.replaceChildren(
+        ...out.map((t, i) => {
+          const p = doc.createElement('p');
+          p.className = 'ref-entry';
+          const m = /^\[?(\d{1,3})[\].]?\s/.exec(t);
+          p.id = m ? `ref-${m[1]}` : `ref-x${i + 1}`;
+          p.textContent = t;
+          return p;
+        })
+      );
+      rebuilt = true;
+    }
+    const byNumber = new Map();
+    const entries = [];
+    if (container) {
+      const items = container.matches('.ltx_bibliography') ? [...container.querySelectorAll('li')] : [...container.children];
+      items.forEach((e, i) => {
+        if (!e.id) e.id = `ref-x${i + 1}`;
+        const t = e.textContent.trim();
+        const m = /^\[?(\d{1,3})[\].]?\s/.exec(t);
+        const num = m ? +m[1] : container.matches('ol') ? i + 1 : null;
+        if (num && !byNumber.has(num)) byNumber.set(num, e.id);
+        const year = (/\b(1[89]\d\d|20\d\d)[a-z]?\b/.exec(t) || [])[0];
+        const first = (/^(?:\[?\d+[\].]?\s+)?([\p{Lu}][\p{L}'’-]+)/u.exec(t) || [])[1];
+        entries.push({ id: e.id, year, first: first && surnameKey(first) });
+      });
+    }
+    // sources that already link their citations (arXiv HTML, PMC xrefs)
+    const refIds = new Set(entries.map((e) => e.id));
+    const alreadyLinked = [...root.querySelectorAll('a[href^="#"]')].some((a) => refIds.has(a.getAttribute('href').slice(1)));
+
+    // ---- numbered citations: [3], [3, 5–7], and superscript ³ / ⁵,⁶
+    if (byNumber.size && !alreadyLinked) {
+      const linkNums = (inner, doc) => {
+        const out = [];
+        let last = 0;
+        for (const m of inner.matchAll(/\d{1,3}/g)) {
+          if (!byNumber.has(+m[0])) continue;
+          out.push(inner.slice(last, m.index), anchor(doc, byNumber.get(+m[0]), m[0]));
+          last = m.index + m[0].length;
+        }
+        if (!out.length) return null;
+        out.push(inner.slice(last));
+        return out;
+      };
+      links += replaceInText(root, /\[(\d{1,3}(?:\s*[-–,;]\s*\d{1,3})*)\]/, (m, doc) => {
+        const inner = linkNums(m[1], doc);
+        return inner && ['[', ...inner, ']'];
+      });
+      // superscripts in the title/author block are affiliations, not citations
+      const bodyStart = [...root.querySelectorAll('h2, h3, h4')].find((h) => !h.closest('header'));
+      for (const sup of root.querySelectorAll('sup')) {
+        if (sup.closest('a, .refs, h1, h2, h3, h4, math')) continue;
+        if (bodyStart && sup.compareDocumentPosition(bodyStart) & Node.DOCUMENT_POSITION_FOLLOWING) continue;
+        const t = sup.textContent.trim();
+        if (!/^\d{1,3}(?:\s*[-–,]\s*\d{1,3})*$/.test(t) && !/^\d{1,3}(?:\s+\d{1,3})+$/.test(t)) continue;
+        const prevText = sup.previousSibling && sup.previousSibling.nodeType === 3 ? sup.previousSibling.data : '';
+        if (/\d\s*$/.test(prevText)) continue; // 10⁶ is a power, not a citation
+        const inner = linkNums(t, doc);
+        if (!inner) continue;
+        sup.replaceChildren(...inner);
+        links++;
+      }
+    }
+    // ---- author–year citations: (Amodei, 2024; VandeHei & Allen, 2025)
+    if (entries.length && byNumber.size < entries.length / 2 && !alreadyLinked) {
+      const find = (name, year) => entries.find((e) => e.first && e.year && e.first === surnameKey(name) && e.year.slice(0, 4) === year.slice(0, 4));
+      links += replaceInText(root, /\(([^()]{0,240}?\b(?:1[89]|20)\d\d[a-z]?)\)/u, (m, doc) => {
+        const out = ['('];
+        let any = false;
+        for (const [i, seg] of m[1].split(/;\s*/).entries()) {
+          if (i) out.push('; ');
+          const c = /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|and|&)\s*[\p{L}'’.-]*)?,?\s+((?:1[89]|20)\d\d[a-z]?)/u.exec(seg);
+          const hit = c && find(c[1], c[2]);
+          if (hit) {
+            out.push(seg.slice(0, c.index), anchor(doc, hit.id, c[0]), seg.slice(c.index + c[0].length));
+            any = true;
+          } else out.push(seg);
+        }
+        out.push(')');
+        return any ? out : null;
+      });
+    }
+    // ---- figure / table mentions → the figure
+    const figs = new Map();
+    root.querySelectorAll('figure').forEach((f) => {
+      const m = /^\s*(Figs?\.?|Figures?|FIGURE|Tables?|TABLE)\s*(\d+)/i.exec((f.querySelector('figcaption') || f).textContent);
+      if (!m) return;
+      const key = `${kindOf(m[1])}-${m[2]}`;
+      if (!f.id) f.id = key;
+      if (!figs.has(key)) figs.set(key, f.id);
+    });
+    if (figs.size)
+      links += replaceInText(
+        root,
+        /\b(Figs?\.?|Figures?|Tables?|Tabs?\.)\s*(\d+)([A-Za-z]?)/,
+        (m, doc) => {
+          const id = figs.get(`${kindOf(m[1])}-${m[2]}`);
+          return id ? [anchor(doc, id, m[0])] : null;
+        },
+        'a, h1, h2, h3, h4, h5, h6, .refs, figcaption, script, style, math'
+      );
+    // ---- "Section 3.1" → the heading numbered 3.1
+    const secs = new Map();
+    root.querySelectorAll('h2, h3, h4').forEach((h) => {
+      const m = /^\s*((?:\d+\.)*\d+)\.?\s+\S/.exec(h.textContent);
+      if (!m) return;
+      if (!h.id) h.id = `sec-${m[1].replace(/\./g, '-')}`;
+      secs.set(m[1], h.id);
+    });
+    if (secs.size)
+      links += replaceInText(root, /\b(Sections?|Sec\.|§)\s*((?:\d+\.)*\d+)/, (m, doc) => {
+        const id = secs.get(m[2]);
+        return id ? [anchor(doc, id, m[0])] : null;
+      });
+    if (links) log(`→ linked ${links} citation(s) and cross-reference(s)`);
+  }
+
   // ================================================================ sources
   async function fromArxivHtml(arxivId, log) {
     log(`→ fetching arXiv HTML for ${arxivId}`);
@@ -1763,7 +2010,7 @@ const Epubify = (() => {
         if (c.nodeType !== 1) continue;
         const n = c.localName;
         if (INLINE[n]) inline(c, into.appendChild(doc.createElement(INLINE[n])));
-        else if (n === 'xref' && /^(fig|table)$/.test(c.getAttribute('ref-type') || '') && c.getAttribute('rid')) {
+        else if (n === 'xref' && /^(fig|table|bibr|fn|sec)$/.test(c.getAttribute('ref-type') || '') && c.getAttribute('rid')) {
           const a = into.appendChild(doc.createElement('a'));
           a.setAttribute('href', '#' + c.getAttribute('rid').split(/\s+/)[0]);
           inline(c, a);
@@ -1787,7 +2034,13 @@ const Epubify = (() => {
       for (const c of node.children) {
         const n = c.localName;
         if (n === 'title') into.append(inline(c, doc.createElement(`h${Math.min(6, depth + 1)}`)));
-        else if (n === 'sec' || n === 'ack' || n === 'app' || n === 'boxed-text') block(c, depth + 1, into);
+        else if (n === 'sec' || n === 'ack' || n === 'app' || n === 'boxed-text') {
+          // section ids, so "see Section 2" cross-references resolve
+          const before = into.childElementCount;
+          block(c, depth + 1, into);
+          const h = into.children[before];
+          if (h && /^H\d$/.test(h.tagName) && c.getAttribute('id')) h.setAttribute('id', c.getAttribute('id'));
+        }
         else if (n === 'p') into.append(inline(c, doc.createElement('p')));
         else if (n === 'list') {
           const ol = doc.createElement(c.getAttribute('list-type') === 'order' ? 'ol' : 'ul');
@@ -1878,7 +2131,11 @@ const Epubify = (() => {
       if (refs.length) {
         root.append(el('h2', 'References'));
         const ol = root.appendChild(el('ol'));
-        refs.forEach((r) => ol.append(el('li', ws((r.querySelector('mixed-citation, element-citation, citation') || r).textContent).trim())));
+        ol.className = 'refs';
+        refs.forEach((r) => {
+          const li = ol.appendChild(el('li', ws((r.querySelector('mixed-citation, element-citation, citation') || r).textContent).trim()));
+          if (r.getAttribute('id')) li.setAttribute('id', r.getAttribute('id'));
+        });
       }
     }
     root.querySelectorAll('h1').forEach((h) => {
@@ -2084,6 +2341,7 @@ ${manifest.join('\n')}
 
     if (src.label === 'PDF') groupPdfFigures(src.root);
     placeFigures(src.root, log);
+    linkify(src.root, log);
     const wanted = src.root.querySelectorAll('img, object[data]').length;
     const media = await localizeImages(src.root, src.baseUrl, src.pdfImages || [], log);
     const missingFigures = src.root.querySelectorAll('figure').length && src.label !== 'PDF' ? Math.max(0, wanted - media.length) : 0;
