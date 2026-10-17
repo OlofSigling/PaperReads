@@ -30,6 +30,12 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
   as resolved.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
 - **Queue:** drag to prioritise your want-to-read list. The top items show as "Next up" on the home screen.
+- **Ask Claude** (optional): ask about a paper on its page or in the reader (💬), or select a passage and tap
+  **Ask**. Answers can go to your notes or concerns. Uses your own Anthropic API key (⚙ Settings), pay-as-you-go:
+  a question costs a few cents. The paper's text is sent to Anthropic with your question; the key stays on the device.
+- **Sync between devices** (optional): through a hidden app folder in your own Google Drive, so phone and laptop
+  stay in step. Syncs on opening the app and shortly after changes; per record, the newer edit wins. Free, but
+  needs a one-time Google client ID (steps in ⚙ Settings).
 - **Stats:** yearly goal with on-pace indicator, papers per month, pages read, day streaks, average rating, top tags.
 
 ## Install on your phone
@@ -80,7 +86,9 @@ After changing any file, bump `CACHE` in `sw.js` so installed copies pick up the
 | `js/db.js` | IndexedDB wrapper (shared with the service worker) |
 | `js/lookup.js` | DOI / arXiv / title lookup, PDF download, page counting |
 | `js/backup.js` | Backup .zip export, inspect, merge/replace restore |
+| `js/sync.js` | Google Drive sync (app data folder), merge with tombstones |
+| `js/ask.js` | Ask Claude about a paper (Anthropic API, user's own key) |
 | `js/epubify.js` | Browser port of epubify.py: covers, PDF → HTML, HTML clean-up, EPUB packaging |
-| `vendor/` | pdf.js 5.4.296, epub.js 0.3.93, JSZip 3.10.1 (bundled so everything works offline) |
+| `vendor/` | pdf.js 5.4.296, epub.js 0.3.93, JSZip 3.10.1, Anthropic TypeScript SDK 0.131.0 (bundled with esbuild) |
 | `sw.js` | Offline cache and share-target handler |
 | `manifest.webmanifest` | Install metadata and share target |

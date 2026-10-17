@@ -296,6 +296,209 @@
     };
   }
 
+  // A small dialog asking for a line of text; resolves null on cancel.
+  const askNote = (title, initial = '') =>
+    new Promise((resolve) => {
+      const dlg = $('#dialog');
+      dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${esc(title)}</h3>
+        <textarea name="note" rows="4" placeholder="Your note">${esc(initial)}</textarea>
+        <div class="row end"><button value="cancel" class="btn" formnovalidate>Cancel</button><button value="ok" class="btn primary">Save</button></div></form>`;
+      dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('[name=note]', dlg).value.trim() : null);
+      dlg.showModal();
+      $('[name=note]', dlg).focus();
+    });
+
+  // ---------- Ask Claude: a conversation per paper, on the paper page and in the reader ----------
+  const money = (d) => (d < 0.01 ? '<1¢' : d < 1 ? `${Math.round(d * 100)}¢` : `$${d.toFixed(2)}`);
+
+  // Just enough Markdown for chat answers: paragraphs, lists, bold, italics, code.
+  function md(text) {
+    const inline = (t) =>
+      esc(t)
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>');
+    const out = [];
+    let list = null;
+    let para = [];
+    const flushPara = () => {
+      if (para.length) out.push(`<p>${para.map(inline).join('<br>')}</p>`);
+      para = [];
+    };
+    const flushList = () => {
+      if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`);
+      list = null;
+    };
+    for (const line of String(text || '').split('\n')) {
+      const ul = /^\s*[-*•]\s+(.*)$/.exec(line);
+      const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+      const h = /^#{1,4}\s+(.*)$/.exec(line);
+      if (ul || ol) {
+        flushPara();
+        const tag = ul ? 'ul' : 'ol';
+        if (!list || list.tag !== tag) {
+          flushList();
+          list = { tag, items: [] };
+        }
+        list.items.push((ul || ol)[1]);
+      } else if (!line.trim()) {
+        flushPara();
+        flushList();
+      } else if (h) {
+        flushPara();
+        flushList();
+        out.push(`<p><strong>${inline(h[1])}</strong></p>`);
+      } else {
+        if (list) flushList();
+        para.push(line);
+      }
+    }
+    flushPara();
+    flushList();
+    return out.join('');
+  }
+
+  const ASK_SUGGESTIONS = ['Summarise the main claims and evidence', 'What are the weak points?', 'Explain the methods simply', 'What should I check before believing this?'];
+
+  function askUI(root, paperId, { addConcern = null } = {}) {
+    let quote = '';
+    let busy = false;
+    let controller = null;
+    const turnHtml = (t, i) =>
+      t.role === 'user'
+        ? `<div class="turn u">${t.quote ? `<q>${esc(t.quote.length > 200 ? t.quote.slice(0, 200) + '…' : t.quote)}</q>` : ''}${esc(t.question)}</div>`
+        : `<div class="turn a">${md(t.text)}${t.notice ? `<p class="muted small">${esc(t.notice)}</p>` : ''}
+            <div class="turn-actions"><button type="button" class="link small" data-tonote="${i}">→ Notes</button>${addConcern ? `<button type="button" class="link small" data-toconcern="${i}">→ Concern</button>` : ''}<span class="muted small" title="${esc(Ask.MODELS[t.model]?.label || t.model || '')}, from the paper’s ${esc(t.source || 'text')}">${money(t.cost || 0)}</span></div></div>`;
+
+    async function draw() {
+      const [p, key] = await Promise.all([DB.get('papers', paperId), DB.setting('anthropicKey', '')]);
+      const chat = p.chat || [];
+      const total = chat.reduce((sum, t) => sum + (t.cost || 0), 0);
+      if (!key) {
+        root.innerHTML = `<h3>Ask Claude</h3><p class="muted small">Ask questions about this paper, have passages explained, or get help with your concerns. Add your Anthropic API key in <a href="#/settings">Settings</a> to start.</p>`;
+        return;
+      }
+      root.innerHTML = `<h3>Ask Claude ${total ? `<span class="muted small">${money(total)} so far</span>` : ''}</h3>
+        <div class="chat">${chat.map(turnHtml).join('')}<div class="turn u" id="ask-q" hidden></div><div class="turn a" id="ask-live" hidden></div></div>
+        ${chat.length ? '' : `<div class="chips">${ASK_SUGGESTIONS.map((x) => `<button type="button" class="chip" data-suggest>${esc(x)}</button>`).join('')}</div>`}
+        <div class="ask-quote" ${quote ? '' : 'hidden'}><q>${esc(quote.length > 200 ? quote.slice(0, 200) + '…' : quote)}</q><button type="button" class="r-btn" id="ask-unquote" aria-label="Don’t ask about this passage">✕</button></div>
+        <form class="ask-form"><textarea name="q" rows="2" placeholder="${quote ? 'What about this passage?' : 'Ask about this paper…'}" aria-label="Question"></textarea><button class="btn primary" id="ask-go">Ask</button></form>
+        <p class="muted small" id="ask-err" hidden></p>
+        ${chat.length ? '<button type="button" class="link small" id="ask-clear">Clear conversation</button>' : ''}`;
+      const form = $('.ask-form', root);
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (busy) return controller && controller.abort();
+        const q = form.q.value.trim();
+        if (q) send(q);
+      });
+      form.q.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) form.requestSubmit();
+      });
+      $$('[data-suggest]', root).forEach((b) => b.addEventListener('click', () => send(b.textContent)));
+      $('#ask-unquote', root)?.addEventListener('click', () => {
+        quote = '';
+        draw();
+      });
+      $('#ask-clear', root)?.addEventListener('click', async () => {
+        if (!confirm('Clear this conversation?')) return;
+        const fresh = await DB.get('papers', paperId);
+        fresh.chat = [];
+        await savePaper(fresh);
+        draw();
+      });
+      $$('[data-tonote]', root).forEach((b) =>
+        b.addEventListener('click', async () => {
+          const fresh = await DB.get('papers', paperId);
+          const t = fresh.chat[Number(b.dataset.tonote)];
+          const q = fresh.chat[Number(b.dataset.tonote) - 1];
+          fresh.notes = `${(fresh.notes || '').trim()}${fresh.notes ? '\n\n' : ''}Q: ${q ? q.question : ''}\nClaude: ${t.text.trim()}`;
+          await savePaper(fresh);
+          toast('Added to your notes');
+        })
+      );
+      $$('[data-toconcern]', root).forEach((b) =>
+        b.addEventListener('click', async () => {
+          const fresh = await DB.get('papers', paperId);
+          const i = Number(b.dataset.toconcern);
+          const t = fresh.chat[i];
+          const q = fresh.chat[i - 1] || {};
+          const first = t.text.trim().split(/\n\s*\n/)[0].replace(/[*_`#]/g, '');
+          const text = await askNote('Concern', first.length > 300 ? first.slice(0, 300) + '…' : first);
+          if (text === null) return;
+          await addConcern({ text, quote: q.quote || '' });
+          toast('Concern added');
+        })
+      );
+      const chatEl = $('.chat', root);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    async function send(question) {
+      if (busy) return;
+      busy = true;
+      const form = $('.ask-form', root);
+      const qEl = $('#ask-q', root);
+      const live = $('#ask-live', root);
+      const err = $('#ask-err', root);
+      $('.chips', root)?.remove();
+      err.hidden = true;
+      qEl.hidden = false;
+      qEl.innerHTML = `${quote ? `<q>${esc(quote.length > 200 ? quote.slice(0, 200) + '…' : quote)}</q>` : ''}${esc(question)}`;
+      live.hidden = false;
+      live.innerHTML = '<p class="muted thinking">Reading the paper and thinking…</p>';
+      form.q.value = '';
+      form.q.disabled = true;
+      $('#ask-go', root).textContent = 'Stop';
+      controller = new AbortController();
+      let text = '';
+      let frame = 0;
+      const chatEl = $('.chat', root);
+      try {
+        const p = await DB.get('papers', paperId);
+        const turns = await Ask.ask(p, Ask.sendable(p.chat || []), question, {
+          quote,
+          signal: controller.signal,
+          onText: (d) => {
+            text += d;
+            if (frame) return;
+            frame = requestAnimationFrame(() => {
+              frame = 0;
+              live.innerHTML = md(text);
+              chatEl.scrollTop = chatEl.scrollHeight;
+            });
+          },
+        });
+        const fresh = await DB.get('papers', paperId);
+        fresh.chat = [...(fresh.chat || []), ...turns];
+        await savePaper(fresh);
+        quote = '';
+        busy = false;
+        await draw();
+      } catch (e) {
+        busy = false;
+        await draw();
+        const box = $('.ask-form', root);
+        if (box) box.q.value = question;
+        const errEl = $('#ask-err', root);
+        if (errEl) {
+          errEl.hidden = false;
+          errEl.textContent = e.message;
+        }
+      }
+    }
+
+    draw();
+    return {
+      refresh: draw,
+      // ask about a selected passage
+      quote(text) {
+        quote = text;
+        draw().then(() => $('.ask-form textarea', root)?.focus());
+      },
+    };
+  }
+
   async function allTags() {
     const counts = {};
     for (const p of await papers()) for (const t of p.tags || []) counts[t] = (counts[t] || 0) + 1;
@@ -310,6 +513,7 @@
     [/^#\/stats$/, viewStats],
     [/^#\/collections$/, viewCollections],
     [/^#\/backup$/, viewBackup],
+    [/^#\/settings$/, viewSettings],
     [/^#\/add$/, (q) => viewEdit(null, q)],
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
@@ -647,6 +851,7 @@
         </section>
 
         <section class="card" id="concerns-card"></section>
+        <section class="card" id="ask-card"></section>
 
         <div class="seg" role="group" aria-label="Status">
           ${['want', 'reading', 'read', 'none'].map((s) => `<button type="button" data-status="${s}" class="${p.status === s ? 'on' : ''}">${STATUS[s]}</button>`).join('')}
@@ -775,7 +980,8 @@
       })
     );
 
-    concernsUI($('#concerns-card'), id);
+    const paperConcerns = concernsUI($('#concerns-card'), id);
+    askUI($('#ask-card'), id, { addConcern: (c) => paperConcerns.add(c) });
 
     // Files: PDF / EPUB
     $$('[data-format]').forEach((b) =>
@@ -1365,6 +1571,7 @@
         <span class="r-title">${esc(p.title)}</span>
         <button class="r-btn" id="r-smaller" aria-label="Smaller text">A−</button>
         <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
+        <button class="r-btn" id="r-ask" aria-label="Ask Claude">💬</button>
         <button class="r-btn" id="r-concerns" aria-label="Concerns">⚠<span class="r-count" id="r-ccount"></span></button>
         <button class="r-btn" id="r-toc" aria-label="Contents">☰</button>
       </div>
@@ -1377,11 +1584,13 @@
         <button class="btn small primary" id="hl-add">Highlight</button>
         <button class="btn small" id="hl-note">Highlight + note</button>
         <button class="btn small" id="hl-concern">Concern</button>
+        <button class="btn small" id="hl-ask">Ask</button>
         <button class="r-btn" id="hl-cancel" aria-label="Cancel">✕</button>
       </div>
       <div class="r-foot"><input type="range" id="r-seek" min="0" max="1000" value="0" aria-label="Position in paper" disabled><span id="r-pct">…</span></div>
       <nav class="r-toc" id="r-toc-panel" hidden></nav>
       <section class="r-toc r-concerns" id="r-concerns-panel" hidden></section>
+      <section class="r-toc r-concerns r-ask" id="r-ask-panel" hidden></section>
     </div>`;
 
     const ePub = await Epubify.epubjs();
@@ -1595,16 +1804,6 @@
       toast('Highlighted');
       refreshPanel();
     };
-    const askNote = (title, initial = '') =>
-      new Promise((resolve) => {
-        const dlg = $('#dialog');
-        dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${esc(title)}</h3>
-          <textarea name="note" rows="4" placeholder="Your note">${esc(initial)}</textarea>
-          <div class="row end"><button value="cancel" class="btn" formnovalidate>Cancel</button><button value="ok" class="btn primary">Save</button></div></form>`;
-        dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('[name=note]', dlg).value.trim() : null);
-        dlg.showModal();
-        $('[name=note]', dlg).focus();
-      });
     $('#hl-add').addEventListener('click', () => addHighlight());
     $('#hl-note').addEventListener('click', async () => {
       const keep = pending;
@@ -1648,17 +1847,19 @@
 
     const tocPanel = $('#r-toc-panel');
     const concernsPanel = $('#r-concerns-panel');
-    $('#r-toc').addEventListener('click', () => {
-      tocPanel.hidden = !tocPanel.hidden;
-      concernsPanel.hidden = true;
-    });
+    const askPanel = $('#r-ask-panel');
+    // one side panel at a time
+    const showPanel = (panel) => {
+      for (const x of [tocPanel, concernsPanel, askPanel]) x.hidden = x !== panel || !x.hidden;
+    };
+    $('#r-toc').addEventListener('click', () => showPanel(tocPanel));
     // Concerns: same list as the paper page, in a side panel
     const CONCERN_STYLE = { fill: '#f97316', 'fill-opacity': '0.22', 'mix-blend-mode': 'multiply' };
     const drawConcern = (c) => {
       try {
         rendition.annotations.highlight(c.cfi, { id: c.id }, () => {
+          tocPanel.hidden = askPanel.hidden = true;
           concernsPanel.hidden = false;
-          tocPanel.hidden = true;
         }, 'pr-concern', CONCERN_STYLE);
       } catch {}
     };
@@ -1681,9 +1882,17 @@
       },
     });
     setCount(p);
-    $('#r-concerns').addEventListener('click', () => {
-      concernsPanel.hidden = !concernsPanel.hidden;
-      tocPanel.hidden = true;
+    $('#r-concerns').addEventListener('click', () => showPanel(concernsPanel));
+    const ask = askUI(askPanel, id, { addConcern: (c) => concerns.add(c) });
+    $('#r-ask').addEventListener('click', () => showPanel(askPanel));
+    $('#hl-ask').addEventListener('click', () => {
+      const keep = pending;
+      if (!keep) return;
+      clearSelection();
+      hideBar();
+      tocPanel.hidden = concernsPanel.hidden = true;
+      askPanel.hidden = false;
+      ask.quote(keep.text);
     });
     $('#hl-concern').addEventListener('click', async () => {
       const keep = pending;
@@ -1766,6 +1975,125 @@
   }
 
   // ---------- backup ----------
+  async function viewSettings() {
+    setTitle('Settings');
+    const [key, model, clientId, syncFiles, last] = await Promise.all([
+      DB.setting('anthropicKey', ''),
+      DB.setting('claudeModel', Ask.DEFAULT_MODEL),
+      DB.setting('googleClientId', ''),
+      DB.setting('syncFiles', true),
+      DB.setting('syncLast', null),
+    ]);
+    const origin = location.origin;
+    main.innerHTML = `
+      <section class="card stack">
+        <h3>Ask Claude</h3>
+        <p class="muted small">Ask about papers on the paper page or in the reader (💬). Uses your own key from
+          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>: pay-as-you-go, billed separately from a Claude subscription.
+          A question costs a few cents. The key stays on this device; questions send the paper’s text to Anthropic.</p>
+        <form id="ai-form" class="stack">
+          <label>API key <input type="password" name="key" autocomplete="off" placeholder="sk-ant-…" value="${esc(key)}"></label>
+          <label>Model <select name="model">${Object.entries(Ask.MODELS).map(([id, m]) => `<option value="${id}"${id === model ? ' selected' : ''}>${m.label} (${m.note})</option>`).join('')}</select></label>
+          <div class="row"><button class="btn primary">Save</button><button type="button" class="btn" id="ai-test">Test key</button>${key ? '<button type="button" class="btn danger-ghost" id="ai-forget">Remove key</button>' : ''}</div>
+          <p class="muted small" id="ai-status"></p>
+        </form>
+      </section>
+      <section class="card stack">
+        <h3>Sync with Google Drive</h3>
+        <p class="muted small">Keeps this device and your others (phone, laptop) in step through a hidden app folder in your own Google Drive.
+          It syncs when the app opens and shortly after changes. Free: it uses your Drive storage.</p>
+        <p id="sy-state" class="small"></p>
+        <form id="sy-form" class="stack">
+          <label>Google client ID <input name="cid" autocomplete="off" placeholder="…apps.googleusercontent.com" value="${esc(clientId)}"></label>
+          <label class="check"><input type="checkbox" name="files" ${syncFiles ? 'checked' : ''}> Also sync PDFs and EPUBs (uses more data)</label>
+          <div class="row"><button class="btn primary" id="sy-go">${clientId ? 'Sync now' : 'Connect and sync'}</button>${clientId ? '<button type="button" class="btn danger-ghost" id="sy-off">Disconnect</button>' : ''}</div>
+        </form>
+        <details class="small"><summary>Get a client ID (once, about 10 minutes)</summary>
+          <ol class="steps">
+            <li>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Google Cloud</a> with your Google account and create a project (any name, e.g. PaperReads).</li>
+            <li>Turn on the <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Drive API</a> for it.</li>
+            <li>Go to <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener">Google Auth Platform</a> → Get started: app name PaperReads, your email, audience <b>External</b>.</li>
+            <li>Under <b>Audience</b> → Test users, add your own Gmail address.</li>
+            <li>Under <b>Clients</b> → Create client: type <b>Web application</b>; under Authorised JavaScript origins add <code>${esc(origin)}</code>. Create, then copy the Client ID.</li>
+            <li>Paste it above and tap Connect. Google will warn that the app isn’t verified: that’s expected for your own app; continue.</li>
+            <li>On your other devices, open this app, paste the same client ID here and connect.</li>
+          </ol>
+        </details>
+      </section>
+      <section class="card">
+        <h3>Backup</h3>
+        <p class="muted small">A .zip of everything, to keep somewhere safe. <a href="#/backup">Backup and restore →</a></p>
+      </section>`;
+
+    const aiStatus = $('#ai-status');
+    $('#ai-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await DB.setSetting('anthropicKey', e.target.key.value.trim());
+      await DB.setSetting('claudeModel', e.target.model.value);
+      aiStatus.textContent = 'Saved.';
+    });
+    $('#ai-test').addEventListener('click', async () => {
+      const f = $('#ai-form');
+      await DB.setSetting('anthropicKey', f.key.value.trim());
+      await DB.setSetting('claudeModel', f.model.value);
+      aiStatus.textContent = 'Checking…';
+      try {
+        await Ask.test();
+        aiStatus.textContent = '✓ The key works.';
+      } catch (err) {
+        aiStatus.textContent = err.message;
+      }
+    });
+    $('#ai-forget')?.addEventListener('click', async () => {
+      await DB.setSetting('anthropicKey', '');
+      route();
+    });
+
+    const showState = (st) => {
+      const el = $('#sy-state');
+      if (!el) return;
+      el.textContent = st.busy
+        ? 'Syncing…'
+        : st.error
+          ? `Last sync failed: ${st.error}`
+          : st.needsSignIn
+            ? 'Tap Sync now to sign in to Google again.'
+            : st.last
+              ? `Last synced ${fmtDate(st.last)} at ${new Date(st.last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`
+              : clientId
+                ? 'Not synced yet.'
+                : '';
+    };
+    showState({ ...Sync.state, last: Sync.state.last || last });
+    const unsub = Sync.subscribe(showState);
+    teardown = () => unsub();
+    if (clientId) Sync.loadGis().catch(() => {}); // ready before the tap, so the sign-in popup isn't blocked
+
+    $('#sy-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const cid = e.target.cid.value.trim();
+      if (!/\.apps\.googleusercontent\.com$/.test(cid)) return toast('That doesn’t look like a Google client ID');
+      await DB.setSetting('googleClientId', cid);
+      await DB.setSetting('syncFiles', e.target.files.checked);
+      try {
+        const r = await Sync.run({ interactive: true });
+        if (r && !r.skipped) {
+          toast(r.changes || r.uploaded ? `Synced: ${r.changes} change(s) here, ${r.uploaded} file(s) uploaded` : 'Synced: everything was up to date');
+          Sync.start();
+        } else if (r && r.skipped) toast(r.skipped === 'offline' ? 'You’re offline' : `Not synced: ${r.skipped}`);
+      } catch (err) {
+        toast(`Sync failed: ${err.message}`);
+      }
+      showSyncButton();
+    });
+    $('#sy-off')?.addEventListener('click', async () => {
+      if (!confirm('Stop syncing this device? Your data here and in Drive stays as it is.')) return;
+      await Sync.disconnect();
+      showSyncButton();
+      route();
+    });
+  }
+
   async function viewBackup() {
     setTitle('Backup');
     const [all, pdfs, epubs, lastBackup] = await Promise.all([papers(), DB.all('pdfs'), DB.all('epubs'), DB.setting('lastBackup', null)]);
@@ -2075,5 +2403,30 @@
   // Ask the browser not to evict our data under storage pressure.
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
-  DB.open().then(route);
+  // Sync: a top-bar button shows its state; tapping it syncs (and signs in if needed).
+  async function showSyncButton() {
+    const btn = $('#sync-btn');
+    btn.hidden = !(await DB.setting('googleClientId', ''));
+  }
+  Sync.subscribe((st) => {
+    const btn = $('#sync-btn');
+    btn.classList.toggle('spin', st.busy);
+    btn.classList.toggle('attn', !st.busy && (st.needsSignIn || !!st.error));
+    btn.title = st.busy ? 'Syncing…' : st.error ? `Sync failed: ${st.error}` : st.needsSignIn ? 'Tap to sync' : 'Sync now';
+  });
+  $('#sync-btn').addEventListener('click', () =>
+    Sync.run({ interactive: true })
+      .then((r) => r && !r.skipped && toast(r.changes ? `Synced: ${r.changes} change(s)` : 'Synced'))
+      .catch((err) => toast(`Sync failed: ${err.message}`))
+  );
+  // Fresh data from another device: redraw list-like views (never a form or the reader).
+  Sync.onApplied = () => {
+    if (/^(#\/?|#\/(library|queue|stats|collections))?$/.test(location.hash.split('?')[0]) || /^#\/paper\//.test(location.hash)) route();
+  };
+
+  DB.open().then(() => {
+    route();
+    showSyncButton();
+    Sync.start();
+  });
 })();

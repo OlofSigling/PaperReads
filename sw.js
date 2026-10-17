@@ -1,7 +1,7 @@
 // Service worker: caches the app shell for offline use and receives shares.
 importScripts('js/db.js');
 
-const CACHE = 'paperreads-v19';
+const CACHE = 'paperreads-v20';
 const SHELL = [
   './',
   'index.html',
@@ -11,10 +11,13 @@ const SHELL = [
   'js/app.js',
   'js/epubify.js',
   'js/backup.js',
+  'js/sync.js',
+  'js/ask.js',
   'vendor/pdf.min.mjs',
   'vendor/pdf.worker.min.mjs',
   'vendor/jszip.min.js',
   'vendor/epub.min.js',
+  'vendor/anthropic-sdk.min.mjs',
   'manifest.webmanifest',
   'icons/icon.svg',
   'icons/icon-192.png',

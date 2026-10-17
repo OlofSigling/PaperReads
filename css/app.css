@@ -303,3 +303,32 @@ body.reading main { padding: 0; max-width: none; }
 
 .r-backchip { position: absolute; left: 12px; bottom: calc(env(safe-area-inset-bottom) + 56px); z-index: 6; font: inherit; font-size: .85rem; background: var(--text); color: var(--bg); border: none; border-radius: 999px; padding: 8px 14px; box-shadow: 0 4px 12px rgba(0,0,0,.25); cursor: pointer; }
 .ref-pop { margin: 0; font-size: .9rem; line-height: 1.5; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
+
+/* sync button */
+.sync-btn { background: none; border: 0; color: inherit; cursor: pointer; line-height: 1; }
+.sync-btn.spin { animation: spin 1s linear infinite; }
+.sync-btn.attn { color: var(--accent); }
+.sync-btn.attn::after { content: '•'; font-size: .8em; vertical-align: super; }
+@keyframes spin { to { transform: rotate(360deg); } }
+ol.steps { padding-left: 1.2em; margin: 8px 0 0; }
+ol.steps li { margin-bottom: 6px; }
+
+/* Ask Claude */
+.chat { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; margin-bottom: 10px; }
+.r-ask .chat { max-height: none; overflow: visible; }
+.turn { padding: 8px 12px; border-radius: 12px; font-size: .95rem; line-height: 1.45; overflow-wrap: anywhere; }
+.turn p { margin: 0 0 .5em; } .turn p:last-of-type { margin-bottom: 0; }
+.turn ul, .turn ol { margin: 0 0 .5em; padding-left: 1.2em; }
+.turn.u { align-self: flex-end; background: var(--accent-soft); max-width: 88%; }
+.turn.u q, .ask-quote q { display: block; font-style: italic; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+.turn.a { background: var(--surface-2); }
+.turn-actions { display: flex; gap: 12px; align-items: center; margin-top: 6px; }
+.turn-actions span { margin-left: auto; }
+.thinking { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 999px; padding: 6px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
+.ask-quote { display: flex; gap: 6px; align-items: flex-start; border-left: 3px solid var(--accent); padding-left: 8px; margin-bottom: 8px; }
+.ask-quote q { flex: 1; margin: 0; }
+.ask-form { display: flex; gap: 8px; align-items: flex-end; }
+.ask-form textarea { flex: 1; resize: vertical; }

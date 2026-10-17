@@ -17,7 +17,8 @@ const Backup = (() => {
     const zip = new JSZip();
     const stores = {};
     for (const s of DATA_STORES) stores[s] = await DB.all(s);
-    stores.settings = stores.settings.filter((r) => r.key !== 'lastBackup');
+    // device-only settings stay out: the API key above all
+    stores.settings = stores.settings.filter((r) => !['lastBackup', 'anthropicKey', 'tombstones', 'syncLast', 'syncConnected', 'googleClientId'].includes(r.key));
     const files = { pdfs: [], epubs: [] };
     if (includeFiles) {
       const pdfs = await DB.all('pdfs');
