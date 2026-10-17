@@ -32,12 +32,37 @@
     return `${Math.round(p.percent || 0)}%`;
   }
 
-  function toast(msg) {
+  // toast(msg) or toast(msg, { label, run }) for a one-tap action.
+  function toast(msg, action) {
     const el = $('#toast');
     el.textContent = msg;
+    el.classList.toggle('has-action', !!action);
+    if (action) {
+      const b = el.appendChild(document.createElement('button'));
+      b.type = 'button';
+      b.textContent = action.label;
+      b.onclick = () => {
+        el.classList.remove('show');
+        action.run();
+      };
+    }
     el.classList.add('show');
     clearTimeout(toast.t);
-    toast.t = setTimeout(() => el.classList.remove('show'), 2600);
+    toast.t = setTimeout(() => el.classList.remove('show'), action ? 6000 : 2600);
+  }
+
+  // Reaching the end doesn't finish a paper (a slider nudged to 100% happens);
+  // finishing is the user's call, offered here.
+  function offerFinish(p, after = () => {}) {
+    toast('At the end', {
+      label: 'Mark as read',
+      run: async () => {
+        const fresh = await DB.get('papers', p.id);
+        await setStatus(fresh, 'read');
+        toast('🎉 Marked as read');
+        after();
+      },
+    });
   }
 
   function parseQuery(qs) {
@@ -70,7 +95,6 @@
           ${p.rating ? stars(p.rating) : ''}
           ${p.hasPdf ? '<span class="badge">PDF</span>' : ''}
           ${p.hasEpub ? '<span class="badge">EPUB</span>' : ''}
-          ${openConcerns(p) ? `<span class="badge s-concern">⚠ ${openConcerns(p)}</span>` : ''}
           ${(p.tags || []).slice(0, 3).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}
         </span>
       </a>${extra}
@@ -103,14 +127,9 @@
       p.currentPage = v;
     }
     await DB.put('progress', { paperId: p.id, date: today(), ts: now(), page: p.currentPage || 0, percent: p.percent || 0, delta });
-    let finished = false;
     if ((p.status === 'want' || p.status === 'none') && pct(p) > 0) await setStatus(p, 'reading', true);
-    if (pct(p) >= 1 && p.status !== 'read') {
-      await setStatus(p, 'read', true);
-      finished = true;
-    }
     await savePaper(p);
-    return finished;
+    return pct(p) >= 1 && p.status !== 'read'; // at the end, not yet marked read
   }
 
   async function setStatus(p, status, skipSave) {
@@ -166,6 +185,17 @@
   }
 
   const isEpub = (f) => f && (f.type === 'application/epub+zip' || /\.epub$/i.test(f.name || ''));
+  // A saved web page: Chrome's "Download page" makes .mhtml.
+  const isWebFile = (f) => f && (/^(text\/html|multipart\/related|message\/rfc822|application\/x-mimearchive)$/.test(f.type) || /\.(mhtml?|mht|html?)$/i.test(f.name || ''));
+  const fileKind = (f) => (isEpub(f) ? 'EPUB' : isWebFile(f) ? 'web page' : 'PDF');
+
+  // EPUB from a web page (fetched or saved), stored on the paper.
+  async function makeWebEpub(id, page) {
+    const p = await DB.get('papers', id);
+    const res = await Epubify.make(p, { source: 'web', page });
+    await attachEpub(id, res.file, { cover: res.cover, source: res.source, missingFigures: res.missingFigures });
+    return res;
+  }
 
   // Make an EPUB in the background and store it (used after adding a paper).
   async function makeEpubFor(id, source = 'auto') {
@@ -398,8 +428,9 @@
     num.addEventListener('input', () => (rng.value = num.value));
     dlg.onclose = async () => {
       if (dlg.returnValue !== 'ok') return;
-      const finished = await logProgress(p, Number(num.value), isPct);
-      toast(finished ? '🎉 Finished! Marked as read' : 'Progress saved');
+      const atEnd = await logProgress(p, Number(num.value), isPct);
+      if (atEnd) offerFinish(p, route);
+      else toast('Progress saved');
       route();
     };
     dlg.showModal();
@@ -719,8 +750,9 @@
         await savePaper(p);
         return rerender();
       }
-      const finished = await logProgress(p, Number(e.target.v.value), !p.totalPages);
-      toast(finished ? '🎉 Finished! Marked as read' : 'Progress saved');
+      const atEnd = await logProgress(p, Number(e.target.v.value), !p.totalPages);
+      if (atEnd) offerFinish(p, rerender);
+      else toast('Progress saved');
       rerender();
     });
 
@@ -969,8 +1001,8 @@
           <label>DOI, arXiv ID, link or title
             <input name="q" placeholder="e.g. 10.1038/nature14539 or arxiv.org/abs/1706.03762" value="${esc(shared || '')}" autocomplete="off">
           </label>
-          <button class="btn primary">Look up</button>
-          <p class="muted small" id="lookup-status">${inbox && inbox.file ? `Shared ${isEpub(inbox.file) ? 'EPUB' : 'PDF'}: ${esc(inbox.file.name)}. It will be attached when you save.` : 'Fills in the details automatically (needs internet).'}</p>
+          <div class="row"><button class="btn primary">Look up</button><label class="btn">Open a file…<input type="file" id="add-file" accept=".pdf,.epub,.mhtml,.mht,.html,.htm,application/pdf,application/epub+zip,multipart/related,text/html" hidden></label></div>
+          <p class="muted small" id="lookup-status">${inbox && inbox.file ? `Shared ${fileKind(inbox.file)}: ${esc(inbox.file.name)}. ${isWebFile(inbox.file) ? 'It will be made into an EPUB' : 'It will be attached'} when you save.` : 'Fills in the details automatically (needs internet).'}</p>
           <ul class="list compact" id="results"></ul>
         </form>
       </section>`}
@@ -990,10 +1022,18 @@
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
-        ${!(inbox && inbox.file) ? `<label class="check"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv or a PDF link)</label>` : ''}
+        ${!(inbox && inbox.file) ? `<label class="check" id="getpdf-row"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv or a PDF link)</label>` : ''}
         ${!(inbox && inbox.file && isEpub(inbox.file)) ? `<label class="check"><input type="checkbox" name="getepub" checked> Make an EPUB for reading in the app</label>` : ''}`}
         <div class="row end"><a class="btn" href="${existing ? `#/paper/${p.id}` : '#/'}">Cancel</a><button class="btn primary">${existing ? 'Save' : 'Add paper'}</button></div>
       </form>`;
+
+    // A file picked here goes through the same path as a shared one.
+    $('#add-file')?.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const id = await DB.put('inbox', { title: '', text: '', url: '', file, receivedAt: now() });
+      location.hash = `#/add?inbox=${id}`;
+    });
 
     const form = $('#edit');
     const fill = (meta) => {
@@ -1017,15 +1057,27 @@
       // A file that came with this share (or was downloaded from its link)
       // can go straight onto the paper that's already here.
       const file = inbox && inbox.file ? inbox.file : typeof pendingPdf !== 'undefined' ? pendingPdf : null;
-      const kind = file ? (isEpub(file) ? 'EPUB' : 'PDF') : null;
-      const has = kind === 'EPUB' ? dupe.hasEpub : dupe.hasPdf;
-      el.innerHTML = `<span>⚠️ Already in your library: <a href="#/paper/${dupe.id}">${esc(dupe.title)}</a></span>${
-        kind ? `<button type="button" class="btn small primary" id="dupe-attach">${has ? `Replace its ${kind} with this one` : `Add this ${kind} to it`}</button>` : ''
-      }`;
+      const kind = file ? fileKind(file) : pendingPage ? 'web page' : null;
+      const has = kind === 'PDF' ? dupe.hasPdf : dupe.hasEpub;
+      const label = kind === 'web page' ? (has ? 'Remake its EPUB from this page' : 'Make its EPUB from this page') : has ? `Replace its ${kind} with this one` : `Add this ${kind} to it`;
+      el.innerHTML = `<span>⚠️ Already in your library: <a href="#/paper/${dupe.id}">${esc(dupe.title)}</a></span>${kind ? `<button type="button" class="btn small primary" id="dupe-attach">${label}</button>` : ''}`;
       const btn = $('#dupe-attach');
       if (!btn) return;
       btn.addEventListener('click', async () => {
         btn.disabled = true;
+        if (kind === 'web page') {
+          btn.textContent = 'Making the EPUB…';
+          try {
+            await makeWebEpub(dupe.id, pendingPage);
+          } catch (err) {
+            btn.disabled = false;
+            return toast(err.message);
+          }
+          if (inbox) await DB.del('inbox', inbox.id);
+          toast('EPUB ready to read');
+          location.hash = `#/paper/${dupe.id}`;
+          return;
+        }
         if (kind === 'EPUB') await attachEpub(dupe.id, file, { source: 'Shared file' });
         else await attachPdf(dupe.id, file);
         if (inbox) await DB.del('inbox', inbox.id);
@@ -1047,6 +1099,7 @@
     form.doi.addEventListener('change', checkDupe);
     form.title.addEventListener('change', checkDupe);
 
+    let pendingPage = null; // a web page (fetched, or a shared saved page) to make the EPUB from
     let pdfLink = null; // shared link that points at a PDF
     let pendingPdf = null; // that PDF, if already downloaded during lookup
     let pdfError = null;
@@ -1087,6 +1140,28 @@
         if (!form.title.value) form.title.value = title;
         status.textContent = 'Pick the matching paper:';
         showList(results);
+        return true;
+      };
+      // A web page: a paper's landing page names its DOI; anything else
+      // (blog post, article) is saved as itself.
+      const usePage = async (page, how) => {
+        const meta = Epubify.pageMeta(page);
+        if (meta.doi && navigator.onLine) {
+          try {
+            const { meta: m } = await Lookup.resolve(meta.doi);
+            if (m) {
+              fill({ ...m, url: m.url || meta.url });
+              status.textContent = 'Found the paper this page is about. Check the details and save.';
+              if (how === 'Saved web page') pendingPage = page; // a fetched landing page is just a pointer
+              return true;
+            }
+          } catch {}
+        }
+        if (!meta.title) return false;
+        pendingPage = page;
+        fill({ ...meta, doi: meta.doi || '' });
+        if ($('#getpdf-row')) $('#getpdf-row').hidden = true;
+        status.textContent = `${how}. It’ll be saved as an EPUB. Check the details and save.`;
         return true;
       };
       // Work out which paper a PDF is from its contents.
@@ -1149,6 +1224,16 @@
               pdfError = err.message;
             }
           }
+          // An ordinary web page: read it directly, if the site allows that.
+          let pageError = null;
+          if (ids.url && !pdfLink) {
+            status.textContent = 'Reading the page…';
+            try {
+              if (await usePage(await Epubify.fetchPage(ids.url), 'Web page')) return;
+            } catch (err) {
+              pageError = err.message;
+            }
+          }
           // No identifier: search Crossref by title (use shared page title if we have it).
           const q2 = Lookup.cleanTitle(ids.url ? sharedTitle || input.replace(ids.url, '') : input);
           if (q2 && (await searchTitle(q2))) return;
@@ -1156,7 +1241,9 @@
             ? `Couldn’t download that PDF (${pdfError}). Download it in your browser and share the file to PaperReads; the app will read the details from it.`
             : q2
               ? 'Nothing found. Fill in by hand.'
-              : 'No DOI or arXiv ID in that link. Paste the title to search, or fill in by hand.';
+              : pageError
+                ? `Couldn’t read that page (${pageError}). To save it as an EPUB: in Chrome tap ⋮ → ⬇ Download, then share the downloaded page to PaperReads.`
+                : 'No DOI or arXiv ID in that link. Paste the title to search, or fill in by hand.';
         } catch (err) {
           status.textContent = `Lookup failed (${err.message}). Fill in by hand.`;
         }
@@ -1165,8 +1252,18 @@
         e.preventDefault();
         run();
       });
-      const sharedPdf = inbox && inbox.file && !isEpub(inbox.file) ? inbox.file : null;
+      const sharedPdf = inbox && inbox.file && fileKind(inbox.file) === 'PDF' ? inbox.file : null;
+      const sharedPage = inbox && inbox.file && isWebFile(inbox.file) ? inbox.file : null;
       (async () => {
+        if (sharedPage) {
+          try {
+            if (await usePage(await Epubify.readPageFile(sharedPage), 'Saved web page')) return;
+            status.textContent = 'Couldn’t find a title in that page. Fill in the details by hand.';
+          } catch (err) {
+            status.textContent = `Couldn’t read that file (${err.message}).`;
+          }
+          return;
+        }
         if (shared) await run();
         // A shared PDF file: if the link (if any) didn't identify it, read the PDF itself.
         if (sharedPdf && !form.doi.value && !form.arxiv.value) {
@@ -1212,9 +1309,11 @@
       await setStatus(p, f.status.value);
       if (inbox) await DB.del('inbox', inbox.id);
       let pdfJob = Promise.resolve();
-      if (inbox && inbox.file) {
+      if (inbox && inbox.file && !isWebFile(inbox.file)) {
         if (isEpub(inbox.file)) await attachEpub(p.id, inbox.file, { source: 'Shared file' });
         else await attachPdf(p.id, inbox.file);
+      } else if (pendingPage) {
+        // nothing to download: the EPUB is made from the page below
       } else if (f.getpdf && f.getpdf.checked && (pendingPdf || ((pdfLink || p.arxiv) && navigator.onLine))) {
         // Fire and forget so saving feels instant.
         const get = pendingPdf ? Promise.resolve(pendingPdf) : pdfLink ? Lookup.fetchPdf(pdfLink) : Lookup.fetchArxivPdf(p.arxiv);
@@ -1227,7 +1326,16 @@
           .catch((err) => toast(pdfLink ? `Couldn’t download the PDF: ${err.message}. Download it in your browser and attach it.` : 'Could not download the PDF'));
       }
       const wantsEpub = f.getepub && f.getepub.checked;
-      if (wantsEpub && (p.arxiv || p.doi || (inbox && inbox.file)) && (navigator.onLine || (inbox && inbox.file))) {
+      if (pendingPage && (wantsEpub || !f.getepub)) {
+        const page = pendingPage;
+        pdfJob
+          .then(() => makeWebEpub(p.id, page))
+          .then(() => {
+            toast('EPUB ready to read');
+            if (location.hash === `#/paper/${p.id}`) route();
+          })
+          .catch((err) => toast(`No EPUB made: ${err.message}`));
+      } else if (wantsEpub && (p.arxiv || p.doi || (inbox && inbox.file)) && (navigator.onLine || (inbox && inbox.file))) {
         // After the PDF lands, so the PDF route is available as a fallback.
         pdfJob
           .then(() => makeEpubFor(p.id))
@@ -1317,10 +1425,7 @@
         Object.assign(sessionLog, { ts: now(), page: fresh.currentPage || 0, percent: fresh.percent || 0, delta: (fresh.currentPage || 0) - sessionLog.startPage });
         sessionLog.id = await DB.put('progress', sessionLog);
         if (fresh.status === 'want' || fresh.status === 'none') await setStatus(fresh, 'reading', true);
-        if (pct(fresh) >= 1 && fresh.status !== 'read') {
-          await setStatus(fresh, 'read', true);
-          toast('🎉 Finished! Marked as read');
-        }
+        if (pct(fresh) >= 1 && fresh.status !== 'read') offerFinish(fresh);
       }
       await savePaper(fresh);
     };

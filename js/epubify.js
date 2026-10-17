@@ -2278,6 +2278,183 @@ const Epubify = (() => {
     });
   }
 
+  // ================================================================ web pages
+  // A web page reaches us one of two ways: fetched directly (only sites that
+  // allow cross-origin reads; most don't), or as a page the user saved in
+  // their browser and shared in. Chrome on Android saves pages as MHTML
+  // (⋮ → Download), which carries the images too.
+
+  // MHTML (multipart/related): returns { html, url, resources: Map(url → Blob) }.
+  function parseMhtml(text) {
+    const head = text.slice(0, 4000);
+    const bm = /boundary="?([^";\r\n]+)"?/i.exec(head);
+    if (!bm) throw new Error('not an MHTML file');
+    const url = (/^Snapshot-Content-Location:\s*(\S+)/im.exec(head) || [])[1] || '';
+    const resources = new Map();
+    let html = null;
+    let htmlUrl = url;
+    for (const part of text.split('--' + bm[1]).slice(1)) {
+      const split = part.search(/\r?\n\r?\n/);
+      if (split < 0) continue;
+      const hdr = part.slice(0, split).replace(/\r?\n[ \t]+/g, ' ');
+      const body = part.slice(split).replace(/^\r?\n\r?\n/, '');
+      const h = (name) => ((new RegExp(`^${name}:\\s*(.+)$`, 'im').exec(hdr) || [])[1] || '').trim();
+      const type = h('Content-Type').split(';')[0].toLowerCase();
+      const charset = (/charset="?([\w-]+)/i.exec(h('Content-Type')) || [])[1] || 'utf-8';
+      const enc = h('Content-Transfer-Encoding').toLowerCase();
+      const loc = h('Content-Location');
+      let bytes;
+      if (enc === 'base64') {
+        const b = atob(body.replace(/\s+/g, ''));
+        bytes = new Uint8Array(b.length);
+        for (let i = 0; i < b.length; i++) bytes[i] = b.charCodeAt(i);
+      } else if (enc === 'quoted-printable') {
+        const t = body.replace(/=\r?\n/g, '');
+        const out = [];
+        for (let i = 0; i < t.length; i++) {
+          if (t[i] === '=' && /^[0-9A-F]{2}$/i.test(t.substr(i + 1, 2))) {
+            out.push(parseInt(t.substr(i + 1, 2), 16));
+            i += 2;
+          } else {
+            const c = t.charCodeAt(i);
+            if (c < 128) out.push(c);
+            else out.push(...new TextEncoder().encode(t[i]));
+          }
+        }
+        bytes = new Uint8Array(out);
+      } else bytes = new TextEncoder().encode(body);
+      if (type === 'text/html' && html === null) {
+        let dec;
+        try {
+          dec = new TextDecoder(charset);
+        } catch {
+          dec = new TextDecoder('utf-8');
+        }
+        html = dec.decode(bytes);
+        htmlUrl = loc || url;
+      } else if (loc && type.startsWith('image/')) resources.set(loc, new Blob([bytes], { type }));
+    }
+    if (html === null) throw new Error('no page found in the MHTML file');
+    return { html, url: htmlUrl, resources };
+  }
+
+  // A saved-page file (MHTML or plain HTML) → { html, url, resources }.
+  async function readPageFile(file) {
+    const text = await file.text();
+    if (/^\s*(From:|Snapshot-Content-Location:|MIME-Version:|Content-Type:\s*multipart\/related)/im.test(text.slice(0, 2000)) && /multipart\/related/i.test(text.slice(0, 4000))) return parseMhtml(text);
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    const url = doc.querySelector('link[rel=canonical]')?.getAttribute('href') || metaContent(doc, 'og:url') || '';
+    return { html: text, url, resources: new Map() };
+  }
+
+  async function fetchPage(url) {
+    let res;
+    try {
+      res = await fetch(url, { credentials: 'omit' });
+    } catch {
+      throw new Error('this site doesn’t let apps read its pages');
+    }
+    if (!res.ok) throw new Error(`the site answered ${res.status}`);
+    const type = res.headers.get('content-type') || '';
+    if (!/html|xml/i.test(type)) throw new Error('that link isn’t a web page');
+    return { html: await res.text(), url: res.url || url, resources: new Map() };
+  }
+
+  // Details for the Add form.
+  function pageMeta(page) {
+    const doc = new DOMParser().parseFromString(page.html, 'text/html');
+    const date = metaContent(doc, 'citation_publication_date', 'citation_date', 'article:published_time', 'dc.date', 'date', 'parsely-pub-date') || doc.querySelector('time[datetime]')?.getAttribute('datetime') || '';
+    const year = (/\b(19|20)\d\d\b/.exec(date) || [])[0];
+    const canon = doc.querySelector('link[rel=canonical]')?.getAttribute('href');
+    let url = page.url || '';
+    try {
+      if (canon) url = new URL(canon, url || undefined).href;
+    } catch {}
+    let site = metaContent(doc, 'og:site_name', 'citation_journal_title', 'application-name');
+    if (!site && url) try { site = new URL(url).hostname.replace(/^www\./, ''); } catch {}
+    // "Title - Site" / "Title | Site": drop the site part
+    let title = getTitle(doc, '');
+    const tail = /\s+[|\-–—]\s+([^|\-–—]{2,40})$/.exec(title);
+    if (tail && site && (tail[1].toLowerCase().includes(site.toLowerCase().split('.')[0]) || site.toLowerCase().includes(tail[1].toLowerCase().trim()))) title = title.slice(0, tail.index);
+    return {
+      title,
+      authors: getAuthors(doc).length ? getAuthors(doc) : [...doc.querySelectorAll('[rel=author], [itemprop=author] [itemprop=name], .byline .author, a[href*="/author/"]')].map((a) => ws(a.textContent).trim()).filter((t, i, all) => t && t.length < 60 && all.indexOf(t) === i).slice(0, 6),
+      year: year ? Number(year) : null,
+      venue: site || '',
+      abstract: metaContent(doc, 'citation_abstract', 'description', 'og:description', 'twitter:description'),
+      doi: (metaContent(doc, 'citation_doi', 'dc.identifier', 'prism.doi').match(/10\.\d{4,9}\/\S+/) || [])[0] || null,
+      url,
+    };
+  }
+
+  const ARTICLE_SELECTORS = ['[itemprop=articleBody]', 'div.c-article-body', 'div.article-body', 'div.article__body', 'div.post-content', 'div.entry-content', 'div.available-content', 'div.body.markup', 'article', 'main', '[role=main]'];
+  const JUNK = '.mw-editsection,.printfooter,#catlinks,.navbox,.mw-jump-link,[class*=share],[class*=social],[class*=comment],[class*=related],[class*=newsletter],[class*=subscribe],[class*=promo],[class*=paywall],[class*=recommend],[id*=comment],[class*=breadcrumb]';
+  // Elements an EPUB can hold; anything else (custom elements, video, inputs) is unwrapped or dropped.
+  const KEEP_TAGS = new Set('a abbr b bdi bdo blockquote br caption cite code col colgroup dd del dfn div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 hr i img ins kbd li mark ol p pre q s samp section small span strong sub sup table tbody td tfoot th thead time tr u ul var wbr math'.split(' '));
+  const DROP_TAGS = 'video,audio,canvas,template,dialog,input,select,textarea,label,object,embed,source,track,map,area,picture > source';
+
+  // The element holding the article's prose: a known container if it has real
+  // text, else the tightest element holding most of the page's paragraph text.
+  function articleNode(doc) {
+    for (const sel of ARTICLE_SELECTORS) {
+      const cands = [...doc.querySelectorAll(sel)].filter((el) => ws(el.textContent).length >= 400);
+      if (cands.length) return cands.sort((a, b) => ws(b.textContent).length - ws(a.textContent).length)[0];
+    }
+    const score = new Map();
+    for (const p of doc.querySelectorAll('p')) {
+      const n = ws(p.textContent).trim().length;
+      if (n < 40) continue;
+      for (let el = p.parentElement; el && el !== doc.documentElement; el = el.parentElement) score.set(el, (score.get(el) || 0) + n);
+    }
+    const best = Math.max(0, ...score.values());
+    if (best < 800) return doc.body;
+    let pick = null;
+    for (const [el, sc] of score) if (sc >= best * 0.85 && (!pick || ws(el.textContent).length < ws(pick.textContent).length)) pick = el;
+    return pick;
+  }
+
+  function fromWebPage(page, log) {
+    const doc = new DOMParser().parseFromString(page.html, 'text/html');
+    const meta = pageMeta(page);
+    const baseUrl = page.url || meta.url || location.href; // where the page actually was: relative image links resolve against it
+    denoise(doc.body);
+    doc.querySelectorAll(STRIP).forEach((el) => el.remove());
+    const root = articleNode(doc);
+    // saved pages: point images at the copies inside the file
+    if (page.resources && page.resources.size) {
+      for (const img of root.querySelectorAll('img')) {
+        const sets = [img.getAttribute('srcset'), ...[...(img.closest('picture')?.querySelectorAll('source[srcset]') || [])].map((x) => x.getAttribute('srcset'))];
+        // Chrome's saved pages keep only the src, but store whichever candidate it loaded
+        const cands = [img.getAttribute('src'), img.getAttribute('data-src'), ...sets.flatMap((v) => (v || '').split(',').map((x) => x.trim().split(/\s+/)[0]))].filter(Boolean);
+        for (const c of cands) {
+          let abs;
+          try {
+            abs = new URL(c, baseUrl).href;
+          } catch {
+            continue;
+          }
+          const blob = page.resources.get(abs) || page.resources.get(c);
+          if (blob) {
+            img.setAttribute('src', URL.createObjectURL(blob));
+            for (const a of ['srcset', 'data-srcset', 'data-src']) img.removeAttribute(a);
+            break;
+          }
+        }
+      }
+    }
+    const total = ws(root.textContent).length;
+    root.querySelectorAll(JUNK).forEach((el) => {
+      if (el.isConnected && ws(el.textContent).length < total * 0.25) el.remove();
+    });
+    root.querySelectorAll(DROP_TAGS).forEach((el) => el.remove());
+    for (const el of [...root.querySelectorAll('*')].reverse()) {
+      const tag = el.localName;
+      if (!KEEP_TAGS.has(tag) && !el.parentElement?.closest('math')) el.replaceWith(...el.childNodes);
+    }
+    log(`  web page: ${meta.venue || baseUrl}`);
+    return { doc, root, baseUrl, title: meta.title || 'Web page', authors: meta.authors, sourceUrl: meta.url || page.url || '', label: 'Web page' };
+  }
+
   async function fromPdf(blob, filename, log) {
     log('→ reading PDF');
     const res = await pdfToHtml(blob, filename, log);
@@ -2448,13 +2625,24 @@ ${manifest.join('\n')}
    * Make an EPUB for a paper. source: 'auto' | 'arxiv' | 'pmc' | 'pdf'.
    * Returns { file, cover, source, warnings }.
    */
-  async function make(paper, { source = 'auto', pdf = null, log = () => {} } = {}) {
+  async function make(paper, { source = 'auto', pdf = null, page = null, log = () => {} } = {}) {
     const warnings = [];
     let src = null;
     const tryArxiv = (source === 'auto' || source === 'arxiv') && paper.arxiv;
     const tryPmc = (source === 'auto' || source === 'pmc') && paper.doi && !/^10\.48550\//i.test(paper.doi);
     if (tryArxiv) src = await fromArxivHtml(paper.arxiv, log).catch((e) => (log('  ! ' + e.message), null));
     if (!src && tryPmc) src = await fromPubmedCentral(paper.doi, log).catch((e) => (log('  ! ' + e.message), null));
+    if (!src && page) src = fromWebPage(page, log);
+    const tryWeb = (source === 'web' || (source === 'auto' && !paper.doi && !paper.arxiv && !pdf)) && paper.url && !/\.pdf([?#]|$)/i.test(paper.url);
+    if (!src && tryWeb) {
+      log(`→ fetching ${paper.url}`);
+      try {
+        src = fromWebPage(await fetchPage(paper.url), log);
+      } catch (err) {
+        log('  ! ' + err.message);
+        if (source === 'web' || !paper.doi) throw new Error(`Couldn’t read the page: ${err.message}. Save it in your browser (Chrome: ⋮ → Download) and share the saved file to PaperReads.`);
+      }
+    }
     if (!src && (source === 'auto' || source === 'pdf') && pdf) {
       src = await fromPdf(pdf.blob, pdf.name, log);
       if (src.twoCol) {
@@ -2509,8 +2697,9 @@ ${manifest.join('\n')}
     if (paper.arxiv) out.push(['arxiv', 'arXiv HTML']);
     if (paper.doi && !/^10\.48550\//i.test(paper.doi)) out.push(['pmc', 'PubMed Central (free full text)']);
     if (hasPdf) out.push(['pdf', 'Stored PDF']);
+    if (paper.url && !/\.pdf([?#]|$)/i.test(paper.url) && !paper.arxiv) out.push(['web', 'Web page (from its link)']);
     return out;
   }
 
-  return { make, sources, makeCover, epubjs, jszip, pdfjs, pdfToHtml };
+  return { make, sources, makeCover, epubjs, jszip, pdfjs, pdfToHtml, readPageFile, fetchPage, pageMeta };
 })();

@@ -244,6 +244,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   opacity: 0; pointer-events: none; transition: .2s; z-index: 20; max-width: calc(100vw - 32px);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.has-action.show { pointer-events: auto; display: flex; align-items: center; gap: 12px; }
+.toast button { background: none; border: 0; color: inherit; text-decoration: underline; font: inherit; font-weight: 600; padding: 4px 0; cursor: pointer; }
 
 .seg.seg-2 { grid-template-columns: repeat(2, 1fr); min-width: 150px; }
 .q-actions.col { flex-direction: column; align-items: stretch; }

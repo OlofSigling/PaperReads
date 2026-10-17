@@ -14,16 +14,20 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
   `epubify.py` (same generated covers, same PDF layout analysis). Sources, best first:
   arXiv's HTML version, Europe PMC full text (open-access PubMed Central papers; text and captions, no
   figure images), then the stored PDF. You can also import or share in an `.epub` made elsewhere.
+- **Web pages → EPUB:** share a link to an article or blog post and the app keeps the article text and
+  images (no menus, comments or share buttons) as an EPUB. Most sites don't let apps read their pages, so
+  for those, save the page in Chrome (⋮ → ⬇ Download) and share the downloaded `.mhtml` to PaperReads, or
+  pick it with **Open a file…** on the Add screen. Saved pages also work for paywalled articles you're logged into.
 - **Built-in EPUB reader:** paginated, with contents, text size, and a position slider. It resumes where you left
   off, and reading moves the paper's progress forward automatically. Citations, figures, tables and sections are
   links: a citation shows its reference in a pop-up, other links jump there with a **↩ Back** button.
 - **Reading progress:** tracked per paper by page (or percent if the page count is unknown), with a dated
-  reading log. Reaching the last page marks the paper as read.
+  reading log. Reaching the end offers a **Mark as read** button; a paper is only finished when you say so.
 - **Catalogue:** collections, tags (rename or merge), search across title, authors, notes and abstract, plus filters and sorting.
 - **Notes & review, 1–5 star rating, and highlights** (quote + page + comment).
 - **Concerns:** a per-paper checklist of doubts and things to verify, on the paper page and in the reader
   (⚠ in the top bar). Select text in the reader and tap **Concern** to attach the passage; tick items off
-  as resolved. Papers with open concerns show a ⚠ badge in the library.
+  as resolved.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
 - **Queue:** drag to prioritise your want-to-read list. The top items show as "Next up" on the home screen.
 - **Stats:** yearly goal with on-pace indicator, papers per month, pages read, day streaks, average rating, top tags.
@@ -53,8 +57,9 @@ when you've never backed up (5+ papers) or the last backup is over 30 days old.
 ### What the EPUB port doesn't do
 
 `epubify.py` can also fetch publisher pages, ar5iv and JavaScript-rendered sites through a headless
-browser. A web app on a phone can't fetch those sites, so for them, run the script on a computer and
-share the `.epub` into the app. As the script itself warns, two-column PDFs can come out with
+browser. A web app on a phone can only read sites that allow it, so for the rest, save the page in
+Chrome and share the saved file in (see *Web pages* above), or run the script on a computer and share
+the `.epub` into the app. As the script itself warns, two-column PDFs can come out with
 scrambled reading order. That's why the HTML sources are tried first.
 
 ## Develop
