@@ -1798,8 +1798,17 @@
 
     const prev = () => go(() => rendition.prev());
     const next = () => go(() => rendition.next());
-    $('#r-prev').addEventListener('click', prev);
-    $('#r-next').addEventListener('click', next);
+    // a press that moved (a drag to select) isn't a page turn
+    let zoneDown = null;
+    for (const [sel, fn] of [['#r-prev', prev], ['#r-next', next]]) {
+      const z = $(sel);
+      z.addEventListener('pointerdown', (e) => (zoneDown = { x: e.clientX, y: e.clientY }));
+      z.addEventListener('click', (e) => {
+        const moved = zoneDown && Math.hypot(e.clientX - zoneDown.x, e.clientY - zoneDown.y) > 6;
+        zoneDown = null;
+        if (!moved || e.detail === 0) fn(); // detail 0: keyboard
+      });
+    }
     const onKey = (e) => {
       if (e.key === 'ArrowLeft') prev();
       if (e.key === 'ArrowRight') next();

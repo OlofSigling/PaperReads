@@ -271,6 +271,17 @@ body.reading main { padding: 0; max-width: none; }
 .r-zone { position: absolute; top: 0; bottom: 0; width: 18%; background: transparent; border: none; z-index: 2; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .r-zone.left { left: 0; }
 .r-zone.right { right: 0; }
+/* mouse and trackpad: the edges only, so pressing on text selects it */
+@media (hover: hover) and (pointer: fine) {
+  .r-zone { width: 44px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 1.6rem; opacity: 0; transition: opacity .15s; }
+  .r-zone:hover { opacity: 1; background: color-mix(in srgb, var(--text) 4%, transparent); }
+  .r-zone.left::before { content: '‹'; }
+  .r-zone.right::before { content: '›'; }
+}
+/* wide screens: a readable column instead of lines across the whole window */
+@media (min-width: 900px) {
+  .r-stage #r-view { max-width: 760px; margin: 0 auto; }
+}
 .r-foot { display: flex; align-items: center; gap: 10px; padding: 6px 14px calc(env(safe-area-inset-bottom) + 8px); border-top: 1px solid var(--border); }
 .r-foot input { flex: 1; }
 .r-foot span { font-size: .8rem; color: var(--muted); min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; }

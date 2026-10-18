@@ -348,7 +348,7 @@ const Epubify = (() => {
           bbox: [Math.min(...corners.map((c) => c[0])), Math.min(...corners.map((c) => c[1])), Math.max(...corners.map((c) => c[0])), Math.max(...corners.map((c) => c[1]))],
           size,
           font: f.name,
-          flags: f.bold || /Bold|-Bd|Medi|Semibold|Demi|Black|Heavy|CMBX/i.test(f.name) ? 16 : 0,
+          flags: f.bold || BOLD_FONT.test(f.name) ? 16 : 0,
         };
         if (cur && (Math.abs(cur.dir[0] - dir[0]) > 0.01 || Math.abs(cur.dir[1] - dir[1]) > 0.01)) close();
         if (!cur) cur = { dir, spans: [] };
@@ -661,6 +661,68 @@ const Epubify = (() => {
 
   const horizontal = (l) => Math.abs(l.dir[0] - 1) <= 0.01;
 
+  // ---------------------------------------------------------------- headings
+  // Bold by name, including suffix conventions ("Xmkncr.B", "Times-Bd").
+  const BOLD_FONT = /Bold|-Bd|Medi|Semibold|Demi|Black|Heavy|CMBX|[.,_-](?:B|Bd|BI|SB)$/i;
+  const MATH_FONT = /^(?:[A-Z]{6}\+)?(?:CM(?:MI|SY|EX)|MSAM|MSBM|Symbol|.*Math)/i;
+  const baseFont = (name) => String(name || '').replace(/^[A-Z]{6}\+/, '');
+  const SECTION_WORD = /^(abstract|introduction|background|related work|methods?|materials and methods|methodology|results(?: and discussion)?|discussion|conclusions?|acknowledge?ments?|references|appendix|limitations|summary)\b/i;
+  const NUMBERED = /^(\d+(\.\d+)*\.?|[A-Z]\.|[IVX]+\.)\s+\S/;
+  // short enough, wordy enough and unpunctuated enough to be a heading
+  const headingText = (t) =>
+    t.split(/\s+/).length <= 12 && !/[,;]$/.test(t) && /\p{L}{3}/u.test(t) && /^[\p{Lu}\d]/u.test(t) &&
+    !/[*∗†‡\uE010]/u.test(t) && (t.match(/,/g) || []).length < 2 && // author lines
+    !/\p{Ll}{2}[.:]\s+\p{Lu}\p{Ll}/u.test(t); // "Shortcuts. We have…": a run-in lead, not a heading
+  // "1 INTRODUCTION", "6.1 EXPERIMENT: …": a numbered or standard section in capitals
+  function capsHeading(t) {
+    const letters = t.match(/\p{L}/gu) || [];
+    const upper = letters.filter((c) => c !== c.toLowerCase()).length;
+    return letters.length >= 4 && upper >= letters.length * 0.9 && t.split(/\s+/).length <= 10 && (NUMBERED.test(t) || SECTION_WORD.test(t));
+  }
+  // 1 → h3, 1.1 and deeper → h4
+  const headingTag = (t) => ((/^\d+\.\d+/.test(t)) ? 'h4' : 'h3');
+
+  // Headings set in their own type style, which no rule about size or a
+  // "Bold" font name catches (obfuscated font names, +1pt headings). A style
+  // (font + size) is a heading style when, across the document, it is used
+  // only for short, wordy lines that the body text follows, and rarely.
+  function learnHeadingStyles(pdf, bodySize) {
+    const key = (font, size) => `${baseFont(font)}|${Math.round(size * 2) / 2}`;
+    const lines = [];
+    for (const pg of pdf.pages) {
+      const ls = [];
+      for (const l of pg.lines) {
+        if (!horizontal(l)) continue;
+        const text = ws(l.spans.map((sp) => sp.text).join('')).trim();
+        if (!text) continue;
+        const w = new Counter();
+        l.spans.forEach((sp) => w.add(key(sp.font, sp.size), sp.text.length));
+        ls.push({ text, k: w.mostCommon(), x0: l.bbox[0], x1: l.bbox[2], y: l.bbox[1] });
+      }
+      ls.sort((a, b) => a.y - b.y);
+      // the line below, in the same column (overlapping horizontally)
+      ls.forEach((l, i) => (l.next = ls.slice(i + 1).find((m) => m.x0 < l.x1 && l.x0 < m.x1)));
+      lines.push(...ls);
+    }
+    const chars = new Counter();
+    lines.forEach((l) => chars.add(l.k, l.text.length));
+    const body = chars.mostCommon();
+    const byStyle = new Map();
+    for (const l of lines) (byStyle.get(l.k) || byStyle.set(l.k, []).get(l.k)).push(l);
+    const out = new Set();
+    for (const [k, ls] of byStyle) {
+      const size = +k.split('|').pop();
+      if (k === body || ls.length < 2 || size < bodySize - 0.3 || size >= bodySize + 3 || MATH_FONT.test(k)) continue;
+      // (a long heading's second line starts lower-case, so not headingText here)
+      const wordy = ls.filter((l) => l.text.split(/\s+/).length <= 14 && !/[,;]$/.test(l.text) && /\p{L}{3}/u.test(l.text) && (l.text.match(/\p{L}/gu) || []).length >= l.text.replace(/\s/g, '').length * 0.6);
+      const followed = ls.filter((l) => l.next && l.next.k !== k);
+      if (wordy.length >= ls.length * 0.85 && followed.length >= ls.length * 0.7 && chars.get(k) <= chars.get(body) * 0.05) out.add(k);
+    }
+    // the style that carries "Introduction", "Methods"… is the top level; others are subsections
+    const major = new Set([...out].filter((k) => byStyle.get(k).some((l) => SECTION_WORD.test(l.text))));
+    return { has: (font, size) => out.has(key(font, size)), minor: (font, size) => out.has(key(font, size)) && major.size > 0 && !major.has(key(font, size)) };
+  }
+
   // Small-caps headings extract as "cOnclusiOn" / "WhAt Is AlreAdy knoWn":
   // capitals mid-word in several words of a short line. Normalise to
   // sentence case. (One odd word, like "McDonald", is left alone.)
@@ -668,14 +730,17 @@ const Epubify = (() => {
   // and a capital first letter ("results" → "Results").
   function headingCase(txt) {
     let t = txt;
-    if (/^\p{L}+$/u.test(t) && /\p{Ll}\p{Lu}/u.test(t)) t = t.toLowerCase();
+    if (/^\p{L}+$/u.test(t) && /\p{Ll}\p{Lu}/u.test(t) && (camelVocab.get(t) || 0) < 3) t = t.toLowerCase();
     else t = fixSmallCaps(t);
     return t.charAt(0).toUpperCase() + t.slice(1);
   }
 
+  // Words with inner capitals that the document uses often ("ImageNet",
+  // "PubMed") are spelled that way; small-caps artefacts appear once or twice.
+  let camelVocab = new Map();
   function fixSmallCaps(txt) {
     const words = txt.split(/\s+/);
-    const odd = words.filter((w) => /\p{Ll}\p{Lu}/u.test(w) || /^\p{Ll}+\p{Lu}/u.test(w)).length;
+    const odd = words.filter((w) => (/\p{Ll}\p{Lu}/u.test(w) || /^\p{Ll}+\p{Lu}/u.test(w)) && (camelVocab.get(w.replace(/[^\p{L}\d]/gu, '')) || 0) < 3).length;
     if (words.length > 14 || odd < Math.max(1, Math.ceil(words.length / 3)) || (words.length === 1 && !/^\p{Ll}/u.test(txt))) return txt;
     const lower = txt.toLowerCase();
     return lower.charAt(0).toUpperCase() + lower.slice(1);
@@ -813,7 +878,7 @@ const Epubify = (() => {
       seen.forEach((t) => edge.add(t));
     }
     const boiler = new Set(edge.entries().filter(([, c]) => c >= Math.max(3, Math.floor(npages / 3))).map(([t]) => t));
-    const isBold = (sp) => /Bold|-Bd/.test(sp.font) || !!(sp.flags & 16);
+    const isBold = (sp) => !!(sp.flags & 16);
 
     // ---- collect rows and images per page
     const pages = [];
@@ -827,7 +892,7 @@ const Epubify = (() => {
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
           if (t.trim()) {
-            spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y0: s.bbox[1], y1: s.bbox[3], yc: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, bold: isBold(s) });
+            spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y0: s.bbox[1], y1: s.bbox[3], yc: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, bold: isBold(s), font: s.font });
           }
         }
       }
@@ -844,6 +909,8 @@ const Epubify = (() => {
         if (!txt || ROMAN_OR_DIGITS.test(txt)) continue;
         const weight = new Counter();
         r.forEach((z) => weight.add(pyRound(z.size), z.text.length));
+        const fontWeight = new Counter();
+        r.forEach((z) => fontWeight.add(z.font, z.text.length));
         const visible = r.filter((z) => z.text.trim());
         items.push({
           kind: 'text',
@@ -852,6 +919,8 @@ const Epubify = (() => {
           y0: Math.min(...r.map((z) => z.y0)),
           y1: Math.max(...r.map((z) => z.y1)),
           size: weight.mostCommon(),
+          font: fontWeight.mostCommon(),
+          rawSize: r.find((z) => z.font === fontWeight.mostCommon())?.size,
           bold: visible.every((z) => z.bold),
           boldish: sum(r.filter((z) => z.bold).map((z) => z.text.length)) >= 0.6 * sum(r.map((z) => z.text.length)),
         });
@@ -916,6 +985,7 @@ const Epubify = (() => {
     const notes = [];
     const buf = [];
     const state = { last: null, list: false, label: null, titleDone: false };
+    const styles = learnHeadingStyles(pdf, bodySize);
     const TERMINAL = '.!?:;”"\')]';
     const LABEL = /^(Fig\.?|Figure|Table|Box)\s*\d+[A-Za-z]?\.?$/i;
     const NUMITEM = /^\d{1,3}\.\s+\S/;
@@ -956,7 +1026,7 @@ const Epubify = (() => {
         const txt = it.text;
         const sz = it.size;
         // footnotes: small type near the page bottom
-        if (sz <= bodySize - 2 && it.y0 > ph * 0.78) {
+        if (sz <= bodySize - 2 && it.y0 > ph * 0.78 && !(capsHeading(txt) && NUMBERED.test(txt))) {
           if (fnCur.length && !/^\uE010?([a-z*†‡§]|\d{1,2})\uE011?\s*[A-Z]/.test(txt) && !txt.startsWith('Correspondence')) fnCur.push(txt);
           else {
             if (fnCur.length) notes.push(joinLines(fnCur));
@@ -981,9 +1051,17 @@ const Epubify = (() => {
           pageStart = false;
           continue;
         }
-        if (it.bold && txt.length <= 40 && sz >= bodySize - 1) {
+        // a section heading: bold, in a heading style, or numbered in capitals
+        const standalone = !buf.length || endsWithAny(buf.at(-1).trimEnd(), TERMINAL) || (state.last && it.y0 - state.last.y1 > paraGap);
+        const capsNumbered = capsHeading(txt) && NUMBERED.test(txt) && sz >= bodySize - 2.5; // small caps run small
+        if (
+          capsNumbered ||
+          (standalone && headingText(txt) && sz >= bodySize - 1 &&
+            ((it.bold && (txt.length <= 40 || NUMBERED.test(txt) || SECTION_WORD.test(txt))) || styles.has(it.font, it.rawSize || sz) || capsHeading(txt)))
+        ) {
           flush();
-          parts.push(`<h3>${escRich(txt)}</h3>`);
+          const tag = styles.minor(it.font, it.rawSize || sz) && !NUMBERED.test(txt) ? 'h4' : headingTag(txt);
+          parts.push(`<${tag}>${escRich(headingCase(txt))}</${tag}>`);
           pageStart = false;
           continue;
         }
@@ -1039,6 +1117,7 @@ const Epubify = (() => {
       }
     }
     const bodySize = sizes.mostCommon() ?? 11;
+    const styles = learnHeadingStyles(pdf, bodySize);
     // global body-text left edge (per-page voting fails on box-dominated pages)
     const globalBodyLeft = globX0.mostCommon() ?? 0;
     const gutter = findGutter(pdf, pageW);
@@ -1056,7 +1135,13 @@ const Epubify = (() => {
     // Hyphenated words as the document writes them mid-line ("meta-analyses"),
     // to tell a real hyphen from a line-break one when rejoining lines.
     hyphenVocab = new Set();
-    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) for (const m of s.text.matchAll(/[\p{L}\d]+(?:-[\p{L}\d]+)+/gu)) hyphenVocab.add(m[0].toLowerCase());
+    camelVocab = new Map();
+    for (const pg of pdf.pages)
+      for (const l of pg.lines)
+        for (const s of l.spans) {
+          for (const m of s.text.matchAll(/[\p{L}\d]+(?:-[\p{L}\d]+)+/gu)) hyphenVocab.add(m[0].toLowerCase());
+          for (const m of s.text.matchAll(/\p{L}*\p{Ll}\p{Lu}\p{L}*/gu)) camelVocab.set(m[0], (camelVocab.get(m[0]) || 0) + 1);
+        }
     const stem = (filename || 'paper').replace(/\.[^.]+$/, '');
 
     if (!twoCol && !pdfHasSideMargin(pdf, globalBodyLeft)) {
@@ -1119,7 +1204,7 @@ const Epubify = (() => {
       const txt = resolveHat(ws(joinSpans(main)).trim());
       const asideTxt = resolveHat(ws(joinSpans(asides)).trim());
       const c = new Counter();
-      main.forEach((m) => c.add(pyRound(m.size)));
+      main.forEach((m) => c.add(pyRound(m.size), m.text.length));
       return [txt, asideTxt, c.mostCommon()];
     };
     const joinSorted = (sps) => resolveHat(ws(joinSpans([...sps].sort((a, b) => a.x0 - b.x0))).trim());
@@ -1148,7 +1233,7 @@ const Epubify = (() => {
         if (!horizontal(l)) continue;
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
-          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: /Bold|-Bd|Medi|Semibold|Black|Heavy|CMBX/i.test(s.font) || !!(s.flags & 16), line: l });
+          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l });
         }
       }
       if (!spans.length && !pg.images.length) continue;
@@ -1230,6 +1315,20 @@ const Epubify = (() => {
         for (let i = rows.length - 1; i >= 0; i--) if (!rows[i].length) rows.splice(i, 1);
       }
 
+      // "Abstract  Social relationships have…": a run-in label in bigger or
+      // bold type at the start of a body line is a heading of its own
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const r = [...rows[i]].sort((a, b) => a.x0 - b.x0);
+        const [head, ...rest] = r;
+        if (!rest.length || head.text.trim().split(/\s+/).length > 4 || sum(rest.map((sp) => sp.text.length)) < 20) continue;
+        const restSize = rest[0].size;
+        const differs = head.size >= restSize + 2 || (head.bold && !rest.some((sp) => sp.bold) && SECTION_WORD.test(head.text.trim()));
+        if (!differs || rest.some((sp) => Math.abs(sp.size - restSize) > 1)) continue;
+        const a = [head];
+        const b = rest;
+        a.col = b.col = rows[i].col;
+        rows.splice(i, 1, a, b);
+      }
       let ordered = [];
       const pageAsides = [];
       const marginRows = [];
@@ -1288,7 +1387,12 @@ const Epubify = (() => {
         if (!CAPTION.test(txt) && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4) || letters < txt.replace(/\s/g, '').length * 0.4)) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
         const bold = row.every((sp) => sp.bold || !sp.text.trim());
-        ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold, Math.max(...row.map((sp) => sp.x1))]);
+        const fw = new Counter();
+        row.forEach((sp) => fw.add(sp.font, sp.text.length));
+        const font = fw.mostCommon();
+        const styled = fw.get(font) >= 0.9 * sum(row.map((sp) => sp.text.length)) && styles.has(font, row.find((sp) => sp.font === font)?.size ?? sz);
+        const minor = styled && styles.minor(font, row.find((sp) => sp.font === font)?.size ?? sz);
+        ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold, Math.max(...row.map((sp) => sp.x1)), styled, minor]);
         if (aside && aside.length > 3 && !repeated.has(aside)) pageAsides.push([aside, sz]);
       }
       if (twoCol) {
@@ -1330,7 +1434,7 @@ const Epubify = (() => {
       };
       const SECTION = /^((\d+(\.\d+)*\.?|[A-Z]\.|[IVX]+\.)\s+\S|(abstract|introduction|background|related work|methods?|materials and methods|results|discussion|conclusions?|acknowledge?ments?|references|appendix)\b)/i;
       let lastHeading = null;
-      for (const [c, y, txt, sz, x0, bold, x1] of ordered) {
+      for (const [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
         if (capBuf) {
           const gapBreak = c !== capBuf.c || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
           if (!gapBreak) {
@@ -1348,16 +1452,21 @@ const Epubify = (() => {
         const nWords = txt.split(/\s+/).length;
         const standalone = !paraBuf.length || endsWithAny(paraBuf.at(-1).trimEnd(), TERMINAL);
         if (
-          bold && sz >= bodySize - 0.5 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
-          ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))
+          (bold && sz >= bodySize - 0.5 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
+            ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))) ||
+          (standalone && sz >= bodySize - 0.5 && sz < bodySize + 3 && headingText(txt) && (styled || capsHeading(txt))) ||
+          (capsHeading(txt) && NUMBERED.test(txt) && sz >= bodySize - 2.5)
         ) {
           flushPara();
-          parts.push(`<h3>${escRich(headingCase(txt))}</h3>`);
+          const tag = minor && !bold ? 'h4' : 'h3';
+          parts.push(`<${tag}>${escRich(headingCase(txt))}</${tag}>`);
           prev = null;
           lastHeading = null;
           continue;
         }
-        if (sz >= bodySize + 3) {
+        // big type is a heading, unless it's running text set large (an abstract or lead)
+        const bigText = txt.split(/\s+/).length > 14 || (lastHeading && (lastHeading.text + ' ' + txt).split(/\s+/).length > 24);
+        if (sz >= bodySize + 3 && !bigText) {
           flushPara();
           // a heading wrapped onto two lines is one heading
           if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, '.:')) {
@@ -1919,6 +2028,31 @@ const Epubify = (() => {
         take.push(n);
         n = n.nextElementSibling;
       }
+      // A short section printed mid-list (Acknowledgments, Author contributions)
+      // interrupts it: when the numbering carries on just after, so does the list.
+      const numOf = (e) => +(/^\[?(\d{1,3})[\].]?\s/.exec((e.textContent || '').trim()) || [])[1] || 0;
+      for (let guard = 0; n && guard < 5; guard++) {
+        const seen = new Set(take.flatMap((e) => [...(e.textContent || '').matchAll(/(?:^|\s)\[?(\d{1,3})[\].]?\s+\p{Lu}/gu)].map((m) => +m[1])));
+        const last = Math.max(0, ...[...seen].filter((m) => seen.has(m - 1))); // end of the running sequence, not a stray number
+        if (!last) break;
+        let k = n;
+        let skipped = 0;
+        while (k && skipped < 40 && !(k.localName === 'p' && numOf(k) === last + 1)) {
+          if (/^H[12]$/.test(k.tagName)) k = null; // a real new part of the paper
+          else {
+            k = k.nextElementSibling;
+            skipped++;
+          }
+        }
+        if (!k || skipped >= 40) break;
+        const resumed = [];
+        while (k && !/^H[1-4]$/.test(k.tagName) && k.localName !== 'figure') {
+          resumed.push(k);
+          k = k.nextElementSibling;
+        }
+        take.push(...resumed);
+        n = k;
+      }
       refHead.after(container);
       container.append(...take);
       // PDF-sourced lists arrive as paragraphs, sometimes several entries per
@@ -1927,10 +2061,16 @@ const Epubify = (() => {
       for (const t of [...container.children].map((e) => e.textContent.trim()).filter(Boolean)) {
         out.push(
           ...t
-            .split(/(?=\[\d{1,3}\]\s)|(?<=\s)(?=\d{1,3}\.?\s+[\p{Lu}][\p{L}'’-]+,?\s+(?:[\p{Lu}]{1,3}[,\s]|[\p{Lu}]\.))/u)
+            .split(/(?=\[\d{1,3}\]\s)|(?<=\s)(?=\d{1,3}\.?\s+[\p{Lu}][\p{L}'’-]+,?\s+(?:[\p{Lu}]{1,3}[,.\s]|[\p{Lu}]\.))/u)
             .map((x) => x.trim())
             .filter(Boolean)
         );
+      }
+      // Unnumbered lists: entries run together after a full stop, starting
+      // "Surname AB, Surname CD" or "Surname AB. 1999"
+      if (out.filter((t) => /^\[?\d{1,3}[\].]?\s/.test(t)).length < Math.max(3, out.length * 0.2)) {
+        const AUTHOR_START = /(?<=[\p{L}\d)]\.\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}(?:,\s[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}[,.]|\.\s(?:1[89]|20)\d\d))/u;
+        out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).map((x) => x.trim()).filter(Boolean)));
       }
       // one paragraph per printed line: fold lines that don't start an
       // entry into the entry above (when the list is numbered at all)
@@ -1943,6 +2083,18 @@ const Epubify = (() => {
           else merged.at(-1).push(t);
         }
         out.splice(0, out.length, ...merged.map((lines) => joinWrapped(lines)));
+      } else {
+        // author–year lists: an entry starts "Surname, …" or "Surname AB"; other lines continue the one above
+        const startsEntry = (t) => /^[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?(?:,\s|\s[\p{Lu}]{1,3}[,.\s])/u.test(t);
+        if (out.filter(startsEntry).length >= Math.max(3, out.length * 0.5)) {
+          const merged = [];
+          for (const t of out) {
+            // (a wrapped author list continues after a comma, however the line starts)
+            if ((startsEntry(t) && !(merged.length && /,$/.test(merged.at(-1).at(-1).trim()))) || !merged.length) merged.push([t]);
+            else merged.at(-1).push(t);
+          }
+          out.splice(0, out.length, ...merged.map((lines) => joinWrapped(lines)));
+        }
       }
       container.replaceChildren(
         ...out.map((t, i) => {
@@ -1967,8 +2119,10 @@ const Epubify = (() => {
         const num = m ? +m[1] : container.matches('ol') ? i + 1 : null;
         if (num && !byNumber.has(num)) byNumber.set(num, e.id);
         const year = (/\b(1[89]\d\d|20\d\d)[a-z]?\b/.exec(t) || [])[0];
-        const first = (/^(?:\[?\d+[\].]?\s+)?([\p{Lu}][\p{L}'’-]+)/u.exec(t) || [])[1];
-        entries.push({ id: e.id, year, first: first && surnameKey(first) });
+        // the surname's last word: "De Filippo C" is cited as "De Filippo" or "Filippo"
+        const sur = (/^(?:\[?\d+[\].]?\s+)?((?:[\p{L}'’-]+\s){0,3}?[\p{Lu}][\p{L}'’-]+)(?:,|\s[\p{Lu}]{1,3}[,.\s])/u.exec(t) || [])[1];
+        const first = sur ? sur.split(/\s+/).pop() : (/^(?:\[?\d+[\].]?\s+)?([\p{Lu}][\p{L}'’-]+)/u.exec(t) || [])[1];
+        entries.push({ id: e.id, year, first: first && surnameKey(first), text: surnameKey(t.slice(0, 300)) });
       });
     }
     // sources that already link their citations (arXiv HTML, PMC xrefs)
@@ -2010,14 +2164,24 @@ const Epubify = (() => {
     }
     // ---- author–year citations: (Amodei, 2024; VandeHei & Allen, 2025)
     if (entries.length && byNumber.size < entries.length / 2 && !alreadyLinked) {
-      const find = (name, year) => entries.find((e) => e.first && e.year && e.first === surnameKey(name) && e.year.slice(0, 4) === year.slice(0, 4));
-      links += replaceInText(root, /\(([^()]{0,240}?\b(?:1[89]|20)\d\d[a-z]?)\)/u, (m, doc) => {
+      // first author + year; a second author picks between namesakes; with
+      // the year lost from a damaged entry, the only entry by that author
+      const find = (name, year, second) => {
+        const byName = entries.filter((e) => e.first === surnameKey(name));
+        const withSecond = (list) => (second && list.filter((e) => e.text.includes(surnameKey(second))).length ? list.filter((e) => e.text.includes(surnameKey(second))) : list);
+        const dated = withSecond(byName.filter((e) => e.year && e.year.slice(0, 4) === year.slice(0, 4)));
+        if (dated.length) return dated[0];
+        const undated = withSecond(byName.filter((e) => !e.year));
+        return undated.length === 1 ? undated[0] : null;
+      };
+      // (a group can hold more than citations: "(mean ± SD …; Smith et al., 2012; Figure 1)")
+      links += replaceInText(root, /\(([^()]{0,400}?\b(?:1[89]|20)\d\d[a-z]?\b[^()]{0,300})\)/u, (m, doc) => {
         const out = ['('];
         let any = false;
         for (const [i, seg] of m[1].split(/;\s*/).entries()) {
           if (i) out.push('; ');
-          const c = /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|and|&)\s*[\p{L}'’.-]*)?,?\s+((?:1[89]|20)\d\d[a-z]?)/u.exec(seg);
-          const hit = c && find(c[1], c[2]);
+          const c = /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|(?:and|&)\s*([\p{Lu}][\p{L}'’-]+)))?,?\s+((?:1[89]|20)\d\d[a-z]?)/u.exec(seg);
+          const hit = c && find(c[1], c[3], c[2]);
           if (hit) {
             out.push(seg.slice(0, c.index), anchor(doc, hit.id, c[0]), seg.slice(c.index + c[0].length));
             any = true;
@@ -2025,6 +2189,11 @@ const Epubify = (() => {
         }
         out.push(')');
         return any ? out : null;
+      });
+      // in a sentence: "Smith et al. (2019)", "Roux & Fitzgibbon (2010)"
+      links += replaceInText(root, /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|(?:and|&)\s+([\p{Lu}][\p{L}'’-]+)))?\s+\(((?:1[89]|20)\d\d[a-z]?)\)/u, (m, doc) => {
+        const hit = find(m[1], m[3], m[2]);
+        return hit ? [anchor(doc, hit.id, m[0])] : null;
       });
     }
     // ---- figure / table mentions → the figure
