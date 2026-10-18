@@ -106,8 +106,20 @@
     return DB.all('papers');
   }
 
+  // Each field remembers when it last changed (p.ft), so sync can take the
+  // newest of each field rather than the newest whole paper: a position read
+  // on the phone and a note typed on the laptop both survive.
   async function savePaper(p) {
-    p.updatedAt = now();
+    const t = now();
+    const old = await DB.get('papers', p.id);
+    const ft = { ...(old && old.ft), ...p.ft };
+    const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+    for (const k of new Set([...Object.keys(p), ...Object.keys(old || {})])) {
+      if (k === 'ft' || k === 'updatedAt') continue;
+      if (!old || !same(old[k], p[k])) ft[k] = t;
+    }
+    p.ft = ft;
+    p.updatedAt = t;
     await DB.put('papers', p);
     return p;
   }
@@ -1689,6 +1701,7 @@
         <button class="r-zone right" id="r-next" aria-label="Next page"></button>
       </div>
       <button class="r-backchip" id="r-back" hidden>↩ Back</button>
+      <button class="r-backchip r-syncchip" id="r-sync" hidden></button>
       <div class="r-selbar" id="r-selbar" hidden>
         <button class="btn small primary" id="hl-add">Highlight</button>
         <button class="btn small" id="hl-note">Highlight + note</button>
@@ -1731,6 +1744,7 @@
     const saveNow = async () => {
       clearTimeout(saveTimer);
       saveTimer = null;
+      if (!moved) return;
       const fresh = await DB.get('papers', id);
       if (!fresh) return;
       if (lastCfi) fresh.epubCfi = lastCfi;
@@ -1780,7 +1794,12 @@
     let navigating = false;
     let pageScroll = null;
     const strip = () => rendition.manager && rendition.manager.container;
-    const go = async (fn) => {
+    // Only the reader's own moves are saved: merely opening a paper must not
+    // record its (possibly stale) position as new, or it would beat the
+    // position synced from another device.
+    let moved = false;
+    const go = async (fn, opening = false) => {
+      if (!opening) moved = true;
       navigating = true;
       clearSelection();
       hideBar();
@@ -2061,13 +2080,14 @@
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('pagehide', commit);
       document.body.classList.remove('reading');
+      readerSync = null;
       await commit();
       try {
         book.destroy();
       } catch {}
     };
 
-    await go(() => rendition.display(q.cfi || p.epubCfi || undefined));
+    await go(() => rendition.display(q.cfi || p.epubCfi || undefined), true);
     if (strip()) strip().addEventListener('scroll', onStripScroll);
     (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi).forEach(drawHighlight);
     (p.concerns || []).filter((c) => c.cfi && !c.done).forEach(drawConcern);
@@ -2090,9 +2110,33 @@
     if (!q.cfi && !p.epubCfi && startPct > 0 && startPct < 1) {
       // Opened for the first time but already part-read (e.g. in the PDF):
       // jump to the same point once locations are known.
-      located.then(() => go(() => rendition.display(book.locations.cfiFromPercentage(startPct)))).catch(() => {});
+      located.then(() => go(() => rendition.display(book.locations.cfiFromPercentage(startPct)), true)).catch(() => {});
+    }
+
+    // Another device read further: offer to jump there. And if this device
+    // couldn't sync on opening (Google sign-in needs a tap), offer that.
+    const syncChip = $('#r-sync');
+    let offered = null;
+    readerSync = (result) => {
+      const pos = result && result.positions && result.positions.get(id);
+      if (!pos || pos.cfi === lastCfi || !locationsReady) return syncChip.hidden = true;
+      const there = book.locations.percentageFromCfi(pos.cfi);
+      if (!(there > lastPct + 0.005)) return (syncChip.hidden = true);
+      offered = pos.cfi;
+      syncChip.textContent = `↪ Your other device is at ${Math.round(there * 100)}%. Jump there`;
+      syncChip.hidden = false;
+    };
+    syncChip.addEventListener('click', () => {
+      syncChip.hidden = true;
+      if (offered) return go(() => rendition.display(offered));
+      Sync.run({ interactive: true }).catch((err) => toast(`Sync failed: ${err.message}`));
+    });
+    if (Sync.state.needsSignIn && (await DB.setting('googleClientId', ''))) {
+      syncChip.textContent = '⟳ Sync to continue from your other devices';
+      syncChip.hidden = false;
     }
   }
+  let readerSync = null; // the open reader's hook for fresh sync results
 
   // ---------- backup ----------
   // All discovery trails, or one of them in full.
@@ -2569,7 +2613,9 @@
       .catch((err) => toast(`Sync failed: ${err.message}`))
   );
   // Fresh data from another device: redraw list-like views (never a form or the reader).
-  Sync.onApplied = () => {
+  Sync.onApplied = (result) => {
+    if (/^#\/read\//.test(location.hash)) return readerSync && readerSync(result);
+    if (!result.changes) return;
     if (/^(#\/?|#\/(library|queue|stats|collections))?$/.test(location.hash.split('?')[0]) || /^#\/paper\//.test(location.hash)) route();
   };
 

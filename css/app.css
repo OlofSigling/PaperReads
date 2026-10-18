@@ -313,6 +313,7 @@ body.reading main { padding: 0; max-width: none; }
 #r-concerns-panel h3 { margin-top: 0; }
 
 .r-backchip { position: absolute; left: 12px; bottom: calc(env(safe-area-inset-bottom) + 56px); z-index: 6; font: inherit; font-size: .85rem; background: var(--text); color: var(--bg); border: none; border-radius: 999px; padding: 8px 14px; box-shadow: 0 4px 12px rgba(0,0,0,.25); cursor: pointer; }
+.r-backchip.r-syncchip { left: auto; right: 12px; max-width: calc(100% - 24px); }
 .ref-pop { margin: 0; font-size: .9rem; line-height: 1.5; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
 
 /* sync button */

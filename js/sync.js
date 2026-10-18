@@ -134,6 +134,23 @@ const Sync = (() => {
   const remove = (file) => call('DELETE', `${API}/${file.id}`);
 
   // ---------------------------------------------------------------- merge
+  // Papers merge field by field, each side's field dated by its p.ft entry
+  // (records from before field dates fall back to the paper's updatedAt).
+  function mergePaper(mine, theirs) {
+    // (with field dates, a field never changed is oldest; without, the paper's date)
+    const at = (r, k) => (r.ft ? r.ft[k] || 0 : r.updatedAt || 0);
+    const out = {};
+    const ft = {};
+    for (const k of new Set([...Object.keys(mine), ...Object.keys(theirs)])) {
+      if (k === 'ft' || k === 'updatedAt') continue;
+      const src = at(theirs, k) > at(mine, k) ? theirs : mine;
+      if (k in src) out[k] = src[k];
+      if (src.ft && src.ft[k]) ft[k] = src.ft[k];
+    }
+    out.ft = ft;
+    out.updatedAt = Math.max(mine.updatedAt || 0, theirs.updatedAt || 0);
+    return out;
+  }
   const time = (store, r) => (store === 'papers' ? r.updatedAt || 0 : r.mtime || r.ts || r.createdAt || r.addedAt || 0);
 
   async function giveLegacyRowsIds() {
@@ -151,8 +168,10 @@ const Sync = (() => {
   }
 
   // Bring the remote state into this device. Returns how many records changed.
+  let remotePositions = new Map();
   async function mergeIn(remote, tomb) {
     let changes = 0;
+    remotePositions = new Map();
     for (const s of DATA_STORES) {
       const local = new Map((await DB.all(s)).filter((r) => DB.isSynced(s, r)).map((r) => [DB.syncKey(s, r), r]));
       const puts = [];
@@ -160,6 +179,15 @@ const Sync = (() => {
         const k = DB.syncKey(s, r);
         if (k == null || (tomb[`${s}:${k}`] || 0) >= time(s, r)) continue;
         const mine = local.get(k);
+        if (s === 'papers') {
+          // remember where the other device was reading, for the reader's "jump there" offer
+          if (r.epubCfi && (!mine || r.epubCfi !== mine.epubCfi)) remotePositions.set(r.id, { cfi: r.epubCfi, at: (r.ft && r.ft.epubCfi) || r.updatedAt || 0 });
+          if (mine) {
+            const merged = mergePaper(mine, r);
+            if (JSON.stringify(merged) !== JSON.stringify(mine)) puts.push(merged);
+            continue;
+          }
+        }
         if (mine && time(s, mine) >= time(s, r)) continue;
         const row = { ...r };
         // auto-numbered ids differ per device: keep this device's
@@ -213,7 +241,7 @@ const Sync = (() => {
       const last = Date.now();
       await DB.setSetting('syncLast', last);
       set({ busy: false, last });
-      if (result.changes) Sync.onApplied && Sync.onApplied(result);
+      Sync.onApplied && Sync.onApplied(result);
       return result;
     } catch (err) {
       if (err instanceof AuthError) set({ busy: false, needsSignIn: true, error: null });
@@ -316,7 +344,7 @@ const Sync = (() => {
       const key = `${m[1] === 'cover' ? 'epub' : m[1]}:${m[2]}`;
       if (!files[key] || (m[1] === 'cover' && !files[key].cover)) await remove(f).catch(() => {});
     }
-    return { changes, downloaded, uploaded };
+    return { changes, downloaded, uploaded, positions: remotePositions };
   }
 
   // ---------------------------------------------------------------- triggers
