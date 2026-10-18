@@ -151,7 +151,49 @@
     if (!skipSave) await savePaper(p);
   }
 
+  // ---------- discovery trails: which paper led you to which ----------
+  // Each paper may name the one it was found through (p.foundVia), which
+  // makes a tree: the paper you started from at the root, snowballed
+  // references below it.
+  function trailOf(all) {
+    const byId = new Map(all.map((x) => [x.id, x]));
+    const kids = new Map();
+    for (const x of all) if (x.foundVia && byId.has(x.foundVia) && x.foundVia !== x.id) (kids.get(x.foundVia) || kids.set(x.foundVia, []).get(x.foundVia)).push(x);
+    for (const list of kids.values()) list.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+    const ancestors = (p) => {
+      const out = [];
+      const seen = new Set([p.id]);
+      for (let x = byId.get(p.foundVia); x && !seen.has(x.id); x = byId.get(x.foundVia)) {
+        out.unshift(x);
+        seen.add(x.id);
+      }
+      return out;
+    };
+    const descendants = (id) => {
+      const out = new Set();
+      const walk = (i) => (kids.get(i) || []).forEach((k) => !out.has(k.id) && (out.add(k.id), walk(k.id)));
+      walk(id);
+      return out;
+    };
+    const rootOf = (p) => ancestors(p)[0] || p;
+    return { byId, kids, ancestors, descendants, rootOf };
+  }
+
+  function trailTree(node, kids, current, seen = new Set()) {
+    seen.add(node.id);
+    const children = (kids.get(node.id) || []).filter((k) => !seen.has(k.id));
+    return `<li><a href="#/paper/${node.id}" class="t-node${node.id === current ? ' current' : ''}"><span class="t-dot s-${node.status}" title="${STATUS[node.status]}"></span><span>${esc(node.title)}</span>${node.year ? `<span class="muted small"> ${node.year}</span>` : ''}</a>${
+      children.length ? `<ul>${children.map((k) => trailTree(k, kids, current, seen)).join('')}</ul>` : ''
+    }</li>`;
+  }
+
   async function deletePaper(id) {
+    // papers found through this one move up to where it was found
+    const gone = await DB.get('papers', id);
+    for (const child of (await papers()).filter((x) => x.foundVia === id)) {
+      child.foundVia = (gone && gone.foundVia) || null;
+      await savePaper(child);
+    }
     await DB.del('papers', id);
     await DB.del('pdfs', id);
     await DB.del('epubs', id);
@@ -514,6 +556,8 @@
     [/^#\/collections$/, viewCollections],
     [/^#\/backup$/, viewBackup],
     [/^#\/settings$/, viewSettings],
+    [/^#\/trails$/, viewTrails],
+    [/^#\/trail\/(.+)$/, (q, id) => viewTrails(q, id)],
     [/^#\/add$/, (q) => viewEdit(null, q)],
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
@@ -800,6 +844,10 @@
       ...linksFrom.map((l) => ({ l, other: byId[l.toId], label: LINK_TYPES[l.type] })),
       ...linksTo.map((l) => ({ l, other: byId[l.fromId], label: LINK_INVERSE[l.type] })),
     ].filter((r) => r.other);
+    const trail = trailOf(all);
+    const trailAnc = trail.ancestors(p);
+    const trailKids = trail.kids.get(id) || [];
+    const trailDesc = trail.descendants(id); // can't be found via its own descendants
     const isPct = !p.totalPages;
     const format = p.format || (epub && !pdf ? 'epub' : 'pdf');
     const epubSources = Epubify.sources(p, !!pdf);
@@ -908,6 +956,20 @@
               <input name="page" type="number" inputmode="numeric" placeholder="Page">
               <input name="note" placeholder="Your note (optional)">
               <button class="btn primary">Save highlight</button>
+            </form>
+          </details>
+        </section>
+
+        <section class="card" id="trail-card">
+          <h3>Discovery trail</h3>
+          ${trailAnc.length ? `<p class="small">Found via ${trailAnc.map((a) => `<a href="#/paper/${a.id}">${esc(a.title)}</a>`).join(' › ')}</p>` : '<p class="muted small">Not found through another paper.</p>'}
+          ${trailKids.length ? `<p class="small muted">Led to ${trailKids.length} paper${trailKids.length > 1 ? 's' : ''}:</p><ul class="trail">${trailKids.map((k) => trailTree(k, trail.kids, id)).join('')}</ul>` : ''}
+          <div class="row wrap"><a class="btn small primary" href="#/add?via=${id}">＋ Add a paper found here</a>${trailAnc.length || trailKids.length ? `<a class="btn small" href="#/trail/${trail.rootOf(p).id}">Whole trail</a>` : ''}</div>
+          <details><summary>${p.foundVia ? 'Change' : 'Set'} where you found it</summary>
+            <form id="via-form" class="stack">
+              <input name="filter" placeholder="Filter your library" autocomplete="off">
+              <select name="target" size="5">${all.filter((x) => x.id !== id && !trailDesc.has(x.id)).sort((a, b) => a.title.localeCompare(b.title)).map((x) => `<option value="${x.id}"${x.id === p.foundVia ? ' selected' : ''}>${esc(x.title)}</option>`).join('')}</select>
+              <div class="row"><button class="btn primary">Save</button>${p.foundVia ? '<button type="button" class="btn danger-ghost" id="via-clear">Not found via a paper</button>' : ''}</div>
             </form>
           </details>
         </section>
@@ -1164,6 +1226,27 @@
       })
     );
 
+    // Discovery trail
+    const vf = $('#via-form');
+    vf.filter.addEventListener('input', () => {
+      const t = vf.filter.value.toLowerCase();
+      $$('option', vf.target).forEach((o) => (o.hidden = !o.textContent.toLowerCase().includes(t)));
+    });
+    vf.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!vf.target.value) return;
+      const fresh = await DB.get('papers', id);
+      fresh.foundVia = vf.target.value;
+      await savePaper(fresh);
+      rerender();
+    });
+    $('#via-clear')?.addEventListener('click', async () => {
+      const fresh = await DB.get('papers', id);
+      fresh.foundVia = null;
+      await savePaper(fresh);
+      rerender();
+    });
+
     // Related links
     const lf = $('#link-form');
     lf.filter.addEventListener('input', () => {
@@ -1200,6 +1283,7 @@
     const shared = [q.url, q.text, q.title, inbox && inbox.url, inbox && inbox.text].filter(Boolean).join(' ');
     const p = existing || { status: 'want', authors: [], tags: [], collections: [] };
     const sharedTitle = (inbox && inbox.title) || q.title || '';
+    const via = !existing && q.via ? await DB.get('papers', q.via) : null; // found through this paper
 
     main.innerHTML = `
       ${existing ? '' : `<section class="card">
@@ -1213,6 +1297,7 @@
         </form>
       </section>`}
       <form id="edit" class="stack card">
+        ${via ? `<p class="via-chip small" id="via-chip">↳ Found via <b>${esc(via.title)}</b> <button type="button" class="r-btn" id="via-drop" aria-label="Not found via this paper">✕</button></p>` : ''}
         <div class="note small stack" id="dupe" hidden></div>
         <label>Title <input name="title" required value="${esc(p.title || Lookup.cleanTitle(sharedTitle))}"></label>
         <label>Authors <small class="muted">(one per line)</small><textarea name="authors" rows="3">${esc((p.authors || []).join('\n'))}</textarea></label>
@@ -1230,7 +1315,7 @@
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
         ${!(inbox && inbox.file) ? `<label class="check" id="getpdf-row"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv or a PDF link)</label>` : ''}
         ${!(inbox && inbox.file && isEpub(inbox.file)) ? `<label class="check"><input type="checkbox" name="getepub" checked> Make an EPUB for reading in the app</label>` : ''}`}
-        <div class="row end"><a class="btn" href="${existing ? `#/paper/${p.id}` : '#/'}">Cancel</a><button class="btn primary">${existing ? 'Save' : 'Add paper'}</button></div>
+        <div class="row end"><a class="btn" href="${existing ? `#/paper/${p.id}` : via && q.back === 'read' ? `#/read/${via.id}` : '#/'}">Cancel</a><button class="btn primary">${existing ? 'Save' : 'Add paper'}</button></div>
       </form>`;
 
     // A file picked here goes through the same path as a shared one.
@@ -1239,6 +1324,12 @@
       if (!file) return;
       const id = await DB.put('inbox', { title: '', text: '', url: '', file, receivedAt: now() });
       location.hash = `#/add?inbox=${id}`;
+    });
+
+    let viaPaper = via;
+    $('#via-drop')?.addEventListener('click', () => {
+      viaPaper = null;
+      $('#via-chip').remove();
     });
 
     const form = $('#edit');
@@ -1266,7 +1357,17 @@
       const kind = file ? fileKind(file) : pendingPage ? 'web page' : null;
       const has = kind === 'PDF' ? dupe.hasPdf : dupe.hasEpub;
       const label = kind === 'web page' ? (has ? 'Remake its EPUB from this page' : 'Make its EPUB from this page') : has ? `Replace its ${kind} with this one` : `Add this ${kind} to it`;
-      el.innerHTML = `<span>⚠️ Already in your library: <a href="#/paper/${dupe.id}">${esc(dupe.title)}</a></span>${kind ? `<button type="button" class="btn small primary" id="dupe-attach">${label}</button>` : ''}`;
+      el.innerHTML = `<span>⚠️ Already in your library: <a href="#/paper/${dupe.id}">${esc(dupe.title)}</a></span>${kind ? `<button type="button" class="btn small primary" id="dupe-attach">${label}</button>` : ''}${
+        viaPaper && dupe.id !== viaPaper.id && !trailOf(await papers()).descendants(dupe.id).has(viaPaper.id) && dupe.foundVia !== viaPaper.id ? `<button type="button" class="btn small" id="dupe-via">Mark it as found via “${esc(viaPaper.title.length > 50 ? viaPaper.title.slice(0, 50) + '…' : viaPaper.title)}”</button>` : ''
+      }`;
+      $('#dupe-via')?.addEventListener('click', async () => {
+        const d = await DB.get('papers', dupe.id);
+        d.foundVia = viaPaper.id;
+        await savePaper(d);
+        if (q.cites) await DB.put('links', { fromId: viaPaper.id, toId: d.id, type: 'cites', createdAt: now() });
+        toast('Added to the trail');
+        location.hash = q.back === 'read' ? `#/read/${viaPaper.id}` : `#/paper/${viaPaper.id}`;
+      });
       const btn = $('#dupe-attach');
       if (!btn) return;
       btn.addEventListener('click', async () => {
@@ -1510,8 +1611,11 @@
         collections: $$('input[name=col]:checked', f).map((c) => c.value),
         status: 'none',
         pdfUrl: pdfLink || null,
+        foundVia: viaPaper ? viaPaper.id : null,
       });
       await savePaper(p);
+      // added from a reference in the paper it was found through: that paper cites it
+      if (viaPaper && q.cites) await DB.put('links', { fromId: viaPaper.id, toId: p.id, type: 'cites', createdAt: now() });
       await setStatus(p, f.status.value);
       if (inbox) await DB.del('inbox', inbox.id);
       let pdfJob = Promise.resolve();
@@ -1550,6 +1654,11 @@
             if (location.hash === `#/paper/${p.id}`) route();
           })
           .catch(() => toast('No EPUB made. Try “Make EPUB” on the paper page'));
+      }
+      if (viaPaper && q.back === 'read') {
+        toast('Added. Back to reading');
+        location.hash = `#/read/${viaPaper.id}`;
+        return;
       }
       toast('Added to your library');
       location.hash = `#/paper/${p.id}`;
@@ -1775,8 +1884,10 @@
       const item = target.closest('li, p, .ltx_bibitem') || target;
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
         <p class="ref-pop">${esc(item.textContent.replace(/\s+/g, ' ').trim())}</p>
-        <div class="row end"><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
+        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
       dlg.onclose = () => {
+        // snowballing: add the cited paper, remembering it was found here
+        if (dlg.returnValue === 'add') location.hash = `#/add?via=${id}&cites=1&back=read&text=${encodeURIComponent(item.textContent.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '').replace(/(\p{Ll})- (\p{Ll})/gu, '$1$2'))}`;
         if (dlg.returnValue === 'go' && cfi) {
           backBtn.hidden = false;
           go(() => rendition.display(cfi));
@@ -1975,6 +2086,34 @@
   }
 
   // ---------- backup ----------
+  // All discovery trails, or one of them in full.
+  async function viewTrails(q, id) {
+    const all = await papers();
+    const t = trailOf(all);
+    if (id) {
+      const p = t.byId.get(id);
+      if (!p) return (location.hash = '#/trails');
+      const root = t.rootOf(p);
+      setTitle('Discovery trail');
+      const size = t.descendants(root.id).size + 1;
+      main.innerHTML = `<section class="card"><h3>${esc(root.title)}</h3><p class="muted small">${size} paper${size > 1 ? 's' : ''} found from here. Indented papers were found through the one above.</p>
+        <ul class="trail big">${trailTree(root, t.kids, id)}</ul></section>
+        <p class="small"><a href="#/trails">All trails →</a></p>`;
+      return;
+    }
+    setTitle('Discovery trails');
+    const roots = all.filter((p) => !t.byId.get(p.foundVia) && t.kids.has(p.id));
+    const info = roots
+      .map((r) => {
+        const ids = [r.id, ...t.descendants(r.id)];
+        const ps = ids.map((i) => t.byId.get(i));
+        return { r, n: ps.length, read: ps.filter((x) => x.status === 'read').length, last: Math.max(...ps.map((x) => x.addedAt || 0)) };
+      })
+      .sort((a, b) => b.last - a.last);
+    main.innerHTML = `<section class="card"><p class="muted small">When you add a paper you found through another one (“＋ Add a paper found here” on a paper, or “＋ Add to library” on a reference in the reader), it joins that paper’s trail.</p>
+      <ul class="list compact">${info.map(({ r, n, read }) => `<li class="paper-row"><a class="paper-link" href="#/trail/${r.id}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${n} papers · ${read} read</span></a></li>`).join('') || '<li class="muted small">No trails yet.</li>'}</ul></section>`;
+  }
+
   async function viewSettings() {
     setTitle('Settings');
     const [key, model, clientId, syncFiles, last] = await Promise.all([
@@ -2197,6 +2336,7 @@
     const [cols, all, tagCounts] = await Promise.all([DB.all('collections'), papers(), allTags()]);
     const count = (cid) => all.filter((p) => (p.collections || []).includes(cid)).length;
     main.innerHTML = `
+      <section class="card"><a class="paper-link" href="#/trails"><span class="pr-title">🌳 Discovery trails</span><span class="pr-meta">Which papers led you to which</span></a></section>
       <section class="card">
         <h3>Collections</h3>
         <ul class="list compact">${cols

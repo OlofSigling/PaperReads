@@ -131,16 +131,19 @@ const Lookup = (() => {
     };
     const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const variants = new Set([norm(query), norm(dropDashSuffix(query))]);
+    // A whole reference ("Smith J, Lee K. Title of paper. J Econ 2019;…")
+    // contains the title rather than being it.
+    const inRef = (t) => norm(t).split(' ').length >= 4 && norm(query).length > norm(t).length + 15 && ` ${norm(query)} `.includes(` ${norm(t)} `);
     const results = json.message.items
       .filter((it) => it.title && it.title.length)
       .map((it) => ({
         ...fromCsl(it),
         doi: it.DOI,
-        score: Math.round(Math.max(sim(it.title[0]), variants.has(norm(it.title[0])) ? 1 : 0) * 10),
+        score: Math.round(Math.max(sim(it.title[0]), variants.has(norm(it.title[0])) || inRef(it.title[0]) ? 1 : 0) * 10),
         cites: it['is-referenced-by-count'] || 0,
         // corrections/errata often repeat the original title word for word
         notice: !!(it['update-to'] && it['update-to'].length) || /^(correction|erratum|corrigendum|retraction|expression of concern)\b/i.test(it.title[0]),
-        exact: variants.has(norm(it.title[0])),
+        exact: variants.has(norm(it.title[0])) || inRef(it.title[0]),
       }))
       .sort((a, b) => b.score - a.score || a.notice - b.notice || b.cites - a.cites)
       .slice(0, 8);

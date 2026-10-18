@@ -332,3 +332,16 @@ ol.steps li { margin-bottom: 6px; }
 .ask-quote q { flex: 1; margin: 0; }
 .ask-form { display: flex; gap: 8px; align-items: flex-end; }
 .ask-form textarea { flex: 1; resize: vertical; }
+
+/* discovery trails */
+ul.trail { list-style: none; padding: 0; margin: 4px 0 10px; }
+ul.trail ul { list-style: none; margin: 0; padding-left: 14px; border-left: 2px solid var(--border); margin-left: 6px; }
+.t-node { display: flex; gap: 8px; align-items: baseline; padding: 5px 4px; color: var(--text); text-decoration: none; font-size: .92rem; line-height: 1.3; }
+.trail.big .t-node { font-size: 1rem; padding: 7px 4px; }
+.t-node.current { font-weight: 600; background: var(--accent-soft); border-radius: 6px; }
+.t-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--border); transform: translateY(-1px); }
+.t-dot.s-reading { background: var(--accent); }
+.t-dot.s-read { background: #3a9b5c; }
+.t-dot.s-want { background: transparent; border: 2px solid var(--accent); width: 5px; height: 5px; }
+.via-chip { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 10px; border-radius: 8px; background: var(--accent-soft); }
+.via-chip b { flex: 1; font-weight: 600; }

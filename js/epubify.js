@@ -1932,6 +1932,18 @@ const Epubify = (() => {
             .filter(Boolean)
         );
       }
+      // one paragraph per printed line: fold lines that don't start an
+      // entry into the entry above (when the list is numbered at all)
+      const isStart = (t) => /^\[?\d{1,3}[\].]?\s/.test(t);
+      if (out.filter(isStart).length >= Math.max(3, out.length * 0.2)) {
+        const merged = [];
+        // "3Department of …": an affiliation (marker glued to the word) from a side column
+        for (const t of out.filter((x) => !/^\d{1,2}\p{Lu}\p{Ll}+/u.test(x))) {
+          if (isStart(t) || !merged.length) merged.push([t]);
+          else merged.at(-1).push(t);
+        }
+        out.splice(0, out.length, ...merged.map((lines) => joinWrapped(lines)));
+      }
       container.replaceChildren(
         ...out.map((t, i) => {
           const p = doc.createElement('p');

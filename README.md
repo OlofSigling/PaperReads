@@ -28,6 +28,10 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
 - **Concerns:** a per-paper checklist of doubts and things to verify, on the paper page and in the reader
   (⚠ in the top bar). Select text in the reader and tap **Concern** to attach the passage; tick items off
   as resolved.
+- **Discovery trails:** record which paper led you to which. In the reader, tap a citation and **＋ Add to library**
+  to snowball: the cited paper is looked up from the reference and joins the trail (and you're back where you were
+  reading). On a paper page, **＋ Add a paper found here** does the same; any paper's "found via" can be changed later.
+  Each paper shows where it was found and what it led to; 🌳 Discovery trails (under 📁) shows the whole trees.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
 - **Queue:** drag to prioritise your want-to-read list. The top items show as "Next up" on the home screen.
 - **Ask Claude** (optional): ask about a paper on its page or in the reader (💬), or select a passage and tap
