@@ -730,6 +730,17 @@ const Epubify = (() => {
   // and a capital first letter ("results" → "Results").
   function headingCase(txt) {
     let t = txt;
+    // small caps extracted as a jumble of cases ("BRinging CuLTuRE BACK in",
+    // "CASE SELECTion"): sentence case, keeping acronyms the paper uses in its text
+    const real = (w) => (camelVocab.get(w) || 0) >= 3;
+    const jumbled = t.split(/\s+/).filter((w) => (/\p{Lu}{2,}\p{Ll}/u.test(w) || /\p{Ll}\p{Lu}/u.test(w)) && !real(w.replace(/[^\p{L}\d]/gu, '')));
+    if (jumbled.length) {
+      const out = t
+        .split(/(\s+)/)
+        .map((w) => (/^\p{Lu}{2,}$/u.test(w.replace(/[^\p{L}]/gu, '')) && (capsVocab.get(w.replace(/[^\p{L}]/gu, '')) || 0) >= 3) || real(w.replace(/[^\p{L}\d]/gu, '')) ? w : w.toLowerCase())
+        .join('');
+      return out.charAt(0).toUpperCase() + out.slice(1);
+    }
     if (/^\p{L}+$/u.test(t) && /\p{Ll}\p{Lu}/u.test(t) && (camelVocab.get(t) || 0) < 3) t = t.toLowerCase();
     else t = fixSmallCaps(t);
     return t.charAt(0).toUpperCase() + t.slice(1);
@@ -738,6 +749,7 @@ const Epubify = (() => {
   // Words with inner capitals that the document uses often ("ImageNet",
   // "PubMed") are spelled that way; small-caps artefacts appear once or twice.
   let camelVocab = new Map();
+  let capsVocab = new Map(); // all-capital words in the text (acronyms)
   function fixSmallCaps(txt) {
     const words = txt.split(/\s+/);
     const odd = words.filter((w) => (/\p{Ll}\p{Lu}/u.test(w) || /^\p{Ll}+\p{Lu}/u.test(w)) && (camelVocab.get(w.replace(/[^\p{L}\d]/gu, '')) || 0) < 3).length;
@@ -1136,11 +1148,13 @@ const Epubify = (() => {
     // to tell a real hyphen from a line-break one when rejoining lines.
     hyphenVocab = new Set();
     camelVocab = new Map();
+    capsVocab = new Map();
     for (const pg of pdf.pages)
       for (const l of pg.lines)
         for (const s of l.spans) {
           for (const m of s.text.matchAll(/[\p{L}\d]+(?:-[\p{L}\d]+)+/gu)) hyphenVocab.add(m[0].toLowerCase());
           for (const m of s.text.matchAll(/\p{L}*\p{Ll}\p{Lu}\p{L}*/gu)) camelVocab.set(m[0], (camelVocab.get(m[0]) || 0) + 1);
+          for (const m of s.text.matchAll(/\b\p{Lu}{2,}\b/gu)) capsVocab.set(m[0], (capsVocab.get(m[0]) || 0) + 1);
         }
     const stem = (filename || 'paper').replace(/\.[^.]+$/, '');
 
@@ -1214,12 +1228,15 @@ const Epubify = (() => {
     const TERMINAL = '.!?:;\u201d"\')]';
     const paraBuf = [];
     let pending = [];
+    let paraQuote = false; // the open paragraph is an indented block quote
+    let carryLine = null;
     const flushPara = () => {
       if (paraBuf.length) {
         const joined = joinWrapped(paraBuf);
-        if (joined) parts.push(`<p>${escRich(joined)}</p>`);
+        if (joined) parts.push(paraQuote && paraBuf.length > 1 ? `<blockquote><p>${escRich(joined)}</p></blockquote>` : `<p>${escRich(joined)}</p>`);
         paraBuf.length = 0;
       }
+      paraQuote = false;
       if (pending.length) {
         parts.push(...pending);
         pending = [];
@@ -1398,7 +1415,9 @@ const Epubify = (() => {
       if (twoCol) {
         // full-width rows above the columns come first, the rest after
         // (measured from real column text, not a stray label above it)
-        const colTop = Math.min(...ordered.filter((t) => t[0] >= 0 && t[2].length >= 30 && Math.abs(t[3] - bodySize) <= 1).map((t) => t[1]), Infinity);
+        let colTop = Math.min(...ordered.filter((t) => t[0] >= 0 && t[2].length >= 30 && Math.abs(t[3] - bodySize) <= 1).map((t) => t[1]), Infinity);
+        // a page all in smaller type (the reference list): any real column line will do
+        if (colTop === Infinity) colTop = Math.min(...ordered.filter((t) => t[0] >= 0 && t[2].length >= 30).map((t) => t[1]), Infinity);
         for (const t of ordered) {
           if (t[0] === -1 && t[1] > colTop) t[0] = 2;
           else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2) t[0] = -1; // author lines etc. above the columns
@@ -1424,7 +1443,8 @@ const Epubify = (() => {
         const gaps = lines.slice(1).map((t, i) => t[1] - lines[i][1]).filter((g) => g > 0).sort((a, b) => a - b);
         if (gaps.length) lineGap.set(c, gaps[gaps.length >> 1]);
       }
-      let prev = null;
+      // the last line of a paragraph still open from the previous page
+      let prev = paraBuf.length ? carryLine : null;
       // A caption sitting in the middle of running text (top of a column) is
       // collected on the side, so the paragraph around it stays in one piece.
       let capBuf = null;
@@ -1434,9 +1454,11 @@ const Epubify = (() => {
       };
       const SECTION = /^((\d+(\.\d+)*\.?|[A-Z]\.|[IVX]+\.)\s+\S|(abstract|introduction|background|related work|methods?|materials and methods|results|discussion|conclusions?|acknowledge?ments?|references|appendix)\b)/i;
       let lastHeading = null;
-      for (const [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
+      let lastSmall = null; // the section heading just emitted, to join a wrapped second line
+      for (let [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
         if (capBuf) {
-          const gapBreak = c !== capBuf.c || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
+          // (a caption's wide first line counts as full width, its next line as a column)
+          const gapBreak = (c !== capBuf.c && c !== -1 && capBuf.c !== -1) || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
           if (!gapBreak) {
             capBuf.lines.push(txt);
             capBuf.y = y;
@@ -1459,7 +1481,18 @@ const Epubify = (() => {
         ) {
           flushPara();
           const tag = minor && !bold ? 'h4' : 'h3';
+          // a heading wrapped onto a second line is one heading
+          if (lastSmall && lastSmall.tag === tag && lastSmall.c === c && y > lastSmall.y && y - lastSmall.y < sz * 2.4 && parts.length - 1 === lastSmall.i && !endsWithAny(lastSmall.text, '.') &&
+            !NUMBERED.test(txt) && !SECTION_WORD.test(txt) && !(SECTION_WORD.test(lastSmall.text) && lastSmall.text.split(/\s+/).length <= 2)) {
+            lastSmall.text += ' ' + txt;
+            lastSmall.y = y;
+            parts[lastSmall.i] = `<${tag}>${escRich(headingCase(lastSmall.text))}</${tag}>`;
+            prev = null;
+            lastHeading = null;
+            continue;
+          }
           parts.push(`<${tag}>${escRich(headingCase(txt))}</${tag}>`);
+          lastSmall = { i: parts.length - 1, tag, text: txt, c, y };
           prev = null;
           lastHeading = null;
           continue;
@@ -1468,8 +1501,10 @@ const Epubify = (() => {
         const bigText = txt.split(/\s+/).length > 14 || (lastHeading && (lastHeading.text + ' ' + txt).split(/\s+/).length > 24);
         if (sz >= bodySize + 3 && !bigText) {
           flushPara();
+          txt = txt.replace(/\s+(?:DOI|doi):?\s*10\.\S+.*$/, ''); // a DOI printed beside the title
           // a heading wrapped onto two lines is one heading
-          if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, '.:')) {
+          // (a title runs on after its colon: "Hiring as Cultural Matching: The Case of …")
+          if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, lastHeading.tag === 'h1' ? '.' : '.:')) {
             lastHeading.text += ' ' + txt;
             lastHeading.y = y;
             parts[lastHeading.i] = `<${lastHeading.tag}>${escRich(lastHeading.text)}</${lastHeading.tag}>`;
@@ -1490,14 +1525,28 @@ const Epubify = (() => {
         if (prev && Math.abs(sz - prev.sz) >= 2) startsPara = true;
         // the previous line stopped well short of the column edge: its paragraph ended
         if (prev && prev.c === c && bodyX1.has(c) && prev.x1 < bodyX1.get(c) - (bodyX1.get(c) - (bodyX0.get(c) ?? 0)) * 0.15 && endsWithAny(prev.txt.trimEnd(), TERMINAL)) startsPara = true;
+        // block quotes: every line keeps the indent, so an indented line under
+        // a line indented the same way continues it (a first-line indent doesn't repeat)
+        const indented = x !== undefined && x0 > x + 6;
+        // (across a column or page break, compare the indent from each column's margin)
+        const moved = !prev || prev.c !== c || y < prev.y;
+        const sameIndent = prev && prev.indented && Math.abs(sz - prev.sz) < 0.5 &&
+          (moved ? Math.abs(x0 - x - prev.indent) <= 1.5 : Math.abs(x0 - prev.x0) <= 1.5 && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6);
+        // (prose only: indented table rows stay one per line)
+        const prose = (txt.match(/\p{L}{2,}/gu) || []).length >= 4 && (txt.match(/\d/g) || []).length < txt.length * 0.15;
+        if (indented && sameIndent && prose) startsPara = false;
         if (startsWithAny(txt.trimStart(), ['•', '–', '- ', '* '])) startsPara = true;
-        if (startsPara) flushPara();
+        if (startsPara) {
+          flushPara();
+          paraQuote = indented && sz < bodySize - 0.4;
+        } else if (!(indented && sameIndent && prose)) paraQuote = paraQuote && indented;
         paraBuf.push(txt);
-        prev = { c, y, sz, x1, txt };
+        prev = { c, y, sz, x1, txt, x0, indented, indent: x0 - (x ?? x0) };
       }
       endCaption();
       // keep an unfinished paragraph open across the page break
       if (paraBuf.length && endsWithAny(paraBuf.at(-1).trimEnd(), TERMINAL)) flushPara();
+      carryLine = prev;
 
       // deferred table rows / boxed prose
       if (leftBlockRows.length) {
@@ -2070,7 +2119,9 @@ const Epubify = (() => {
       // "Surname AB, Surname CD" or "Surname AB. 1999"
       if (out.filter((t) => /^\[?\d{1,3}[\].]?\s/.test(t)).length < Math.max(3, out.length * 0.2)) {
         const AUTHOR_START = /(?<=[\p{L}\d)]\.\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}(?:,\s[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}[,.]|\.\s(?:1[89]|20)\d\d))/u;
-        out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).map((x) => x.trim()).filter(Boolean)));
+        // social-science style: "Surname, First[, First Surname][ and First Surname]. 1998."
+        const NAMED_START = /(?<=\s)(?=[\p{Lu}][\p{L}'’-]+,\s[\p{Lu}][\p{L}'’-]+(?:\s[\p{Lu}]\.)*(?:,\s[\p{Lu}][\p{L}'’.\s-]{1,40}?)*(?:,?\s(?:and|&)\s[\p{Lu}][\p{L}'’.\s-]{1,40}?)?\.\s(?:1[89]|20)\d\d[a-z]?\.)/u;
+        out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).flatMap((x) => x.split(NAMED_START)).map((x) => x.trim()).filter(Boolean)));
       }
       // one paragraph per printed line: fold lines that don't start an
       // entry into the entry above (when the list is numbered at all)
@@ -2180,6 +2231,15 @@ const Epubify = (() => {
         let any = false;
         for (const [i, seg] of m[1].split(/;\s*/).entries()) {
           if (i) out.push('; ');
+          // the first surname leads, however many follow: "Stainback, Tomaskovic-Devey, and Skaggs 2010"
+          const lead = /^(\s*(?:see(?: also)?|e\.g\.,?|cf\.|for a review, see)?\s*)(([\p{Lu}][\p{L}'’-]+)(?:,? [^;()]{0,80}?)?,?\s+((?:1[89]|20)\d\d[a-z]?))/u.exec(seg);
+          const second = lead && (/(?:,|\band|&)\s+([\p{Lu}][\p{L}'’-]+)/u.exec(lead[2].slice(lead[3].length)) || [])[1];
+          const leadHit = lead && find(lead[3], lead[4], second);
+          if (leadHit) {
+            out.push(seg.slice(0, lead[1].length), anchor(doc, leadHit.id, lead[2]), seg.slice(lead[0].length));
+            any = true;
+            continue;
+          }
           const c = /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|(?:and|&)\s*([\p{Lu}][\p{L}'’-]+)))?,?\s+((?:1[89]|20)\d\d[a-z]?)/u.exec(seg);
           const hit = c && find(c[1], c[3], c[2]);
           if (hit) {
@@ -2191,7 +2251,7 @@ const Epubify = (() => {
         return any ? out : null;
       });
       // in a sentence: "Smith et al. (2019)", "Roux & Fitzgibbon (2010)"
-      links += replaceInText(root, /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|(?:and|&)\s+([\p{Lu}][\p{L}'’-]+)))?\s+\(((?:1[89]|20)\d\d[a-z]?)\)/u, (m, doc) => {
+      links += replaceInText(root, /([\p{Lu}][\p{L}'’-]+)(?:\s+(?:et al\.?|(?:and|&)\s+([\p{Lu}][\p{L}'’-]+)))?\s+\(((?:1[89]|20)\d\d[a-z]?)(?::\s?[\d–-]+)?\)/u, (m, doc) => {
         const hit = find(m[1], m[3], m[2]);
         return hit ? [anchor(doc, hit.id, m[0])] : null;
       });
@@ -2682,6 +2742,7 @@ td,th{border:1px solid #9995;padding:.2em .4em;}
 .ltx_tag_equation{float:right;}
 .ltx_bibitem{font-size:.9em;}
 small{font-size:.85em;}
+blockquote{margin:.8em 0 .8em 1.4em;padding-left:.8em;border-left:2px solid #8885;font-size:.95em;}
 p.source{font-size:.8em;word-break:break-all;}
 div.cover{text-align:center;}div.cover img{max-height:95vh;}`;
 
