@@ -2169,12 +2169,14 @@
 
   async function viewSettings() {
     setTitle('Settings');
-    const [key, model, clientId, syncFiles, last] = await Promise.all([
+    const [key, model, clientId, syncFiles, last, clientSecret, stays] = await Promise.all([
       DB.setting('anthropicKey', ''),
       DB.setting('claudeModel', Ask.DEFAULT_MODEL),
       DB.setting('googleClientId', ''),
       DB.setting('syncFiles', true),
       DB.setting('syncLast', null),
+      DB.setting('googleClientSecret', ''),
+      Sync.staysSignedIn(),
     ]);
     const origin = location.origin;
     main.innerHTML = `
@@ -2197,6 +2199,7 @@
         <p id="sy-state" class="small"></p>
         <form id="sy-form" class="stack">
           <label>Google client ID <input name="cid" autocomplete="off" placeholder="…apps.googleusercontent.com" value="${esc(clientId)}"></label>
+          <label>Client secret <small class="muted">(lets this device stay signed in instead of asking every hour)</small><input type="password" name="secret" autocomplete="off" placeholder="GOCSPX-…" value="${esc(clientSecret)}"></label>
           <label class="check"><input type="checkbox" name="files" ${syncFiles ? 'checked' : ''}> Also sync PDFs and EPUBs (uses more data)</label>
           <div class="row"><button class="btn primary" id="sy-go">${clientId ? 'Sync now' : 'Connect and sync'}</button>${clientId ? '<button type="button" class="btn danger-ghost" id="sy-off">Disconnect</button>' : ''}</div>
         </form>
@@ -2206,8 +2209,9 @@
             <li>Turn on the <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Drive API</a> for it.</li>
             <li>Go to <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener">Google Auth Platform</a> → Get started: app name PaperReads, your email, audience <b>External</b>.</li>
             <li>Under <b>Audience</b> → Test users, add your own Gmail address.</li>
-            <li>Under <b>Clients</b> → Create client: type <b>Web application</b>; under Authorised JavaScript origins add <code>${esc(origin)}</code>. Create, then copy the Client ID.</li>
-            <li>Paste it above and tap Connect. Google will warn that the app isn’t verified: that’s expected for your own app; continue.</li>
+            <li>Under <b>Clients</b> → Create client: type <b>Web application</b>; under Authorised JavaScript origins add <code>${esc(origin)}</code>, and under Authorised redirect URIs add <code>${esc(Sync.redirectUri())}</code>. Create, then copy the Client ID and the Client secret. (Already made a client? Open it, add the redirect URI, and copy its secret.)</li>
+            <li>Under <b>Audience</b>, tap <b>Publish app</b>. Otherwise Google signs you out after 7 days.</li>
+            <li>Paste both above and tap Connect. Google will warn that the app isn’t verified: that’s expected for your own app; continue.</li>
             <li>On your other devices, open this app, paste the same client ID here and connect.</li>
           </ol>
         </details>
@@ -2251,7 +2255,7 @@
           : st.needsSignIn
             ? 'Tap Sync now to sign in to Google again.'
             : st.last
-              ? `Last synced ${fmtDate(st.last)} at ${new Date(st.last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`
+              ? `Last synced ${fmtDate(st.last)} at ${new Date(st.last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.${stays ? ' Stays signed in on this device.' : clientId ? ' Add the client secret to stop the hourly sign-in.' : ''}`
               : clientId
                 ? 'Not synced yet.'
                 : '';
@@ -2266,6 +2270,9 @@
       const cid = e.target.cid.value.trim();
       if (!/\.apps\.googleusercontent\.com$/.test(cid)) return toast('That doesn’t look like a Google client ID');
       await DB.setSetting('googleClientId', cid);
+      const secret = e.target.secret.value.trim();
+      if (secret !== clientSecret) await DB.setSetting('googleRefreshToken', ''); // a new secret means signing in again
+      await DB.setSetting('googleClientSecret', secret);
       await DB.setSetting('syncFiles', e.target.files.checked);
       try {
         const r = await Sync.run({ interactive: true });
@@ -2613,6 +2620,10 @@
       .catch((err) => toast(`Sync failed: ${err.message}`))
   );
   // Fresh data from another device: redraw list-like views (never a form or the reader).
+  Sync.onSignedIn = () => {
+    toast('Signed in to Google. This device stays signed in');
+    if (/^#\/settings/.test(location.hash)) route();
+  };
   Sync.onApplied = (result) => {
     if (/^#\/read\//.test(location.hash)) return readerSync && readerSync(result);
     if (!result.changes) return;

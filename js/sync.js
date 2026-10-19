@@ -32,9 +32,17 @@ const Sync = (() => {
   };
 
   // ---------------------------------------------------------------- auth
-  // Google Identity Services gives a 1-hour access token. Asking for one may
-  // open a popup, which browsers only allow right after a tap; with a token
-  // still valid, syncs run on their own.
+  // Access tokens last an hour. With the client secret, sign-in is Google's
+  // code flow (a full-page visit to Google, back to oauth.html), which also
+  // gives a refresh token: from then on new access tokens come silently, so
+  // sync keeps running without asking. Without the secret, Google Identity
+  // Services hands out 1-hour tokens only, renewed with a tap.
+  const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+  const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+  const RETURN_KEY = 'paperreads.oauth-return'; // written by oauth.html
+  const PKCE_KEY = 'paperreads.oauth-pkce';
+  const redirectUri = () => new URL('oauth.html', document.baseURI).href;
+  const b64url = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   let token = null;
   try {
     const t = JSON.parse(localStorage.getItem(TOKEN_KEY) || 'null');
@@ -46,6 +54,88 @@ const Sync = (() => {
     try {
       localStorage.removeItem(TOKEN_KEY);
     } catch {}
+  }
+
+  function keepToken(j) {
+    token = { value: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+    try {
+      localStorage.setItem(TOKEN_KEY, JSON.stringify(token));
+    } catch {}
+  }
+
+  async function tokenRequest(params) {
+    const [clientId, secret] = await Promise.all([DB.setting('googleClientId', ''), DB.setting('googleClientSecret', '')]);
+    const res = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: clientId, client_secret: secret, ...params }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(j.error_description || j.error || `Google answered ${res.status}`);
+      err.code = j.error;
+      throw err;
+    }
+    return j;
+  }
+
+  // Off to Google's sign-in page; it comes back to oauth.html.
+  async function startCodeFlow() {
+    const clientId = await DB.setting('googleClientId', '');
+    const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+    const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+    const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
+    localStorage.setItem(PKCE_KEY, JSON.stringify({ verifier, state: nonce, back: location.hash || '#/' }));
+    const u = new URL(AUTH_URL);
+    const q = { client_id: clientId, redirect_uri: redirectUri(), response_type: 'code', scope: SCOPE, access_type: 'offline', prompt: 'consent', state: nonce, code_challenge: challenge, code_challenge_method: 'S256' };
+    for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
+    location.href = u.href;
+    return new Promise(() => {}); // this page is going away
+  }
+
+  // Back from Google: trade the code for tokens. Returns true if it did.
+  async function finishCodeFlow() {
+    let ret = null;
+    let pk = null;
+    try {
+      ret = JSON.parse(localStorage.getItem(RETURN_KEY) || 'null');
+      pk = JSON.parse(localStorage.getItem(PKCE_KEY) || 'null');
+      localStorage.removeItem(RETURN_KEY);
+      localStorage.removeItem(PKCE_KEY);
+    } catch {}
+    if (!ret) return false;
+    if (ret.error) throw new Error(ret.error === 'access_denied' ? 'sign-in was cancelled' : `Google said: ${ret.error}`);
+    if (!pk || ret.state !== pk.state || !ret.code) throw new Error('the sign-in reply didn’t match; try again');
+    const j = await tokenRequest({ code: ret.code, code_verifier: pk.verifier, redirect_uri: redirectUri(), grant_type: 'authorization_code' });
+    keepToken(j);
+    if (j.refresh_token) await DB.setSetting('googleRefreshToken', j.refresh_token);
+    await DB.setSetting('syncConnected', true);
+    return true;
+  }
+
+  // A fresh access token without asking, when a refresh token is stored.
+  async function refresh() {
+    const rt = await DB.setting('googleRefreshToken', '');
+    if (!rt || !navigator.onLine) return null;
+    try {
+      keepToken(await tokenRequest({ refresh_token: rt, grant_type: 'refresh_token' }));
+      return token.value;
+    } catch (err) {
+      // revoked, or expired (a Google project in "Testing" mode: after 7 days)
+      if (err.code === 'invalid_grant') {
+        await DB.setSetting('googleRefreshToken', '');
+        set({ error: 'Google sign-in ended; tap Sync to sign in again' });
+      }
+      return null;
+    }
+  }
+
+  async function ensureToken(interactive) {
+    if (validToken()) return validToken();
+    if (await refresh()) return validToken();
+    if (!interactive) return null;
+    if (await DB.setting('googleClientSecret', '')) return startCodeFlow();
+    return signIn();
   }
 
   let gisPromise = null;
@@ -92,10 +182,13 @@ const Sync = (() => {
   // ---------------------------------------------------------------- Drive
   class AuthError extends Error {}
   async function call(method, url, { body, headers = {}, as = 'json' } = {}) {
-    const res = await fetch(url, { method, body, headers: { Authorization: `Bearer ${validToken()}`, ...headers } });
+    let res = await fetch(url, { method, body, headers: { Authorization: `Bearer ${validToken()}`, ...headers } });
     if (res.status === 401) {
       forgetToken();
-      throw new AuthError('Google sign-in expired');
+      // renew once, silently if we can
+      if (!(await refresh())) throw new AuthError('Google sign-in expired');
+      res = await fetch(url, { method, body, headers: { Authorization: `Bearer ${validToken()}`, ...headers } });
+      if (res.status === 401) throw new AuthError('Google sign-in expired');
     }
     if (!res.ok) {
       let msg = '';
@@ -123,6 +216,20 @@ const Sync = (() => {
   // Multipart upload: one request, metadata and content together.
   async function upload(existing, name, blob, props = {}) {
     const meta = existing ? { appProperties: props } : { name, parents: ['appDataFolder'], appProperties: props };
+    // Google's one-request upload is for small files; big PDFs go in two steps
+    if (blob.size > 4.5e6) {
+      const res = await call(existing ? 'PATCH' : 'POST', `${UPLOAD}${existing ? '/' + existing.id : ''}?uploadType=resumable&fields=id,name,appProperties`, {
+        body: JSON.stringify(meta),
+        headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': blob.type || 'application/octet-stream' },
+        as: 'response',
+      });
+      const at = res.headers.get('Location');
+      if (at) {
+        const put = await fetch(at, { method: 'PUT', body: blob });
+        if (!put.ok) throw new Error(`Google Drive answered ${put.status} to an upload`);
+        return put.json();
+      }
+    }
     const boundary = 'paperreads' + Math.random().toString(36).slice(2);
     const body = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`, blob, `\r\n--${boundary}--`]);
     return call(existing ? 'PATCH' : 'POST', `${UPLOAD}${existing ? '/' + existing.id : ''}?uploadType=multipart&fields=id,name,appProperties`, {
@@ -228,19 +335,16 @@ const Sync = (() => {
   async function doRun({ interactive = false } = {}) {
     if (!(await DB.setting('googleClientId', ''))) return { skipped: 'not set up' };
     if (!navigator.onLine) return { skipped: 'offline' };
-    if (!validToken()) {
-      if (!interactive) {
-        set({ needsSignIn: true });
-        return { skipped: 'needs sign-in' };
-      }
-      await signIn();
+    if (!(await ensureToken(interactive))) {
+      set({ needsSignIn: true });
+      return { skipped: 'needs sign-in' };
     }
     set({ busy: true, error: null, needsSignIn: false });
     try {
       const result = await syncOnce();
       const last = Date.now();
       await DB.setSetting('syncLast', last);
-      set({ busy: false, last });
+      set({ busy: false, last, error: result.failed ? `${result.failed} file(s) couldn’t be synced; will retry next time` : null });
       Sync.onApplied && Sync.onApplied(result);
       return result;
     } catch (err) {
@@ -275,6 +379,7 @@ const Sync = (() => {
     const files = {};
     let downloaded = 0;
     let uploaded = 0;
+    let failed = 0;
     for (const [store, kind] of Object.entries(FILE_STORES)) {
       const local = new Map((await DB.all(store)).map((r) => [r.paperId, r]));
       // remote entries
@@ -287,12 +392,19 @@ const Sync = (() => {
         if (mine && time(store, mine) >= e.mtime) continue;
         const blobFile = remoteFiles.get(`${kind}-${id}`);
         if (!withFiles || !blobFile) continue;
-        const blob = await download(blobFile, 'blob');
+        let blob;
+        try {
+          blob = await download(blobFile, 'blob');
+        } catch (err) {
+          if (err instanceof AuthError) throw err;
+          failed++; // one file shouldn't stop the rest; next sync retries it
+          continue;
+        }
         const type = kind === 'pdf' ? 'application/pdf' : 'application/epub+zip';
         const rec = { paperId: id, blob: new File([blob], e.name, { type }), name: e.name, size: blob.size, addedAt: e.addedAt, mtime: e.mtime };
         if (kind === 'epub') {
           const coverFile = e.cover && remoteFiles.get(`cover-${id}`);
-          Object.assign(rec, { source: e.source, missingFigures: e.missingFigures || 0, cover: coverFile ? await download(coverFile, 'blob') : null });
+          Object.assign(rec, { source: e.source, missingFigures: e.missingFigures || 0, cover: coverFile ? await download(coverFile, 'blob').catch(() => null) : null });
         }
         await DB.quietly(() => DB.put(store, rec));
         local.set(id, rec);
@@ -315,10 +427,15 @@ const Sync = (() => {
         if (kind === 'epub') Object.assign(entry, { source: r.source || '', missingFigures: r.missingFigures || 0, cover: !!r.cover });
         if (have && have.mtime >= t && remoteFiles.has(`${kind}-${id}`)) continue;
         if (!withFiles) continue;
-        await upload(remoteFiles.get(`${kind}-${id}`), `${kind}-${id}`, r.blob, { mtime: String(t) });
-        if (r.cover) await upload(remoteFiles.get(`cover-${id}`), `cover-${id}`, r.cover, { mtime: String(t) });
-        files[key] = entry;
-        uploaded++;
+        try {
+          await upload(remoteFiles.get(`${kind}-${id}`), `${kind}-${id}`, r.blob, { mtime: String(t) });
+          if (r.cover) await upload(remoteFiles.get(`cover-${id}`), `cover-${id}`, r.cover, { mtime: String(t) }).catch(() => (entry.cover = false));
+          files[key] = entry;
+          uploaded++;
+        } catch (err) {
+          if (err instanceof AuthError) throw err;
+          failed++; // keep whatever Drive had; next sync retries
+        }
       }
     }
     changes += downloaded;
@@ -344,7 +461,7 @@ const Sync = (() => {
       const key = `${m[1] === 'cover' ? 'epub' : m[1]}:${m[2]}`;
       if (!files[key] || (m[1] === 'cover' && !files[key].cover)) await remove(f).catch(() => {});
     }
-    return { changes, downloaded, uploaded, positions: remotePositions };
+    return { changes, downloaded, uploaded, failed, positions: remotePositions };
   }
 
   // ---------------------------------------------------------------- triggers
@@ -353,7 +470,7 @@ const Sync = (() => {
     clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
-      if (validToken()) run({}).catch(() => {});
+      run({}).catch(() => {});
     }, ms);
   }
 
@@ -361,6 +478,11 @@ const Sync = (() => {
   async function start() {
     if (!(await DB.setting('googleClientId', ''))) return;
     set({ last: await DB.setting('syncLast', null) });
+    try {
+      if (await finishCodeFlow()) Sync.onSignedIn && Sync.onSignedIn();
+    } catch (err) {
+      set({ error: `Sign-in failed: ${err.message}` });
+    }
     DB.onChange = () => schedule();
     if (started) return;
     started = true;
@@ -368,7 +490,7 @@ const Sync = (() => {
       if (document.visibilityState === 'hidden' && timer) {
         clearTimeout(timer);
         timer = null;
-        if (validToken()) run({}).catch(() => {});
+        run({}).catch(() => {});
       } else if (document.visibilityState === 'visible') schedule(500);
     });
     window.addEventListener('online', () => schedule(1000));
@@ -380,6 +502,10 @@ const Sync = (() => {
     DB.onChange = null;
     const t = validToken();
     if (t && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(t, () => {});
+    const rt = await DB.setting('googleRefreshToken', '');
+    if (rt) fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(rt)}`, { method: 'POST' }).catch(() => {});
+    await DB.setSetting('googleRefreshToken', '');
+    await DB.setSetting('googleClientSecret', '');
     forgetToken();
     await DB.setSetting('syncConnected', false);
     await DB.setSetting('googleClientId', '');
@@ -399,5 +525,10 @@ const Sync = (() => {
       return () => listeners.delete(fn);
     },
     onApplied: null,
+    onSignedIn: null,
+    redirectUri,
+    async staysSignedIn() {
+      return !!(await DB.setting('googleRefreshToken', ''));
+    },
   };
 })();

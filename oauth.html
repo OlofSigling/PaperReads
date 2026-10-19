@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PaperReads</title>
+<script>
+  // Google sends the sign-in back here; hand it to the app and return.
+  const q = new URLSearchParams(location.search);
+  try {
+    localStorage.setItem('paperreads.oauth-return', JSON.stringify({ code: q.get('code'), state: q.get('state'), error: q.get('error') }));
+  } catch {}
+  let back = '#/settings';
+  try {
+    back = JSON.parse(localStorage.getItem('paperreads.oauth-pkce') || '{}').back || back;
+  } catch {}
+  location.replace('./' + back);
+</script>
