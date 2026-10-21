@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PaperReads privacy</title>
+  <style>
+    :root { --bg: #fcfcfb; --text: #1b1b19; --muted: #5f5e5a; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #121211; --text: #f0efec; --muted: #a9a8a3; } }
+    body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--text); font: 16px/1.55 system-ui, sans-serif; }
+    main { max-width: 680px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; } h2 { font-size: 1.1rem; margin-top: 1.6em; }
+    .muted { color: var(--muted); }
+    a { color: #2a78d6; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>PaperReads privacy</h1>
+  <p class="muted">PaperReads is a personal reading tracker that runs entirely in your browser. It has no server and no accounts of its own.</p>
+
+  <h2>What is stored, and where</h2>
+  <p>Your library (papers, notes, highlights, reading progress, PDFs and EPUBs) is stored in your browser on your own device. Nobody else, including the app's author, can see it.</p>
+
+  <h2>Google Drive sync (optional)</h2>
+  <p>If you turn on sync, PaperReads asks Google for access to its own hidden app-data folder in <em>your</em> Google Drive (the <code>drive.appdata</code> permission). It can't see or change any of your other Drive files. It uses that folder only to keep your library the same on your devices. Your Google sign-in details stay on each device and are sent only to Google.</p>
+
+  <h2>Ask Claude (optional)</h2>
+  <p>If you add an Anthropic API key, the questions you ask, and the text of the paper you ask about, are sent to Anthropic to get an answer. That traffic goes directly from your device to Anthropic, under your own Anthropic account and Anthropic's privacy policy.</p>
+
+  <h2>Looking up papers</h2>
+  <p>When you add a paper, its DOI, title or link is sent to public scholarly services (such as doi.org, Crossref, arXiv and Europe PMC) to fill in its details.</p>
+
+  <h2>Nothing else</h2>
+  <p>No analytics, no tracking, no advertising, and no data shared with or sold to anyone.</p>
+
+  <p class="muted"><a href="./">Back to PaperReads</a></p>
+</main>
+</body>
+</html>
