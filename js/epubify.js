@@ -300,7 +300,8 @@ const Epubify = (() => {
   // spans with top-down bboxes, font size/name/bold flag, plus image boxes.
   async function openPdf(blob, log) {
     const lib = await pdfjs();
-    const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), fontExtraProperties: true, isEvalSupported: false }).promise;
+    // (wasmUrl: decoders for JPEG 2000 figures and ICC colours; without them those images render blank)
+    const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), fontExtraProperties: true, isEvalSupported: false, wasmUrl: base + 'vendor/wasm/' }).promise;
     const pages = [];
     for (let n = 1; n <= doc.numPages; n++) {
       if (n === 1 || n % 5 === 0) log(`  reading page ${n} of ${doc.numPages}`);
@@ -472,6 +473,15 @@ const Epubify = (() => {
       box.vector = true;
       out.push(box);
     }
+    // sideways pieces turned the same way are one sideways table (its rows
+    // can sit further apart than the clustering bridges)
+    for (const rot of [90, -90]) {
+      const parts = out.filter((r) => r.rotate === rot);
+      if (parts.length < 2) continue;
+      const box = [Math.min(...parts.map((r) => r[0])), Math.min(...parts.map((r) => r[1])), Math.max(...parts.map((r) => r[2])), Math.max(...parts.map((r) => r[3]))];
+      Object.assign(box, { rotate: rot, vector: true, caption: parts.map((r) => r.caption).find(Boolean) });
+      out.splice(0, out.length, ...out.filter((r) => r.rotate !== rot), box);
+    }
     // a region inside another is part of it
     return out.filter((r, i) => !out.some((o, j) => j !== i && o[0] <= r[0] && o[1] <= r[1] && o[2] >= r[2] && o[3] >= r[3] && (o[2] - o[0]) * (o[3] - o[1]) > (r[2] - r[0]) * (r[3] - r[1])));
   }
@@ -508,7 +518,8 @@ const Epubify = (() => {
   // Which "Figure N" caption on this page belongs to an image? The nearest
   // one, preferring captions below the image (the usual layout).
   // (case-insensitive: small-caps captions extract as "fig 1 |", "table 2 |")
-  const CAPTION = /^\s*(fig(?:ure)?\.?|table)\s*(\d+)\s*(?:[.:|]|$)/i;
+  // "Figure 2." / "fig 1 |" / "Figure 2 (A) …" / "Figure 4 Estimated …", but not "Figure 2 shows" or "Figure 2A shows"
+  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*(\d+)\s*(?:[.:|]|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}))/u;
   const captionKey = (m) => `${/^t/i.test(m[1]) ? 'table' : 'figure'}-${m[2]}`;
   function captionNumber(box, rows) {
     if (box.caption) {
@@ -1248,6 +1259,7 @@ const Epubify = (() => {
       const spans = [];
       for (const l of pg.lines) {
         if (!horizontal(l)) continue;
+        if (pg === pdf.pages[0] && l.bbox[3] < pg.height * 0.075) continue; // masthead on the first page (journal logo, header)
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
           if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l });
@@ -1415,12 +1427,22 @@ const Epubify = (() => {
       if (twoCol) {
         // full-width rows above the columns come first, the rest after
         // (measured from real column text, not a stray label above it)
-        let colTop = Math.min(...ordered.filter((t) => t[0] >= 0 && t[2].length >= 30 && Math.abs(t[3] - bodySize) <= 1).map((t) => t[1]), Infinity);
-        // a page all in smaller type (the reference list): any real column line will do
-        if (colTop === Infinity) colTop = Math.min(...ordered.filter((t) => t[0] >= 0 && t[2].length >= 30).map((t) => t[1]), Infinity);
+        // where the columns start: the first long line with more of them just below
+        // (a lone label at the top, "Original Research | Critical Care", isn't it)
+        const ysOf = (lines) => lines.map((t) => t[1]).sort((a, b) => a - b);
+        const cluster = (lines) => {
+          const ys = ysOf(lines);
+          return ys.find((y, i) => ys[i + 2] !== undefined && ys[i + 2] - y < bodySize * 5);
+        };
+        const bodyLines = ordered.filter((t) => t[0] >= 0 && t[2].length >= 30 && Math.abs(t[3] - bodySize) <= 1);
+        // (a page all in smaller type, like the reference list: any real column lines will do)
+        const anyLines = ordered.filter((t) => t[0] >= 0 && t[2].length >= 30);
+        const colTop = cluster(bodyLines) ?? cluster(anyLines) ?? ysOf(anyLines)[0] ?? Infinity;
+        // headings side by side at the top of each column ("Introduction" | "Methods") stay in their columns
+        const sideBySide = (t) => ordered.some((o) => o !== t && o[0] === 1 - t[0] && Math.abs(o[1] - t[1]) <= 3 && (t[0] === 0 ? o[4] - t[6] : t[4] - o[6]) > 20);
         for (const t of ordered) {
           if (t[0] === -1 && t[1] > colTop) t[0] = 2;
-          else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2) t[0] = -1; // author lines etc. above the columns
+          else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2 && !sideBySide(t)) t[0] = -1; // author lines etc. above the columns
         }
         ordered = ordered.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
       }
@@ -1456,6 +1478,8 @@ const Epubify = (() => {
       let lastHeading = null;
       let lastSmall = null; // the section heading just emitted, to join a wrapped second line
       for (let [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
+        // first-page badges, not content
+        if (pg === pdf.pages[0] && /^(open access|(research|review|original|brief) (article|research|report|communication)|research|r e s e a r c h.*)$/i.test(txt.trim())) continue;
         if (capBuf) {
           // (a caption's wide first line counts as full width, its next line as a column)
           const gapBreak = (c !== capBuf.c && c !== -1 && capBuf.c !== -1) || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;

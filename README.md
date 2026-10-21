@@ -95,6 +95,6 @@ After changing any file, bump `CACHE` in `sw.js` so installed copies pick up the
 | `oauth.html` | Where Google's sign-in returns to (hands the code back to the app) |
 | `js/ask.js` | Ask Claude about a paper (Anthropic API, user's own key) |
 | `js/epubify.js` | Browser port of epubify.py: covers, PDF → HTML, HTML clean-up, EPUB packaging |
-| `vendor/` | pdf.js 5.4.296, epub.js 0.3.93, JSZip 3.10.1, Anthropic TypeScript SDK 0.131.0 (bundled with esbuild) |
+| `vendor/` | pdf.js 5.4.296 (with its JPEG 2000 and colour-profile decoders in `vendor/wasm/`), epub.js 0.3.93, JSZip 3.10.1, Anthropic TypeScript SDK 0.131.0 (bundled with esbuild) |
 | `sw.js` | Offline cache and share-target handler |
 | `manifest.webmanifest` | Install metadata and share target |
