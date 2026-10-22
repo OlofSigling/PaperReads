@@ -3,6 +3,15 @@
 A Goodreads-style tracker for research papers, with Zotero-style cataloguing. It's an
 installable web app (PWA) for Android that runs fully offline. All data stays on your phone.
 
+## Start here
+
+1. On your phone, open **https://olofsigling.github.io/PaperReads/** in Chrome.
+2. Tap ⋮ → **Add to Home screen** → **Install**.
+
+That's it. To add a paper, share its link or PDF to PaperReads from any app, or tap ＋.
+Want sync between your phone and laptop? Ask Olof for an invite link, open it, and tap **Connect**.
+Everything below is optional.
+
 ## Features
 
 - **Shelves:** Want to read, Reading, Read, or Catalogued (in your library but not on a reading shelf).
@@ -82,9 +91,9 @@ your own Google Drive.
 
 Free, through a hidden folder in **your own** Google Drive. The app can see only that folder.
 
-1. Ask the person who runs the site (Olof) for the app's **Google client ID** and **client secret**.
-2. In PaperReads: ⚙ **Settings** → **Sync with Google Drive**. Put the client ID in the first box and the
-   secret in the second, then tap **Connect and sync**.
+1. Ask the person who runs the site (Olof) for an **invite link** (⚙ Settings → Sync → **Invite someone**),
+   and open it. Sync is then filled in for you; tap **Connect and sync**.
+   (Without a link: ⚙ **Settings** → **Sync with Google Drive**, paste the client ID and secret you were given.)
 3. On Google's sign-in page you may see "Google hasn't verified this app" (it's a personal app). Choose
    **Advanced → Go to PaperReads** and allow access.
 4. Repeat on your other devices. Each signs in once and then stays signed in.
@@ -102,7 +111,8 @@ Everyone can share one Google client ID and secret. Each person still signs in w
 and syncs to their own Drive.
 - With the Google project **published** (Google Auth Platform → Audience → *In production*), anyone can sign in.
   In *Testing* mode, add each person's Gmail under Audience → **Test users** (up to 100); they'll be signed out every 7 days.
-- Send the ID and secret privately. **Don't commit the secret to this repository:** it's public, and Google
+- The easy way to share them: ⚙ Settings → Sync → **Invite someone** makes a link that fills them in.
+- Send the link (or the ID and secret) privately. **Don't commit the secret to this repository:** it's public, and Google
   disables client secrets it finds published on GitHub.
 
 ### Host your own copy

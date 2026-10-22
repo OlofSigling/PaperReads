@@ -2251,7 +2251,19 @@
       <ul class="list compact">${info.map(({ r, n, read }) => `<li class="paper-row"><a class="paper-link" href="#/trail/${r.id}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${n} papers · ${read} read</span></a></li>`).join('') || '<li class="muted small">No trails yet.</li>'}</ul></section>`;
   }
 
-  async function viewSettings() {
+  // An invite link carries the sync client ID and secret in the URL fragment
+  // (never sent to a server), so a friend doesn't need Google Cloud at all.
+  const encodeInvite = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  function decodeInvite(str) {
+    try {
+      const o = JSON.parse(atob(str.replace(/-/g, '+').replace(/_/g, '/')));
+      return o && /\.apps\.googleusercontent\.com$/.test(o.i) ? o : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function viewSettings(q = {}) {
     setTitle('Settings');
     const [key, model, clientId, syncFiles, last, clientSecret, stays] = await Promise.all([
       DB.setting('anthropicKey', ''),
@@ -2263,6 +2275,9 @@
       Sync.staysSignedIn(),
     ]);
     const origin = location.origin;
+    const invite = q.invite ? decodeInvite(q.invite) : null;
+    const cidValue = invite && !clientId ? invite.i : clientId;
+    const secretValue = invite && !clientId ? invite.s || '' : clientSecret;
     main.innerHTML = `
       <section class="card stack">
         <h3>Ask Claude</h3>
@@ -2280,13 +2295,15 @@
         <h3>Sync with Google Drive</h3>
         <p class="muted small">Keeps this device and your others (phone, laptop) in step through a hidden app folder in your own Google Drive.
           It syncs when the app opens and shortly after changes. Free: it uses your Drive storage.</p>
+        ${invite && !clientId ? '<p class="note small" id="sy-invited">You’ve been invited to sync. Everything is filled in: tap <b>Connect and sync</b> and sign in with <b>your own</b> Google account. Your library goes to your own Drive; nobody else sees it.</p>' : ''}
         <p id="sy-state" class="small"></p>
         <form id="sy-form" class="stack">
-          <label>Google client ID <input name="cid" autocomplete="off" placeholder="…apps.googleusercontent.com" value="${esc(clientId)}"></label>
-          <label>Client secret <small class="muted">(lets this device stay signed in instead of asking every hour)</small><input type="password" name="secret" autocomplete="off" placeholder="GOCSPX-…" value="${esc(clientSecret)}"></label>
+          <label>Google client ID <input name="cid" autocomplete="off" placeholder="…apps.googleusercontent.com" value="${esc(cidValue)}"></label>
+          <label>Client secret <small class="muted">(lets this device stay signed in instead of asking every hour)</small><input type="password" name="secret" autocomplete="off" placeholder="GOCSPX-…" value="${esc(secretValue)}"></label>
           <label class="check"><input type="checkbox" name="files" ${syncFiles ? 'checked' : ''}> Also sync PDFs and EPUBs (uses more data)</label>
-          <div class="row"><button class="btn primary" id="sy-go">${clientId ? 'Sync now' : 'Connect and sync'}</button>${clientId ? '<button type="button" class="btn danger-ghost" id="sy-off">Disconnect</button>' : ''}</div>
+          <div class="row wrap"><button class="btn primary" id="sy-go">${clientId ? 'Sync now' : 'Connect and sync'}</button>${clientId && clientSecret ? '<button type="button" class="btn" id="sy-invite">Invite someone</button>' : ''}${clientId ? '<button type="button" class="btn danger-ghost" id="sy-off">Disconnect</button>' : ''}</div>
         </form>
+        ${clientId && clientSecret ? '<p class="muted small">Invite someone: sends a link that sets up sync for them in one tap. They sign in with their own Google account and get their own private library. The link contains your client secret, so send it privately.</p>' : ''}
         <details class="small"><summary>Get a client ID (once, about 10 minutes)</summary>
           <ol class="steps">
             <li>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Google Cloud</a> with your Google account and create a project (any name, e.g. PaperReads).</li>
@@ -2349,8 +2366,26 @@
     teardown = () => unsub();
     if (clientId) Sync.loadGis().catch(() => {}); // ready before the tap, so the sign-in popup isn't blocked
 
+    if (invite && !clientId) $('#sy-invited').scrollIntoView({ block: 'center' });
+    $('#sy-invite')?.addEventListener('click', async () => {
+      const url = `${location.origin}${location.pathname}#/settings?invite=${encodeInvite({ i: clientId, s: clientSecret })}`;
+      const text = 'Set up PaperReads sync: install the app from this link (Chrome → ⋮ → Add to Home screen), then open the link again and tap Connect.';
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'PaperReads', text, url });
+          return;
+        } catch {}
+      }
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Invite link copied');
+      } catch {
+        prompt('Copy this invite link:', url);
+      }
+    });
     $('#sy-form').addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (invite) history.replaceState(null, '', '#/settings'); // don't bring the invite back after Google's sign-in
       const cid = e.target.cid.value.trim();
       if (!/\.apps\.googleusercontent\.com$/.test(cid)) return toast('That doesn’t look like a Google client ID');
       await DB.setSetting('googleClientId', cid);
