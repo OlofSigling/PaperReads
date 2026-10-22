@@ -17,13 +17,16 @@
 <body>
 <main>
   <h1>PaperReads privacy</h1>
-  <p class="muted">PaperReads is a personal reading tracker that runs entirely in your browser. It has no server and no accounts of its own.</p>
+  <p class="muted">PaperReads is a personal reading tracker that runs entirely in your browser. It has no server of its own.</p>
 
   <h2>What is stored, and where</h2>
   <p>Your library (papers, notes, highlights, reading progress, PDFs and EPUBs) is stored in your browser on your own device. Nobody else, including the app's author, can see it.</p>
 
   <h2>Google Drive sync (optional)</h2>
   <p>If you turn on sync, PaperReads asks Google for access to its own hidden app-data folder in <em>your</em> Google Drive (the <code>drive.appdata</code> permission). It can't see or change any of your other Drive files. It uses that folder only to keep your library the same on your devices. Your Google sign-in details stay on each device and are sent only to Google.</p>
+
+  <h2>Friends (optional)</h2>
+  <p>If you sign in to Friends, your Google name and photo, and the papers on your Want to read, Reading and Read shelves (title, authors, identifiers, shelf, star rating and dates), are stored in the app owner's Firebase project (Google Cloud Firestore) so your accepted friends can see them. Papers you mark private, and your notes, concerns, highlights and files, are never sent. Only friends you have accepted can read your shelves; removing a friend stops that.</p>
 
   <h2>Ask Claude (optional)</h2>
   <p>If you add an Anthropic API key, the questions you ask, and the text of the paper you ask about, are sent to Anthropic to get an answer. That traffic goes directly from your device to Anthropic, under your own Anthropic account and Anthropic's privacy policy.</p>

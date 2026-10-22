@@ -570,6 +570,8 @@
     [/^#\/collections$/, viewCollections],
     [/^#\/backup$/, viewBackup],
     [/^#\/settings$/, viewSettings],
+    [/^#\/friends$/, viewFriends],
+    [/^#\/friend\/(.+)$/, (q, uid) => viewFriend(uid)],
     [/^#\/trails$/, viewTrails],
     [/^#\/trail\/(.+)$/, (q, id) => viewTrails(q, id)],
     [/^#\/add$/, (q) => viewEdit(null, q)],
@@ -924,7 +926,7 @@
       return;
     }
     setTitle('Paper');
-    const [cols, highlights, linksFrom, linksTo, pdf, epub, log, all, tagCounts] = await Promise.all([
+    const [cols, highlights, linksFrom, linksTo, pdf, epub, log, all, tagCounts, friendsOn] = await Promise.all([
       DB.all('collections'),
       DB.byIndex('highlights', 'paperId', id),
       DB.byIndex('links', 'fromId', id),
@@ -934,6 +936,7 @@
       DB.byIndex('progress', 'paperId', id),
       papers(),
       allTags(),
+      Social.config(),
     ]);
     const byId = Object.fromEntries(all.map((x) => [x.id, x]));
     const related = [
@@ -1020,6 +1023,7 @@
         <section class="card">
           <h3>Rating</h3>
           ${stars(p.rating, true)}
+          ${friendsOn ? `<label class="check small"><input type="checkbox" id="p-private"${p.private ? ' checked' : ''}> Keep private: friends don’t see this paper</label>` : ''}
         </section>
 
         <section class="card">
@@ -1094,6 +1098,13 @@
       </article>`;
 
     const rerender = () => viewPaper(id);
+
+    $('#p-private')?.addEventListener('change', async (e) => {
+      p.private = e.target.checked || undefined;
+      if (!p.private) delete p.private;
+      await savePaper(p);
+      toast(e.target.checked ? 'Hidden from friends' : 'Friends can see this paper');
+    });
 
     $$('[data-status]').forEach((b) =>
       b.addEventListener('click', async () => {
@@ -2251,13 +2262,198 @@
       <ul class="list compact">${info.map(({ r, n, read }) => `<li class="paper-row"><a class="paper-link" href="#/trail/${r.id}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${n} papers · ${read} read</span></a></li>`).join('') || '<li class="muted small">No trails yet.</li>'}</ul></section>`;
   }
 
+  // ---------- friends ----------
+  // Someone's add-me link waits here until this device is signed in.
+  const PENDING_ADD = 'paperreads.friend-add';
+  const ago = (t) => {
+    const d = Math.round((Date.now() - t) / 864e5);
+    return d < 1 ? 'today' : d === 1 ? 'yesterday' : d < 30 ? `${d} days ago` : fmtDate(t);
+  };
+  const feedVerb = (x) => (x.status === 'read' ? (x.rating ? `rated ${'★'.repeat(x.rating)}` : 'finished') : x.status === 'reading' ? 'is reading' : 'wants to read');
+
+  async function viewFriends(q) {
+    setTitle('Friends');
+    if (q.add) {
+      let saved = await Social.config();
+      if (!saved && q.c) {
+        const c = Social.configFromLink(q.c);
+        if (c) {
+          await DB.setSetting('firebaseConfig', c);
+          saved = c;
+        }
+      }
+      try {
+        localStorage.setItem(PENDING_ADD, q.add);
+      } catch {}
+      history.replaceState(null, '', '#/friends');
+    }
+    if (!(await Social.config())) {
+      main.innerHTML = `<section class="card stack"><p>Friends let you see each other’s shelves and what everyone is reading.</p>
+        <p class="muted small">Ask a friend who already uses PaperReads friends for their add-me link, or set it up yourself in <a href="#/settings">Settings → Friends</a>.</p></section>`;
+      return;
+    }
+    main.innerHTML = '<p class="muted">Loading…</p>';
+    let pendingAdd = null;
+    try {
+      pendingAdd = localStorage.getItem(PENDING_ADD);
+    } catch {}
+    try {
+      await Social.init();
+    } catch (err) {
+      main.innerHTML = `<p class="empty">Couldn’t start friends: ${esc(Social.friendly(err))}</p>`;
+      return;
+    }
+    const u = Social.user;
+    if (!u) {
+      main.innerHTML = `<section class="card stack">
+        ${pendingAdd ? '<p class="note small">You’ve been sent an add-me link. Sign in, and the friend request goes out.</p>' : ''}
+        <p>Sign in with Google to add friends. Friends see the papers on your shelves and your stars; nothing else leaves this device.</p>
+        <div class="row"><button class="btn primary" id="fr-in">Sign in with Google</button></div>
+        <p class="muted small" id="fr-status"></p></section>`;
+      $('#fr-in').addEventListener('click', async () => {
+        $('#fr-status').textContent = 'Signing in…';
+        try {
+          await Social.signIn();
+          route();
+        } catch (err) {
+          $('#fr-status').textContent = err.message;
+        }
+      });
+      return;
+    }
+    if (pendingAdd) {
+      try {
+        localStorage.removeItem(PENDING_ADD);
+      } catch {}
+      try {
+        const r = await Social.addFriend(pendingAdd);
+        toast(r === 'requested' ? 'Friend request sent' : r === 'accepted' ? 'You’re now friends' : r === 'already' ? 'You’re already friends' : 'Friend request already sent');
+      } catch (err) {
+        toast(err.message);
+      }
+    }
+    let fs = [];
+    try {
+      fs = await Social.friendships();
+    } catch (err) {
+      main.innerHTML = `<p class="empty">${esc(Social.friendly(err))}</p>`;
+      return;
+    }
+    Social.publish().catch(() => {});
+    const friends = fs.filter((f) => f.status === 'accepted').sort((a, b) => a.name.localeCompare(b.name));
+    const incoming = fs.filter((f) => f.incoming);
+    const outgoing = fs.filter((f) => f.status === 'pending' && !f.incoming);
+    main.innerHTML = `
+      <section class="card stack">
+        <div class="row between"><span>${u.photoURL ? `<img class="avatar" src="${esc(u.photoURL)}" alt="" referrerpolicy="no-referrer">` : ''}<b>${esc(u.displayName || 'You')}</b></span><button class="btn small" id="fr-out">Sign out</button></div>
+        <div class="row wrap"><button class="btn primary" id="fr-link">Invite a friend</button></div>
+        <p class="muted small">Sends your add-me link. When they open it and sign in, you get a friend request to accept here.</p>
+      </section>
+      ${incoming.length ? `<section class="card"><h3>Friend requests</h3><ul class="list compact">${incoming.map((f) => `<li class="row between"><span>${esc(f.name)}</span><span class="row"><button class="btn small primary" data-accept="${f.id}">Accept</button><button class="btn small danger-ghost" data-drop="${f.id}">Decline</button></span></li>`).join('')}</ul></section>` : ''}
+      <section class="card"><h3>Friends</h3>
+        <ul class="list compact">${friends.map((f) => `<li class="paper-row"><a class="paper-link" href="#/friend/${encodeURIComponent(f.other)}"><span class="pr-title">${esc(f.name)}</span></a></li>`).join('') || '<li class="muted small">No friends yet. Invite someone above.</li>'}</ul>
+        ${outgoing.length ? `<p class="muted small">Waiting for: ${outgoing.map((f) => `${esc(f.name)} <button type="button" class="r-btn" data-drop="${f.id}" aria-label="Cancel request">✕</button>`).join(', ')}</p>` : ''}
+      </section>
+      ${friends.length ? '<section class="card"><h3>Recent</h3><ul class="list compact" id="fr-feed"><li class="muted small">Loading…</li></ul></section>' : ''}`;
+
+    $('#fr-out').addEventListener('click', async () => {
+      await Social.signOut();
+      route();
+    });
+    $('#fr-link').addEventListener('click', async () => {
+      const url = await Social.addLink();
+      const text = `Add me as a friend on PaperReads, to see what each other are reading.`;
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'PaperReads', text, url });
+          return;
+        } catch {}
+      }
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Link copied');
+      } catch {
+        prompt('Copy this link:', url);
+      }
+    });
+    $$('[data-accept]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        try {
+          await Social.accept(b.dataset.accept);
+          toast('You’re now friends');
+        } catch (err) {
+          toast(Social.friendly(err));
+        }
+        route();
+      })
+    );
+    $$('[data-drop]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        try {
+          await Social.remove(b.dataset.drop);
+        } catch (err) {
+          toast(Social.friendly(err));
+        }
+        route();
+      })
+    );
+    if (friends.length) {
+      const items = await Social.feed(friends).catch(() => []);
+      const el = $('#fr-feed');
+      if (!el) return;
+      el.innerHTML =
+        items
+          .slice(0, 30)
+          .map((x) => `<li class="feed-item"><a href="#/friend/${encodeURIComponent(x.uid)}">${esc(x.who)}</a> ${feedVerb(x)} <b>${esc(x.title)}</b> <span class="muted small">${ago(x.updatedAt)}</span></li>`)
+          .join('') || '<li class="muted small">Nothing on your friends’ shelves yet.</li>';
+    }
+  }
+
+  // The link to look a friend's paper up in the Add screen.
+  const friendPaperLink = (x) => `#/add?url=${encodeURIComponent(x.doi || (x.arxiv ? `arxiv.org/abs/${x.arxiv}` : x.url || ''))}&title=${encodeURIComponent(x.title || '')}`;
+  const sameKey = (x) => (x.doi ? `doi:${x.doi.toLowerCase()}` : x.arxiv ? `arxiv:${x.arxiv.replace(/v\d+$/, '')}` : `t:${(x.title || '').toLowerCase().replace(/\W+/g, '')}`);
+
+  async function viewFriend(uid) {
+    setTitle('Friend');
+    main.innerHTML = '<p class="muted">Loading…</p>';
+    let them, list, mine;
+    try {
+      await Social.init();
+      if (!Social.user) return (location.hash = '#/friends');
+      [them, list, mine] = await Promise.all([Social.profile(uid), Social.shelf(uid), papers()]);
+    } catch (err) {
+      main.innerHTML = `<p class="empty">${esc(Social.friendly(err))}</p><p><a href="#/friends">← Friends</a></p>`;
+      return;
+    }
+    const have = new Map(mine.map((p) => [sameKey(p), p]));
+    const name = (them && them.name) || 'Friend';
+    setTitle(name);
+    const row = (x) => {
+      const own = have.get(sameKey(x));
+      return `<li class="paper-row friend-paper">
+        <div><span class="pr-title">${esc(x.title)}</span>
+        <span class="pr-meta">${esc([(x.authors || []).slice(0, 3).join(', ') + ((x.authors || []).length > 3 ? ' et al.' : ''), x.year, x.venue].filter(Boolean).join(' · '))}</span>
+        ${x.rating ? `<span class="stars small" aria-label="${x.rating} stars">${'★'.repeat(x.rating)}${'☆'.repeat(5 - x.rating)}</span>` : ''}</div>
+        ${own ? `<a class="btn small" href="#/paper/${own.id}">In your library</a>` : `<a class="btn small" href="${esc(friendPaperLink(x))}">＋ Add</a>`}
+      </li>`;
+    };
+    const by = (s) => list.filter((x) => x.status === s);
+    const reading = by('reading').sort((a, b) => b.updatedAt - a.updatedAt);
+    const want = by('want').sort((a, b) => b.updatedAt - a.updatedAt);
+    const read = by('read').sort((a, b) => (b.finishedAt || b.updatedAt) - (a.finishedAt || a.updatedAt));
+    const section = (t, xs) => (xs.length ? `<section class="card"><h3>${t} <span class="muted small">${xs.length}</span></h3><ul class="list compact">${xs.map(row).join('')}</ul></section>` : '');
+    main.innerHTML =
+      `<p><a href="#/friends" class="link small">← Friends</a></p>` +
+      (section('Reading', reading) + section('Read', read) + section('Want to read', want) || `<p class="empty">${esc(name)} hasn’t shelved any papers yet.</p>`);
+  }
+
   // An invite link carries the sync client ID and secret in the URL fragment
   // (never sent to a server), so a friend doesn't need Google Cloud at all.
   const encodeInvite = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   function decodeInvite(str) {
     try {
       const o = JSON.parse(atob(str.replace(/-/g, '+').replace(/_/g, '/')));
-      return o && /\.apps\.googleusercontent\.com$/.test(o.i) ? o : null;
+      return o && (/\.apps\.googleusercontent\.com$/.test(o.i) || o.f) ? o : null;
     } catch {
       return null;
     }
@@ -2265,7 +2461,7 @@
 
   async function viewSettings(q = {}) {
     setTitle('Settings');
-    const [key, model, clientId, syncFiles, last, clientSecret, stays] = await Promise.all([
+    const [key, model, clientId, syncFiles, last, clientSecret, stays, fbConfig] = await Promise.all([
       DB.setting('anthropicKey', ''),
       DB.setting('claudeModel', Ask.DEFAULT_MODEL),
       DB.setting('googleClientId', ''),
@@ -2273,10 +2469,19 @@
       DB.setting('syncLast', null),
       DB.setting('googleClientSecret', ''),
       Sync.staysSignedIn(),
+      Social.config(),
     ]);
     const origin = location.origin;
     const invite = q.invite ? decodeInvite(q.invite) : null;
-    const cidValue = invite && !clientId ? invite.i : clientId;
+    // an invite also turns on friends, if the inviter has them
+    if (invite && invite.f && !fbConfig) {
+      const c = Social.parseConfig(JSON.stringify(invite.f));
+      if (c) {
+        await DB.setSetting('firebaseConfig', c);
+        Social.start();
+      }
+    }
+    const cidValue = invite && !clientId ? invite.i || '' : clientId;
     const secretValue = invite && !clientId ? invite.s || '' : clientSecret;
     main.innerHTML = `
       <section class="card stack">
@@ -2315,6 +2520,29 @@
             <li>Paste both above and tap Connect. Google will warn that the app isn’t verified: that’s expected for your own app; continue.</li>
             <li>On your other devices, open this app, paste the same client ID here and connect.</li>
           </ol>
+        </details>
+      </section>
+      <section class="card stack">
+        <h3>Friends</h3>
+        <p class="muted small">Add friends and see what each other are reading, like Goodreads. Shared: the papers on your shelves (title, authors, status, stars, dates). Never shared: notes, concerns, highlights, files, and papers you mark private.
+          ${fbConfig ? '<a href="#/friends">Open Friends →</a>' : 'Needs a free Firebase project, set up once by one person; friends then join from an invite link.'}</p>
+        <form id="fb-form" class="stack">
+          <label>Firebase config <small class="muted">(paste the <code>firebaseConfig</code> snippet)</small><textarea name="cfg" rows="${fbConfig ? 3 : 4}" autocomplete="off" spellcheck="false" placeholder="const firebaseConfig = { apiKey: …, authDomain: …, projectId: … };">${fbConfig ? esc(JSON.stringify(fbConfig, null, 1)) : ''}</textarea></label>
+          <div class="row wrap"><button class="btn primary">Save</button>${fbConfig ? '<button type="button" class="btn danger-ghost" id="fb-off">Turn off friends</button>' : ''}</div>
+        </form>
+        <details class="small"><summary>Set up Firebase (once, about 10 minutes)</summary>
+          <ol class="steps">
+            <li>Open the <a href="https://console.firebase.google.com/" target="_blank" rel="noopener">Firebase console</a> and <b>Create a project</b>. You can pick your existing Google Cloud project (the one used for sync). Analytics: off.</li>
+            <li><b>Build → Authentication</b> → Get started → Sign-in method → <b>Google</b> → Enable → Save.</li>
+            <li>Authentication → <b>Settings → Authorised domains</b> → Add <code>${esc(location.hostname)}</code>.</li>
+            <li><b>Build → Firestore Database</b> → Create database → <b>Production mode</b>, any location.</li>
+            <li>Firestore → <b>Rules</b>: replace everything with the rules below → Publish. They make shelves visible only to accepted friends.</li>
+            <li>Project settings (⚙) → Your apps → <b>Web</b> (&lt;/&gt;) → register (any nickname, no hosting). Copy the <code>firebaseConfig</code> snippet, paste it above and Save.</li>
+            <li>Invite friends from the Friends page. The link sets everything up for them.</li>
+          </ol>
+          <div class="row"><button type="button" class="btn small" id="fb-copy">Copy rules</button></div>
+          <pre class="conv-log rules">${esc(Social.RULES)}</pre>
+          <p class="muted">The Firebase config isn’t a secret: it only names your project. The rules are what protect the data. The free plan covers thousands of reads a day, far more than a group of friends uses.</p>
         </details>
       </section>
       <section class="card">
@@ -2368,7 +2596,8 @@
 
     if (invite && !clientId) $('#sy-invited').scrollIntoView({ block: 'center' });
     $('#sy-invite')?.addEventListener('click', async () => {
-      const url = `${location.origin}${location.pathname}#/settings?invite=${encodeInvite({ i: clientId, s: clientSecret })}`;
+      const f = await Social.config();
+      const url = `${location.origin}${location.pathname}#/settings?invite=${encodeInvite({ i: clientId, s: clientSecret, ...(f ? { f } : {}) })}`;
       const text = 'Set up PaperReads sync: install the app from this link (Chrome → ⋮ → Add to Home screen), then open the link again and tap Connect.';
       if (navigator.share) {
         try {
@@ -2403,6 +2632,31 @@
         toast(`Sync failed: ${err.message}`);
       }
       showSyncButton();
+    });
+    $('#fb-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const c = Social.parseConfig(e.target.cfg.value);
+      if (!c) return toast('That doesn’t look like a Firebase config (it needs apiKey, authDomain and projectId)');
+      const same = fbConfig && JSON.stringify(fbConfig) === JSON.stringify(c);
+      await DB.setSetting('firebaseConfig', c);
+      if (same) return toast('Saved');
+      if (fbConfig) return location.reload(); // a different project: start fresh
+      Social.start();
+      location.hash = '#/friends';
+    });
+    $('#fb-off')?.addEventListener('click', async () => {
+      if (!confirm('Turn off friends on this device? Your shared shelf stays until you remove it from the Friends page.')) return;
+      await Social.signOut().catch(() => {});
+      await DB.setSetting('firebaseConfig', null);
+      location.reload();
+    });
+    $('#fb-copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(Social.RULES);
+        toast('Rules copied');
+      } catch {
+        prompt('Copy the rules:', Social.RULES);
+      }
     });
     $('#sy-off')?.addEventListener('click', async () => {
       if (!confirm('Stop syncing this device? Your data here and in Drive stays as it is.')) return;
@@ -2753,5 +3007,7 @@
     route();
     showSyncButton();
     Sync.start();
+    DB.onPapersChange = () => Social.schedule();
+    Social.start();
   });
 })();

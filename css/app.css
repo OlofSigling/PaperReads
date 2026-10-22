@@ -369,3 +369,11 @@ ul.trail ul { list-style: none; margin: 0; padding-left: 14px; border-left: 2px 
 .q-node.dragging { opacity: .85; background: var(--surface); box-shadow: 0 6px 18px rgba(0,0,0,.2); border-radius: 8px; }
 .handle-gap { width: 1.6em; flex: none; }
 .paper-link.dim .pr-title { color: var(--muted); }
+
+/* friends */
+.avatar { width: 28px; height: 28px; border-radius: 50%; vertical-align: middle; margin-right: 8px; }
+.friend-paper { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.friend-paper > div { min-width: 0; display: flex; flex-direction: column; }
+.friend-paper .stars { color: #e0a800; letter-spacing: 1px; }
+.feed-item { padding: 6px 0; line-height: 1.4; }
+pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px; }

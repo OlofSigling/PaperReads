@@ -1,7 +1,7 @@
 // Service worker: caches the app shell for offline use and receives shares.
 importScripts('js/db.js');
 
-const CACHE = 'paperreads-v28';
+const CACHE = 'paperreads-v29';
 const SHELL = [
   './',
   'index.html',
@@ -13,11 +13,13 @@ const SHELL = [
   'js/backup.js',
   'js/sync.js',
   'js/ask.js',
+  'js/social.js',
   'vendor/pdf.min.mjs',
   'vendor/pdf.worker.min.mjs',
   'vendor/jszip.min.js',
   'vendor/epub.min.js',
   'vendor/anthropic-sdk.min.mjs',
+  'vendor/firebase.min.mjs',
   'vendor/wasm/openjpeg.wasm',
   'vendor/wasm/openjpeg_nowasm_fallback.js',
   'vendor/wasm/qcms_bg.wasm',

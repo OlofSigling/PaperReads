@@ -81,6 +81,7 @@
   }
   function changed(store, rows) {
     if (!quiet && DB.onChange && rows.some((r) => r && isSynced(store, r))) DB.onChange(store);
+    if (!quiet && store === 'papers' && DB.onPapersChange) DB.onPapersChange();
   }
   async function bury(store, rows) {
     rows = rows.filter((r) => r && isSynced(store, r));
@@ -133,6 +134,7 @@
     isSynced,
     newSid,
     onChange: null,
+    onPapersChange: null,
     async setting(key, fallback) {
       const row = await DB.get('settings', key);
       return row ? row.value : fallback;

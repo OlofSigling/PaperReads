@@ -10,6 +10,7 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
 
 That's it. To add a paper, share its link or PDF to PaperReads from any app, or tap ＋.
 Want sync between your phone and laptop? Ask Olof for an invite link, open it, and tap **Connect**.
+Want to see what friends are reading? Open a friend's add-me link and sign in with Google.
 Everything below is optional.
 
 ## Features
@@ -52,6 +53,11 @@ Everything below is optional.
   stay in step. Syncs on opening the app and shortly after changes; field by field, the newer edit wins. Free, but
   needs a one-time Google client ID and secret (steps in ⚙ Settings); with the secret, each device signs in once and
   stays signed in (the secret and sign-in stay on the device, never synced or backed up).
+- **Friends** (optional, 👥): add friends and see each other's shelves (Reading, Read with stars, Want to read)
+  and a feed of what they've shelved lately; one tap adds a friend's paper to your library. Only the papers on your
+  shelves are shared (title, authors, ids, status, stars, dates). Notes, concerns, highlights, files and papers you
+  mark **Keep private** never leave your device. Friend requests must be accepted, and Firestore security rules let
+  only accepted friends read a shelf. Runs on a free Firebase project set up once by one person.
 - **Stats:** yearly goal with on-pace indicator, papers per month, pages read, day streaks, average rating, top tags.
 
 ## Get started
@@ -104,6 +110,18 @@ Free, through a hidden folder in **your own** Google Drive. The app can see only
    dollars of credit. It's pay-as-you-go and separate from a Claude subscription.
 2. ⚙ **Settings** → **Ask Claude**: paste the key, tap **Test key**.
 3. Ask on a paper's page or in the reader (💬), or select a passage and tap **Ask**. A question costs a few cents.
+
+### Optional: friends
+
+1. Get an add-me link from a friend (they make it under 👥 → **Invite a friend**) and open it.
+2. Tap **Sign in with Google**. They get a friend request; once they accept, you see each other's shelves under 👥.
+3. To hide a paper, tick **Keep private** under its rating.
+
+### For the site's owner: turning on friends
+
+Friends need a free Firebase project (once, about 10 minutes): ⚙ Settings → **Friends** → *Set up Firebase* lists the
+steps and has the security rules to paste. The Firebase config isn't a secret (the rules protect the data), but it's
+kept out of this repository anyway so forks don't share one project; add-me links and sync invite links carry it.
 
 ### For the site's owner: letting others sync
 
