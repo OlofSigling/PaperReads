@@ -33,7 +33,9 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
   reading). On a paper page, **＋ Add a paper found here** does the same; any paper's "found via" can be changed later.
   Each paper shows where it was found and what it led to; 🌳 Discovery trails (under 📁) shows the whole trees.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
-- **Queue:** drag to prioritise your want-to-read list. The top items show as "Next up" on the home screen.
+- **Queue:** drag to prioritise your want-to-read list. Papers found through another one are grouped (collapsed)
+  under the paper their trail started from, so a whole trail moves as one; open a group to order the papers in it.
+  The top items show as "Next up" on the home screen.
 - **Ask Claude** (optional): ask about a paper on its page or in the reader (💬), or select a passage and tap
   **Ask**. Answers can go to your notes or concerns. Uses your own Anthropic API key (⚙ Settings), pay-as-you-go:
   a question costs a few cents. The paper's text is sent to Anthropic with your question; the key stays on the device.

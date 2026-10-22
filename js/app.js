@@ -149,6 +149,8 @@
     p.status = status;
     if (status === 'reading' && !p.startedAt) p.startedAt = now();
     if (status === 'want' && prev !== 'want') p.queueOrder = await nextQueueOrder();
+    // off the list: its old place mustn't pin the group it heads (that group then follows its papers' places)
+    if (prev === 'want' && status !== 'want') delete p.queueOrder;
     if (status === 'read') {
       p.finishedAt = p.finishedAt || now();
       if (!p.startedAt) p.startedAt = p.finishedAt;
@@ -623,7 +625,7 @@
     const goal = await DB.setting('goal:' + year, 0);
     const done = all.filter((p) => p.status === 'read' && p.finishedAt && new Date(p.finishedAt).getFullYear() === year).length;
     const reading = all.filter((p) => p.status === 'reading').sort((a, b) => b.updatedAt - a.updatedAt);
-    const queue = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0)).slice(0, 3);
+    const queue = queueList(all).slice(0, 3);
     const recent = all.filter((p) => p.status === 'read').sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0)).slice(0, 3);
 
     if (!all.length) {
@@ -757,36 +759,101 @@
     $('#f-sort').addEventListener('change', (e) => (location.hash = link({ sort: e.target.value })));
   }
 
+  // ---------- reading order: trails grouped under the paper they started from ----------
+  // Each "want to read" paper sits in the group of its trail's top paper
+  // (p.foundVia chains); groups are ordered by the top paper's queueOrder,
+  // papers inside a group by subOrder among their siblings (else date added).
+  function queueGroups(all) {
+    const t = trailOf(all);
+    const want = all.filter((p) => p.status === 'want');
+    const groups = new Map();
+    for (const p of want) {
+      const root = t.rootOf(p);
+      if (!groups.has(root.id)) groups.set(root.id, { root, want: [] });
+      groups.get(root.id).want.push(p);
+    }
+    const sibling = (a, b) => (a.subOrder ?? Infinity) - (b.subOrder ?? Infinity) || (a.addedAt || 0) - (b.addedAt || 0);
+    // the papers to show under a group: wanted ones and the papers leading to them
+    for (const g of groups.values()) {
+      g.shown = new Set();
+      for (const p of g.want) for (const x of [p, ...t.ancestors(p)]) g.shown.add(x.id);
+      g.order = g.root.queueOrder ?? Math.min(...g.want.map((p) => p.queueOrder ?? Infinity));
+      g.kids = (id) => (t.kids.get(id) || []).filter((k) => g.shown.has(k.id)).sort(sibling);
+      // the group's wanted papers in reading order: the top paper, then depth first
+      g.flat = [];
+      const walk = (p) => {
+        if (p.status === 'want') g.flat.push(p);
+        g.kids(p.id).forEach(walk);
+      };
+      walk(g.root);
+    }
+    return [...groups.values()].sort((a, b) => a.order - b.order || (a.root.addedAt || 0) - (b.root.addedAt || 0));
+  }
+  const queueList = (all) => queueGroups(all).flatMap((g) => g.flat);
+
   async function viewQueue() {
     setTitle('Want to read');
-    const list = (await papers()).filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0));
-    if (!list.length) {
+    const all = await papers();
+    const groups = queueGroups(all);
+    if (!groups.length) {
       main.innerHTML = '<p class="empty">Your queue is empty. Papers marked “Want to read” show up here in priority order.</p>';
       return;
     }
-    main.innerHTML = `<p class="muted">Drag ☰ to reorder. The top paper is your “next up”.</p>
-      <ul class="list queue" id="queue">${list
-        .map((p, i) => `<li class="paper-row q-item" data-id="${p.id}">
-          <span class="handle" aria-label="Drag to reorder">☰</span>
-          <span class="q-num">${i + 1}</span>
-          <a href="#/paper/${p.id}" class="paper-link"><span class="pr-title">${esc(p.title)}</span><span class="pr-meta">${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}</span></a>
-          <span class="q-actions">
-            <button class="btn small icon" data-top="${p.id}" aria-label="Move to top" title="Move to top">⤒</button>
-            <button class="btn small" data-start="${p.id}">Start</button>
-          </span>
-        </li>`)
+    let open = new Set();
+    try {
+      open = new Set(JSON.parse(localStorage.getItem('paperreads.queue-open') || '[]'));
+    } catch {}
+    const meta = (p) => `${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}`;
+    const badge = (p) => (p.status === 'want' ? '' : `<span class="badge s-${p.status}">${STATUS[p.status]}</span>`);
+    const start = (p) => (p.status === 'want' ? `<button class="btn small" data-start="${p.id}">Start</button>` : '');
+    const node = (g, p) => {
+      const kids = g.kids(p.id);
+      return `<li class="q-node" data-id="${p.id}">
+        <div class="q-row">${g.kids(p.foundVia).length > 1 ? '<span class="handle" aria-label="Drag to reorder">☰</span>' : '<span class="handle-gap"></span>'}
+          <a href="#/paper/${p.id}" class="paper-link${p.status === 'want' ? '' : ' dim'}"><span class="pr-title">${esc(p.title)}</span><span class="pr-meta">${badge(p)} ${meta(p)}</span></a>${start(p)}</div>
+        ${kids.length ? `<ul class="q-sub" data-parent="${p.id}">${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
+      </li>`;
+    };
+    main.innerHTML = `<p class="muted">Drag ☰ to reorder. Papers you found through another one are grouped under the paper the trail started from; open a group to see (and order) them.</p>
+      <ul class="list queue" id="queue">${groups
+        .map((g, i) => {
+          const kids = g.kids(g.root.id);
+          const count = g.want.filter((p) => p.id !== g.root.id).length;
+          const isOpen = open.has(g.root.id);
+          return `<li class="paper-row q-item${kids.length ? ' q-group' : ''}" data-id="${g.root.id}">
+            <span class="handle" aria-label="Drag to reorder">☰</span>
+            <span class="q-num">${i + 1}</span>
+            <div class="q-main">
+              <a href="#/paper/${g.root.id}" class="paper-link${g.root.status === 'want' ? '' : ' dim'}"><span class="pr-title">${esc(g.root.title)}</span><span class="pr-meta">${badge(g.root)} ${meta(g.root)}</span></a>
+              ${kids.length ? `<button type="button" class="q-toggle" data-toggle="${g.root.id}" aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} ${count} found through it</button>` : ''}
+            </div>
+            <span class="q-actions">
+              <button class="btn small icon" data-top="${g.root.id}" aria-label="Move to top" title="Move to top">⤒</button>
+              ${start(g.root)}
+            </span>
+            ${kids.length ? `<ul class="q-sub q-sub-top" data-parent="${g.root.id}" ${isOpen ? '' : 'hidden'}>${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
+          </li>`;
+        })
         .join('')}</ul>`;
 
     const ul = $('#queue');
-    const persist = async () => {
-      const ids = $$('.q-item', ul).map((li) => li.dataset.id);
-      const byId = Object.fromEntries(list.map((p) => [p.id, p]));
-      ids.forEach((id, i) => (byId[id].queueOrder = i + 1));
-      await DB.putMany('papers', Object.values(byId));
-      $$('.q-num', ul).forEach((el, i) => (el.textContent = i + 1));
+    const byId = new Map(all.map((p) => [p.id, p]));
+    // Save through savePaper so the new order syncs (it dates the changed field).
+    const persist = async (list) => {
+      const top = list === ul;
+      const lis = [...list.children].filter((li) => li.dataset.id);
+      for (const [i, li] of lis.entries()) {
+        const p = byId.get(li.dataset.id);
+        const key = top ? 'queueOrder' : 'subOrder';
+        if (p[key] === i + 1) continue;
+        p[key] = i + 1;
+        await savePaper(p);
+      }
+      if (top) $$(':scope > li > .q-num', ul).forEach((el, i) => (el.textContent = i + 1));
     };
 
-    // Pointer-based drag so it works with touch without a library.
+    // Pointer-based drag (works with touch, no library), within one list:
+    // the groups, or the papers under one parent.
     let dragging = null;
     ul.addEventListener('pointerdown', (e) => {
       const handle = e.target.closest('.handle');
@@ -798,29 +865,45 @@
     });
     ul.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      const items = $$('.q-item', ul).filter((li) => li !== dragging);
+      const list = dragging.parentElement;
+      const items = [...list.children].filter((li) => li !== dragging);
       const after = items.find((li) => {
         const r = li.getBoundingClientRect();
-        return e.clientY < r.top + r.height / 2;
+        return e.clientY < r.top + Math.min(r.height, 56) / 2;
       });
-      if (after) ul.insertBefore(dragging, after);
-      else ul.appendChild(dragging);
+      if (after) list.insertBefore(dragging, after);
+      else list.appendChild(dragging);
       if (e.clientY < 80) window.scrollBy(0, -8);
       if (e.clientY > window.innerHeight - 100) window.scrollBy(0, 8);
     });
     const end = () => {
       if (!dragging) return;
+      const list = dragging.parentElement;
       dragging.classList.remove('dragging');
       dragging = null;
-      persist();
+      persist(list);
     };
     ul.addEventListener('pointerup', end);
     ul.addEventListener('pointercancel', end);
 
+    $$('[data-toggle]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const id = b.dataset.toggle;
+        const sub = b.closest('li').querySelector(':scope > .q-sub');
+        sub.hidden = !sub.hidden;
+        if (sub.hidden) open.delete(id);
+        else open.add(id);
+        b.setAttribute('aria-expanded', String(!sub.hidden));
+        b.textContent = b.textContent.replace(/^[▸▾]/, sub.hidden ? '▸' : '▾');
+        try {
+          localStorage.setItem('paperreads.queue-open', JSON.stringify([...open]));
+        } catch {}
+      })
+    );
     $$('[data-top]').forEach((b) =>
       b.addEventListener('click', async () => {
         ul.prepend(b.closest('li'));
-        await persist();
+        await persist(ul);
       })
     );
     $$('[data-start]').forEach((b) =>
@@ -832,6 +915,7 @@
       })
     );
   }
+
 
   async function viewPaper(id) {
     const p = await DB.get('papers', id);

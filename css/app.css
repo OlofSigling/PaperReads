@@ -357,3 +357,15 @@ ul.trail ul { list-style: none; margin: 0; padding-left: 14px; border-left: 2px 
 .t-dot.s-want { background: transparent; border: 2px solid var(--accent); width: 5px; height: 5px; }
 .via-chip { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 10px; border-radius: 8px; background: var(--accent-soft); }
 .via-chip b { flex: 1; font-weight: 600; }
+
+/* reading order: trail groups */
+.q-item { flex-wrap: wrap; }
+.q-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.q-toggle { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent); font: inherit; font-size: .85rem; cursor: pointer; }
+.q-sub { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--border); flex-basis: 100%; }
+.q-sub-top { margin: 6px 0 2px 2.6em; }
+.q-node > .q-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+.q-node > .q-row .paper-link { flex: 1; min-width: 0; }
+.q-node.dragging { opacity: .85; background: var(--surface); box-shadow: 0 6px 18px rgba(0,0,0,.2); border-radius: 8px; }
+.handle-gap { width: 1.6em; flex: none; }
+.paper-link.dim .pr-title { color: var(--muted); }
