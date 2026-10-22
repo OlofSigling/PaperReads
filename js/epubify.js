@@ -314,7 +314,7 @@ const Epubify = (() => {
         if (!(id in fonts)) {
           try {
             const f = page.commonObjs.get(id);
-            fonts[id] = { name: f.name || '', bold: !!f.bold, asc: f.ascent || 0.8, desc: f.descent || -0.2 };
+            fonts[id] = { name: f.name || '', bold: !!f.bold, asc: f.ascent || 0.8, desc: f.descent || -0.2, remap: piGlyphs(f.differences) };
           } catch {
             fonts[id] = { name: '', bold: false, asc: 0.8, desc: -0.2 };
           }
@@ -345,7 +345,7 @@ const Epubify = (() => {
         const up = [tx[2] / ulen, tx[3] / ulen];
         const corners = [0, it.width].flatMap((a) => [f.asc, f.desc].map((h) => [x0 + dir[0] * a + up[0] * h * size, yb + dir[1] * a + up[1] * h * size]));
         const span = {
-          text: it.str,
+          text: f.remap ? [...it.str].map((ch) => f.remap[ch.codePointAt(0)] ?? ch).join('') : it.str,
           bbox: [Math.min(...corners.map((c) => c[0])), Math.min(...corners.map((c) => c[1])), Math.max(...corners.map((c) => c[0])), Math.max(...corners.map((c) => c[1]))],
           size,
           font: f.name,
@@ -403,6 +403,7 @@ const Epubify = (() => {
     let ctm = [1, 0, 0, 1, 0, 0];
     const stack = [];
     const boxes = [];
+    const rules = []; // thin horizontal lines: the rules of a ruled table
     for (let i = 0; i < ops.fnArray.length; i++) {
       const fn = ops.fnArray[i];
       const args = ops.argsArray[i];
@@ -422,6 +423,7 @@ const Epubify = (() => {
         const area = (b[2] - b[0]) * (b[3] - b[1]);
         if (area > W * H * 0.5) continue; // page background
         if (b[3] < H * 0.07 || b[1] > H * 0.93) continue; // header/footer bars, logos
+        if (b[3] - b[1] < 3 && b[2] - b[0] > 40) rules.push(b);
         if (b[2] - b[0] > W * 0.85 && b[3] - b[1] < 3) continue; // full-width rules
         boxes.push({ b, w: 1, rot: 0 });
       }
@@ -432,7 +434,8 @@ const Epubify = (() => {
       if ((l.bbox[0] + l.bbox[2]) / 2 > W * 0.94 || (l.bbox[0] + l.bbox[2]) / 2 < W * 0.06) continue;
       for (const sp of l.spans) if (sp.text.trim()) boxes.push({ b: sp.bbox, w: 2, rot: l.dir[1] < 0 ? 90 : -90, text: l.spans.map((x) => x.text).join(''), line: l });
     }
-    if (!boxes.length) return [];
+    const ruled = ruledTables(rules, lines, W, H);
+    if (!boxes.length) return ruled;
     // cluster boxes that touch or nearly touch
     const parent = boxes.map((_, i) => i);
     const find = (i) => {
@@ -482,8 +485,58 @@ const Epubify = (() => {
       Object.assign(box, { rotate: rot, vector: true, caption: parts.map((r) => r.caption).find(Boolean) });
       out.splice(0, out.length, ...out.filter((r) => r.rotate !== rot), box);
     }
+    out.push(...ruled);
     // a region inside another is part of it
     return out.filter((r, i) => !out.some((o, j) => j !== i && o[0] <= r[0] && o[1] <= r[1] && o[2] >= r[2] && o[3] >= r[3] && (o[2] - o[0]) * (o[3] - o[1]) > (r[2] - r[0]) * (r[3] - r[1])));
+  }
+
+  // A table set as text between horizontal rules (APA, booktabs) has too
+  // few drawn lines to look like a figure. Find it from its caption: a
+  // "Table N" line with rules of the same width below it; the table runs
+  // from the first rule to the last before the next caption.
+  function ruledTables(rules, lines, W, H) {
+    if (rules.length < 2) return [];
+    // pieces of one rule (drawn per column) become one
+    const rs = [];
+    for (const b of [...rules].sort((a, c) => a[1] - c[1] || a[0] - c[0])) {
+      const last = rs.find((r) => Math.abs(r[1] - b[1]) < 1.5 && b[0] <= r[2] + 6 && b[2] >= r[0] - 6);
+      if (last) last.splice(0, 4, Math.min(last[0], b[0]), Math.min(last[1], b[1]), Math.max(last[2], b[2]), Math.max(last[3], b[3]));
+      else rs.push([...b]);
+    }
+    const flat = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01);
+    const text = (l) => ws(l.spans.map((x) => x.text).join('')).trim();
+    const caps = flat.filter((l) => CAPTION.test(text(l)) && /^\s*t/i.test(text(l)));
+    const out = [];
+    for (const cap of caps) {
+      const [cx0, , cx1, cy1] = cap.bbox;
+      // the top rule: just below the caption (and its title), under it
+      const top = rs.find((r) => r[1] > cy1 - 1 && r[1] - cy1 < 70 && r[0] < cx1 && r[2] > cx0 - 10 && r[0] > cx0 - 40);
+      if (!top) continue;
+      const nextCap = Math.min(H, ...caps.filter((c) => c !== cap && c.bbox[1] > top[1] && c.bbox[0] < top[2] && c.bbox[2] > top[0]).map((c) => c.bbox[1]));
+      const same = rs.filter((r) => r !== top && r[1] > top[1] + 4 && r[1] < nextCap && Math.abs(r[0] - top[0]) < 8 && Math.abs(r[2] - top[2]) < 8);
+      if (!same.length) continue;
+      const bottom = same[same.length - 1];
+      // header rows can sit above the first rule (BMJ, BMC): the table starts
+      // where the caption (and its title, aligned with it) ends
+      let start = top[1] - 2;
+      const capSize = cap.spans[0].size;
+      let capEnd = cy1;
+      const between = flat.filter((l) => l !== cap && l.bbox[1] >= cap.bbox[1] && (l.bbox[1] + l.bbox[3]) / 2 > cy1 && (l.bbox[1] + l.bbox[3]) / 2 < top[1] && l.bbox[0] < top[2] && l.bbox[2] > top[0]).sort((a, c) => a.bbox[1] - c.bbox[1]);
+      let i = 0;
+      while (i < between.length && Math.abs(between[i].bbox[0] - cx0) < 3 && Math.abs(between[i].spans[0].size - capSize) < 0.8 && between[i].bbox[1] - capEnd < capSize * 0.8) capEnd = between[i++].bbox[3];
+      if (i < between.length) start = Math.max(capEnd + 0.5, Math.min(...between.slice(i).map((l) => l.bbox[1])) - 2);
+      const box = [top[0], start, top[2], bottom[3] + 2];
+      // cells can stick out past the rules a little
+      for (const l of flat) {
+        const cy = (l.bbox[1] + l.bbox[3]) / 2;
+        if (cy > box[1] && cy < box[3] && l.bbox[0] < box[2] && l.bbox[2] > box[0]) box.splice(0, 4, Math.min(box[0], l.bbox[0]), box[1], Math.max(box[2], l.bbox[2]), box[3]);
+      }
+      if (box[3] - box[1] < 20) continue;
+      const r = [Math.max(0, box[0] - 3), Math.max(0, box[1] - 1, cy1 + 1.5), Math.min(W, box[2] + 3), Math.min(H, box[3] + 1)];
+      r.vector = true;
+      out.push(r);
+    }
+    return out;
   }
 
   // Walk the operator list tracking the transform matrix to find where each
@@ -519,7 +572,7 @@ const Epubify = (() => {
   // one, preferring captions below the image (the usual layout).
   // (case-insensitive: small-caps captions extract as "fig 1 |", "table 2 |")
   // "Figure 2." / "fig 1 |" / "Figure 2 (A) …" / "Figure 4 Estimated …", but not "Figure 2 shows" or "Figure 2A shows"
-  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*(\d+)\s*(?:[.:|]|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}))/u;
+  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*([A-Z]?\d+)\s*(?:[.:|]|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}))/u;
   const captionKey = (m) => `${/^t/i.test(m[1]) ? 'table' : 'figure'}-${m[2]}`;
   function captionNumber(box, rows) {
     if (box.caption) {
@@ -647,6 +700,24 @@ const Epubify = (() => {
     }
     const total = left + right + across;
     return total > 40 && across < total * 0.15 && left > total * 0.25 && right > total * 0.25;
+  }
+
+  // Linotype "Mathematical Pi" fonts (APA and other publishers' symbols)
+  // name glyphs H<number> and come without a Unicode map, so viewers show
+  // "p [ .05" for "p < .05". Their names say which symbol it is.
+  const PI_GLYPHS = { 11001: '+', 11002: '−', 11003: '×', 11004: '÷', 11005: '=', 11021: '<', 11022: '>', 11569: '*' };
+  function piGlyphs(differences) {
+    if (!Array.isArray(differences)) return null;
+    let map = null;
+    differences.forEach((name, code) => {
+      const m = /^H(\d{4,5})$/.exec(name || '');
+      if (!m) return;
+      const n = +m[1];
+      // Greek lowercase in Unicode order: H9251 is α
+      const ch = PI_GLYPHS[n] || (n >= 9251 && n <= 9275 ? String.fromCodePoint(n - 8306) : '');
+      (map ||= {})[code] = ch;
+    });
+    return map;
   }
 
   function fixGlyphs(text, font) {
@@ -1443,6 +1514,12 @@ const Epubify = (() => {
         for (const t of ordered) {
           if (t[0] === -1 && t[1] > colTop) t[0] = 2;
           else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2 && !sideBySide(t)) t[0] = -1; // author lines etc. above the columns
+        }
+        // a bare "Table 5" label over a full-width title goes with its title
+        for (const t of ordered) {
+          if (t[0] < 0 || t[0] > 1 || !/^\s*(fig(ure)?\.?|table)\s*[A-Z]?\d+[.:]?\s*$/i.test(t[2])) continue;
+          const below = ordered.filter((o) => o[1] > t[1] && o[1] - t[1] < t[3] * 2.5 && Math.abs(o[4] - t[4]) < 20).sort((a, b) => a[1] - b[1])[0];
+          if (below && (below[0] === -1 || below[0] === 2)) t[0] = below[0];
         }
         ordered = ordered.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
       }
