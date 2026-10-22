@@ -45,19 +45,72 @@ installable web app (PWA) for Android that runs fully offline. All data stays on
   stays signed in (the secret and sign-in stay on the device, never synced or backed up).
 - **Stats:** yearly goal with on-pace indicator, papers per month, pages read, day streaks, average rating, top tags.
 
-## Install on your phone
+## Get started
 
-A service worker and share target need HTTPS, so host the files anywhere static. GitHub Pages is free:
+PaperReads is a website you install like an app: **https://olofsigling.github.io/PaperReads/**.
+Each person's library stays in their own browser. Nobody else can see it, including whoever runs the site.
 
-1. Merge this branch into `main`.
-2. In the repository, go to **Settings → Pages**, set *Source* to **Deploy from a branch**, and pick `main` / `/ (root)`.
-3. On your Android phone, open `https://<your-username>.github.io/PaperReads/` in Chrome.
-4. Open the menu (⋮) and tap **Add to Home screen**, then **Install**.
+### 1. Install (2 minutes)
 
-After it's installed, **PaperReads** appears in the Android share sheet.
+- **Android:** open the link in **Chrome**, tap ⋮ → **Add to Home screen** → **Install**. PaperReads then also
+  appears in Android's **share sheet**.
+- **Laptop:** open the link in Chrome or Edge (optionally use the install icon in the address bar for its own window).
 
-> Your data lives in the app's browser storage on the phone, not in the cloud. Clearing Chrome's site
-> data for the app, or uninstalling it, deletes your library. Use **💾 Backup** (top right) regularly.
+### 2. Add papers
+
+- **Share to it:** from any app or browser, share a paper's link (DOI, arXiv, journal page) or a PDF and pick
+  PaperReads. It looks up the title, authors and so on, saves the PDF when it can, and makes an EPUB for reading
+  on the phone. If a site won't let it download the PDF, download it in your browser and share the file instead.
+- **Or tap ＋ Add** and paste a DOI, an arXiv link or a title.
+- **Web articles:** share the link. If the site blocks apps, save the page in Chrome (⋮ → ⬇ Download) and share
+  the saved file.
+
+### 3. Read
+
+- Shelves: Want to read, Reading, Read. **Read** is your call: reaching the last page only offers it.
+- In the reader, tap the edges or swipe to turn pages. Select text to highlight it, add a note, or add a
+  **concern**. Tap a citation to see the reference, then **＋ Add to library** to save a paper you found through it.
+- **Want to read** is your queue: drag ☰ to order it.
+
+### 4. Back up, or sync
+
+The library lives only in this browser: uninstalling the app or clearing Chrome's data for it deletes it.
+Either tap **💾** now and then and keep the .zip somewhere safe, or set up sync below, which keeps a copy in
+your own Google Drive.
+
+### Optional: sync between your devices
+
+Free, through a hidden folder in **your own** Google Drive. The app can see only that folder.
+
+1. Ask the person who runs the site (Olof) for the app's **Google client ID** and **client secret**.
+2. In PaperReads: ⚙ **Settings** → **Sync with Google Drive**. Put the client ID in the first box and the
+   secret in the second, then tap **Connect and sync**.
+3. On Google's sign-in page you may see "Google hasn't verified this app" (it's a personal app). Choose
+   **Advanced → Go to PaperReads** and allow access.
+4. Repeat on your other devices. Each signs in once and then stays signed in.
+
+### Optional: Ask Claude about a paper
+
+1. Create an API key at [console.anthropic.com](https://console.anthropic.com/settings/keys) and add a few
+   dollars of credit. It's pay-as-you-go and separate from a Claude subscription.
+2. ⚙ **Settings** → **Ask Claude**: paste the key, tap **Test key**.
+3. Ask on a paper's page or in the reader (💬), or select a passage and tap **Ask**. A question costs a few cents.
+
+### For the site's owner: letting others sync
+
+Everyone can share one Google client ID and secret. Each person still signs in with their own Google account
+and syncs to their own Drive.
+- With the Google project **published** (Google Auth Platform → Audience → *In production*), anyone can sign in.
+  In *Testing* mode, add each person's Gmail under Audience → **Test users** (up to 100); they'll be signed out every 7 days.
+- Send the ID and secret privately. **Don't commit the secret to this repository:** it's public, and Google
+  disables client secrets it finds published on GitHub.
+
+### Host your own copy
+
+A service worker and share target need HTTPS, so host the files anywhere static. GitHub Pages is free: fork the
+repository, go to **Settings → Pages**, set *Source* to **Deploy from a branch** and pick `main` / `/ (root)`.
+The app is then at `https://<your-username>.github.io/PaperReads/`. For sync on your copy, set up your own
+Google client: the steps are in the app under ⚙ Settings → Sync → *Get a client ID*.
 
 ### Backup and restore
 
