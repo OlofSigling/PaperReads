@@ -377,3 +377,13 @@ ul.trail ul { list-style: none; margin: 0; padding-left: 14px; border-left: 2px 
 .friend-paper .stars { color: #e0a800; letter-spacing: 1px; }
 .feed-item { padding: 6px 0; line-height: 1.4; }
 pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px; }
+
+/* swipe a queue row: right archives, left deletes */
+.queue, .q-sub { position: relative; }
+.queue > li, .q-row { touch-action: pan-y; }
+.swiping { position: relative; z-index: 1; background: var(--surface); }
+.swipe-bg { position: absolute; left: 0; right: 0; z-index: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-radius: 12px; font-weight: 600; color: #fff; pointer-events: none; }
+.swipe-bg span { opacity: 0; }
+.swipe-bg.archive { background: #4a7f5c; }
+.swipe-bg.archive span:first-child, .swipe-bg.delete span:last-child { opacity: 1; }
+.swipe-bg.delete { background: #c2412d; }

@@ -816,7 +816,7 @@
         ${kids.length ? `<ul class="q-sub" data-parent="${p.id}">${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
     };
-    main.innerHTML = `<p class="muted">Drag ☰ to reorder. Papers you found through another one are grouped under the paper the trail started from; open a group to see (and order) them.</p>
+    main.innerHTML = `<p class="muted">Drag ☰ to reorder. Swipe a paper right to archive it (it stays in your library as Catalogued), left to delete it. Papers you found through another one are grouped under the paper the trail started from; open a group to see (and order) them.</p>
       <ul class="list queue" id="queue">${groups
         .map((g, i) => {
           const kids = g.kids(g.root.id);
@@ -887,6 +887,7 @@
     };
     ul.addEventListener('pointerup', end);
     ul.addEventListener('pointercancel', end);
+    swipeRows(ul, byId, () => $$(':scope > li > .q-num', ul).forEach((el, i) => (el.textContent = i + 1)));
 
     $$('[data-toggle]').forEach((b) =>
       b.addEventListener('click', () => {
@@ -918,6 +919,119 @@
     );
   }
 
+
+  // Swipe a queue row: right archives (off the reading list, kept as
+  // Catalogued), left deletes. Both can be undone from the toast; a delete
+  // only happens once the undo has passed.
+  const pendingDeletes = new Map(); // id → timer
+  async function finishDelete(id) {
+    clearTimeout(pendingDeletes.get(id));
+    pendingDeletes.delete(id);
+    await deletePaper(id);
+    if (/^#\/queue/.test(location.hash)) route();
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') for (const id of [...pendingDeletes.keys()]) finishDelete(id);
+  });
+
+  function swipeRows(ul, byId, renumber) {
+    let s = null;
+    const rowOf = (target) => target.closest('.q-row') || target.closest('#queue > li');
+    ul.addEventListener('dragstart', (e) => e.preventDefault()); // a link's own drag would cancel the swipe
+    ul.addEventListener('pointerdown', (e) => {
+      if (e.button > 0 || e.target.closest('.handle, button, .q-toggle')) return;
+      const el = rowOf(e.target);
+      if (!el) return;
+      s = { el, li: el.closest('li'), x: e.clientX, y: e.clientY, dx: 0, on: false, id: el.closest('li').dataset.id };
+    });
+    ul.addEventListener('pointermove', (e) => {
+      if (!s) return;
+      const dx = e.clientX - s.x;
+      const dy = e.clientY - s.y;
+      if (!s.on) {
+        if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) return (s = null); // scrolling
+        if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+        s.on = true;
+        try {
+          ul.setPointerCapture(e.pointerId);
+        } catch {}
+        const list = s.el.offsetParent;
+        s.bg = document.createElement('div');
+        s.bg.className = 'swipe-bg';
+        s.bg.style.top = `${s.el.offsetTop}px`;
+        s.bg.style.height = `${s.el.offsetHeight}px`;
+        s.bg.innerHTML = '<span>📥 Archive</span><span>Delete 🗑</span>';
+        (list || ul).appendChild(s.bg);
+        s.el.classList.add('swiping');
+      }
+      s.dx = dx;
+      s.el.style.transform = `translateX(${dx}px)`;
+      s.bg.classList.toggle('archive', dx > 0);
+      s.bg.classList.toggle('delete', dx < 0);
+      e.preventDefault();
+    });
+    const done = async () => {
+      if (!s) return;
+      const { el, li, dx, on, id, bg } = s;
+      s = null;
+      if (!on) return;
+      // the tap that ends a swipe isn't a click on the link
+      const eat = (ev) => (ev.preventDefault(), ev.stopPropagation());
+      ul.addEventListener('click', eat, { capture: true, once: true });
+      setTimeout(() => ul.removeEventListener('click', eat, true), 400);
+      const w = el.offsetWidth;
+      if (Math.abs(dx) < Math.max(90, w * 0.35)) {
+        el.style.transition = 'transform .18s';
+        el.style.transform = '';
+        setTimeout(() => {
+          el.classList.remove('swiping');
+          el.style.transition = '';
+          bg.remove();
+        }, 200);
+        return;
+      }
+      el.style.transition = 'transform .18s';
+      el.style.transform = `translateX(${dx > 0 ? w : -w}px)`;
+      await new Promise((r) => setTimeout(r, 180));
+      bg.remove();
+      const p = byId.get(id);
+      const parent = li.parentElement;
+      const next = li.nextSibling;
+      li.remove();
+      renumber();
+      const putBack = () => {
+        el.classList.remove('swiping');
+        el.style.transition = '';
+        el.style.transform = '';
+        parent.insertBefore(li, next);
+        renumber();
+      };
+      if (dx > 0) {
+        const before = { ...p };
+        await setStatus(p, 'none');
+        toast('Archived (now Catalogued)', {
+          label: 'Undo',
+          run: async () => {
+            await savePaper(before);
+            Object.assign(p, before);
+            if (/^#\/queue/.test(location.hash)) putBack();
+          },
+        });
+      } else {
+        pendingDeletes.set(id, setTimeout(() => finishDelete(id), 6500));
+        toast('Deleted', {
+          label: 'Undo',
+          run: () => {
+            clearTimeout(pendingDeletes.get(id));
+            pendingDeletes.delete(id);
+            if (/^#\/queue/.test(location.hash)) putBack();
+          },
+        });
+      }
+    };
+    ul.addEventListener('pointerup', done);
+    ul.addEventListener('pointercancel', done);
+  }
 
   async function viewPaper(id) {
     const p = await DB.get('papers', id);
