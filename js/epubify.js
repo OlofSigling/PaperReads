@@ -365,8 +365,15 @@ const Epubify = (() => {
           Math.max(...l.spans.map((s) => s.bbox[3])),
         ];
       }
-      const raster = imageBoxes(lib, ops, vp);
+      let raster = imageBoxes(lib, ops, vp);
       const regions = vectorRegions(lib, ops, vp, lines);
+      // A scanned page with recognised text over it: the scan isn't a figure.
+      // Keep the text, and cut the figures and tables out of the scan.
+      const pageScan = raster.find((b) => (b[2] - b[0]) * (b[3] - b[1]) > vp.width * vp.height * 0.7);
+      if (pageScan && lines.filter((l) => l.spans.some((sp) => sp.text.trim())).length >= 5) {
+        raster = raster.filter((b) => b !== pageScan);
+        regions.push(...scanRegions(lines, vp.width, vp.height, await inkMeter(page, vp)));
+      }
       // text drawn inside a figure region is part of the picture: keep it
       // out of the running text (labels of a flow diagram, table cells)
       if (regions.length) {
@@ -539,6 +546,120 @@ const Epubify = (() => {
     return out;
   }
 
+  // Figures and tables inside a page scan. The text layer marks them out: a
+  // figure fills the gap between its caption and the full line of text
+  // above it; a table runs from under its caption (and capitalised title)
+  // to the next full line of text below.
+  // How much of a box is ink that isn't recognised text (drawing, rules),
+  // from a quick low-resolution render of the scanned page.
+  async function inkMeter(page, vp) {
+    try {
+      const scale = 0.5;
+      const v = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(v.width);
+      canvas.height = Math.ceil(v.height);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      await page.render({ canvasContext: ctx, viewport: v }).promise;
+      const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      return (box, textBoxes) => {
+        let ink = 0;
+        let n = 0;
+        for (let y = Math.max(0, Math.floor(box[1] * scale)); y < Math.min(canvas.height, box[3] * scale); y++) {
+          for (let x = Math.max(0, Math.floor(box[0] * scale)); x < Math.min(canvas.width, box[2] * scale); x++) {
+            n++;
+            const i = (y * canvas.width + x) * 4;
+            if (px[i] + px[i + 1] + px[i + 2] > 600) continue; // (faint strokes of thin type count)
+            const X = x / scale;
+            const Y = y / scale;
+            if (!textBoxes.some((b) => X >= b[0] - 2 && X <= b[2] + 2 && Y >= b[1] - 2 && Y <= b[3] + 2)) ink++;
+          }
+        }
+        return n ? ink / n : 0;
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function scanRegions(lines, W, H, ink) {
+    const flat = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01 && l.spans.some((sp) => sp.text.trim())).sort((a, c) => a.bbox[1] - c.bbox[1]);
+    if (!flat.length) return [];
+    const text = (l) => ws(l.spans.map((x) => x.text).join(' ')).trim();
+    const left = Math.min(...flat.map((l) => l.bbox[0]));
+    const right = Math.max(...flat.map((l) => l.bbox[2]));
+    const bodyW = right - left;
+    // running text: wide and wordy (figure labels and table rows aren't)
+    const upper = (t) => {
+      const letters = t.replace(/[^\p{L}]/gu, '');
+      return letters.length >= 4 && letters.replace(/\p{Lu}/gu, '').length <= letters.length * 0.15;
+    };
+    // (a table's header row spreads its words out: wide gaps between pieces)
+    const spread = (l) => {
+      const sp = l.spans.filter((x) => x.text.trim()).sort((a, c) => a.bbox[0] - c.bbox[0]);
+      return sp.some((x, k) => k && x.bbox[0] - sp[k - 1].bbox[2] > (l.bbox[3] - l.bbox[1]) * 2.5);
+    };
+    const prose = (l) => l.bbox[2] - l.bbox[0] > bodyW * 0.6 && text(l).split(/\s+/).length >= 7 && !upper(text(l)) && !spread(l);
+    const header = flat[0].bbox[1] < H * 0.1 && !prose(flat[0]) ? flat[0] : null;
+    const size = (l) => l.bbox[3] - l.bbox[1];
+    const out = [];
+    for (const [i, cap] of flat.entries()) {
+      const m = CAPTION.exec(text(cap));
+      if (!m) continue;
+      const box = [left, 0, right, 0];
+      if (/^t/i.test(m[1])) {
+        // caption, then its title lines (APA: in capitals), then the table
+        let j = i + 1;
+        let last = cap;
+        while (j < flat.length && upper(text(flat[j])) && flat[j].bbox[1] - last.bbox[3] < size(last) * 2) last = flat[j++];
+        const end = flat.slice(j).findIndex(prose);
+        const rows = end < 0 ? flat.slice(j) : flat.slice(j, j + end);
+        if (!rows.length) continue;
+        box[1] = last.bbox[3] + 4;
+        box[3] = Math.min(end < 0 ? H * 0.95 : flat[j + end].bbox[1] - 2, Math.max(...rows.map((l) => l.bbox[3])) + 10);
+      } else {
+        // the figure is above its caption, below the running text before it
+        const above = flat.slice(0, i).reverse().find((l) => prose(l) || l === header);
+        box[1] = above ? above.bbox[3] + 3 : H * 0.06;
+        box[3] = cap.bbox[1] - 2;
+      }
+      if (box[3] - box[1] < 30) continue;
+      const r = [Math.max(0, box[0] - 6), box[1], Math.min(W, box[2] + 6), box[3]];
+      r.vector = true;
+      out.push(r);
+    }
+    // the recognised text can stray off the page: take the sides from the ink
+    const sides = (r) => {
+      if (!ink) return r;
+      let [x0, , x1] = [W * 0.03, 0, W * 0.97];
+      while (x1 - x0 > 40 && ink([x0, r[1], x0 + 4, r[3]], []) < 0.001) x0 += 4;
+      while (x1 - x0 > 40 && ink([x1 - 4, r[1], x1, r[3]], []) < 0.001) x1 -= 4;
+      return Object.assign([Math.max(0, x0 - 8), r[1], Math.min(W, x1 + 8), r[3]], { vector: true });
+    };
+    // Figures whose caption the recognition missed: a tall stretch without
+    // running text where the scan has drawing beyond the recognised words.
+    if (ink) {
+      const top = header ? header.bbox[3] + 3 : H * 0.05;
+      const marks = [top, ...flat.filter(prose).flatMap((l) => [l.bbox[1], l.bbox[3]]), H * 0.95].sort((a, c) => a - c);
+      const textBoxes = flat.map((l) => l.bbox);
+      for (let i = 0; i + 1 < marks.length; i++) {
+        const box = [W * 0.03, marks[i] + 3, W * 0.97, marks[i + 1] - 3];
+        if (box[3] - box[1] < 60) continue;
+        if (out.some((o) => Math.min(o[3], box[3]) - Math.max(o[1], box[1]) > (box[3] - box[1]) * 0.3)) continue;
+        // (ink the recognition didn't cover is content the reader would lose)
+        if (ink(box, textBoxes) < 0.005) continue;
+        // trim to where the ink and text are
+        const inside = flat.filter((l) => (l.bbox[1] + l.bbox[3]) / 2 > box[1] && (l.bbox[1] + l.bbox[3]) / 2 < box[3]);
+        let y0 = box[1];
+        let y1 = box[3];
+        while (y1 - y0 > 20 && ink([box[0], y1 - 8, box[2], y1], []) < 0.002 && !inside.some((l) => l.bbox[3] > y1 - 8)) y1 -= 8;
+        while (y1 - y0 > 20 && ink([box[0], y0, box[2], y0 + 8], []) < 0.002 && !inside.some((l) => l.bbox[1] < y0 + 8)) y0 += 8;
+        out.push([box[0], y0, box[2], y1]);
+      }
+    }
+    return out.map(sides);
+  }
+
   // Walk the operator list tracking the transform matrix to find where each
   // raster image is painted (PyMuPDF reports these as image blocks).
   function imageBoxes(lib, ops, vp) {
@@ -572,7 +693,7 @@ const Epubify = (() => {
   // one, preferring captions below the image (the usual layout).
   // (case-insensitive: small-caps captions extract as "fig 1 |", "table 2 |")
   // "Figure 2." / "fig 1 |" / "Figure 2 (A) …" / "Figure 4 Estimated …", but not "Figure 2 shows" or "Figure 2A shows"
-  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*([A-Z]?\d+)\s*(?:[.:|]|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}))/u;
+  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*([A-Z]?\d+)\s*(?:[.:|]|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}|\p{Lu}{3,}\s))/u;
   const captionKey = (m) => `${/^t/i.test(m[1]) ? 'table' : 'figure'}-${m[2]}`;
   function captionNumber(box, rows) {
     if (box.caption) {
@@ -955,7 +1076,8 @@ const Epubify = (() => {
   async function pdfSimpleFlow(pdf, bodySize, images, log) {
     const ph = pdf.pages[0].height;
     const npages = pdf.pages.length;
-    const norm = (t) => ws(t).trim().toLowerCase().replace(/\d+/g, '#');
+    // (spaces ignored: scanned text spaces the same header differently, "A N D" / "AND")
+    const norm = (t) => ws(t).toLowerCase().replace(/\s+/g, '').replace(/\d+/g, '#');
 
     // running headers / footers
     const edge = new Counter();
