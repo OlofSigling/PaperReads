@@ -43,7 +43,7 @@ Everything below is optional.
   reading). On a paper page, **＋ Add a paper found here** does the same; any paper's "found via" can be changed later.
   Each paper shows where it was found and what it led to; 🌳 Discovery trails (under 📁) shows the whole trees.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
-- **Queue:** drag to prioritise your want-to-read list; swipe a paper right to archive it (kept as Catalogued) or left to delete it, with Undo. Papers found through another one are grouped (collapsed)
+- **Queue:** drag to prioritise your want-to-read list; swipe a paper right to archive it (kept as Catalogued) or left to delete it, with Undo. Deleted papers wait 30 days in 🗑 Recently deleted (bottom of the Library), and with sync on it can also find papers in Google Drive’s history of the sync file. Papers found through another one are grouped (collapsed)
   under the paper their trail started from, so a whole trail moves as one; open a group to order the papers in it.
   The top items show as "Next up" on the home screen.
 - **Ask Claude** (optional): ask about a paper on its page or in the reader (💬), or select a passage and tap

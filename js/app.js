@@ -201,9 +201,68 @@
     }</li>`;
   }
 
+  // Deleted papers wait in a bin on this device for 30 days, files and all.
+  const TRASH_DAYS = 30;
+  async function trashed() {
+    const t = (await DB.setting('trash', {})) || {};
+    const cutoff = now() - TRASH_DAYS * 864e5;
+    const old = Object.keys(t).filter((id) => t[id].deletedAt < cutoff);
+    if (old.length) {
+      old.forEach((id) => delete t[id]);
+      await DB.setSetting('trash', t);
+    }
+    return t;
+  }
+
+  // Bring a deleted paper back from the bin or from Drive's history. It's
+  // saved as new, so sync treats it as newer than its deletion.
+  async function restoreRecords({ paper, rows = {}, pdf = null, epub = null, children = [] }) {
+    const p = { ...paper };
+    delete p.ft;
+    p.hasPdf = !!pdf;
+    p.hasEpub = !!epub;
+    if (p.foundVia && !(await DB.get('papers', p.foundVia))) p.foundVia = null;
+    if (p.status === 'want' && p.queueOrder == null) p.queueOrder = await nextQueueOrder();
+    await savePaper(p);
+    if (pdf) await DB.put('pdfs', { ...pdf, mtime: undefined });
+    if (epub) await DB.put('epubs', { ...epub, mtime: undefined });
+    for (const store of ['progress', 'highlights', 'links']) {
+      for (const r of rows[store] || []) {
+        if (store === 'links' && !(await DB.get('papers', r.fromId === p.id ? r.toId : r.fromId))) continue;
+        const row = { ...r };
+        delete row.id;
+        delete row.mtime;
+        await DB.put(store, row);
+      }
+    }
+    // papers that moved up when it was deleted go back under it
+    for (const [cid, was] of children) {
+      const c = await DB.get('papers', cid);
+      if (c && (c.foundVia || null) === was) {
+        c.foundVia = p.id;
+        await savePaper(c);
+      }
+    }
+    return p;
+  }
+
   async function deletePaper(id) {
     // papers found through this one move up to where it was found
     const gone = await DB.get('papers', id);
+    if (gone) {
+      const [pdf, epub, progress, highlights, linksFrom, linksTo] = await Promise.all([
+        DB.get('pdfs', id),
+        DB.get('epubs', id),
+        DB.byIndex('progress', 'paperId', id),
+        DB.byIndex('highlights', 'paperId', id),
+        DB.byIndex('links', 'fromId', id),
+        DB.byIndex('links', 'toId', id),
+      ]);
+      const children = (await papers()).filter((x) => x.foundVia === id).map((x) => [x.id, gone.foundVia || null]);
+      const t = await trashed();
+      t[id] = { deletedAt: now(), paper: gone, pdf: pdf || null, epub: epub || null, rows: { progress, highlights, links: [...linksFrom, ...linksTo] }, children };
+      await DB.setSetting('trash', t);
+    }
     for (const child of (await papers()).filter((x) => x.foundVia === id)) {
       child.foundVia = (gone && gone.foundVia) || null;
       await savePaper(child);
@@ -571,6 +630,7 @@
     [/^#\/backup$/, viewBackup],
     [/^#\/settings$/, viewSettings],
     [/^#\/friends$/, viewFriends],
+    [/^#\/trash$/, viewTrash],
     [/^#\/friend\/(.+)$/, (q, uid) => viewFriend(uid)],
     [/^#\/trails$/, viewTrails],
     [/^#\/trail\/(.+)$/, (q, id) => viewTrails(q, id)],
@@ -751,6 +811,7 @@
       </div>
       <p class="muted count">${list.length} paper${list.length === 1 ? '' : 's'}</p>
       ${list.length ? `<ul class="list">${list.map((p) => paperRow(p)).join('')}</ul>` : '<p class="empty">No papers match.</p>'}
+      <p class="muted small trash-link"><a href="#/trash">🗑 Recently deleted</a></p>
     `;
     $('#search').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -816,7 +877,7 @@
         ${kids.length ? `<ul class="q-sub" data-parent="${p.id}">${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
     };
-    main.innerHTML = `<p class="muted">Drag ☰ to reorder. Swipe a paper right to archive it (it stays in your library as Catalogued), left to delete it. Papers you found through another one are grouped under the paper the trail started from; open a group to see (and order) them.</p>
+    main.innerHTML = `<p class="muted">Drag ☰ to reorder. Swipe a paper right to archive it (it stays in your library as Catalogued), left to delete it (Recently deleted keeps it for 30 days). Papers you found through another one are grouped under the paper the trail started from; open a group to see (and order) them.</p>
       <ul class="list queue" id="queue">${groups
         .map((g, i) => {
           const kids = g.kids(g.root.id);
@@ -1019,7 +1080,7 @@
         });
       } else {
         pendingDeletes.set(id, setTimeout(() => finishDelete(id), 6500));
-        toast('Deleted', {
+        toast('Deleted (kept in Recently deleted)', {
           label: 'Undo',
           run: () => {
             clearTimeout(pendingDeletes.get(id));
@@ -2376,6 +2437,78 @@
       <ul class="list compact">${info.map(({ r, n, read }) => `<li class="paper-row"><a class="paper-link" href="#/trail/${r.id}"><span class="pr-title">${esc(r.title)}</span><span class="pr-meta">${n} papers · ${read} read</span></a></li>`).join('') || '<li class="muted small">No trails yet.</li>'}</ul></section>`;
   }
 
+  // ---------- recently deleted ----------
+  async function viewTrash() {
+    setTitle('Recently deleted');
+    const t = await trashed();
+    const items = Object.values(t).sort((a, b) => b.deletedAt - a.deletedAt);
+    const syncOn = !!(await DB.setting('googleClientId', ''));
+    const row = (x, i, src) => `<li class="paper-row trash-row"><div class="trash-main"><span class="pr-title">${esc(x.paper.title)}</span>
+        <span class="pr-meta">${esc(authorsShort(x.paper.authors))}${x.paper.year ? ` · ${x.paper.year}` : ''} · ${STATUS[x.paper.status] || ''}${x.deletedAt ? ` · deleted ${fmtDate(x.deletedAt)}` : ''}${src === 'bin' ? (x.pdf ? ' · PDF' : '') + (x.epub ? ' · EPUB' : '') : ''}</span></div>
+        <span class="row"><button class="btn small primary" data-restore="${src}:${i}">Restore</button>${src === 'bin' ? `<button class="btn small danger-ghost" data-forget="${i}" aria-label="Delete forever">✕</button>` : ''}</span></li>`;
+    main.innerHTML = `
+      <section class="card">
+        <p class="muted small">Deleted papers stay here for ${TRASH_DAYS} days, with their files, notes and highlights.</p>
+        <ul class="list compact">${items.map((x, i) => row(x, i, 'bin')).join('') || '<li class="muted small">Nothing deleted recently.</li>'}</ul>
+      </section>
+      ${syncOn ? `<section class="card stack">
+        <h3>Find deleted papers in Google Drive</h3>
+        <p class="muted small">For papers deleted before this bin existed, or on another device. Google Drive keeps earlier versions of your sync file for about 30 days; this looks through them for papers you no longer have. It brings back details, notes, stars, highlights and reading log, but not PDFs or EPUBs (re-download or remake those).</p>
+        <div class="row"><button class="btn" id="tr-drive">Search Drive history</button></div>
+        <p class="muted small" id="tr-status"></p>
+        <ul class="list compact" id="tr-found"></ul>
+      </section>` : ''}`;
+    let found = [];
+    const restoreFrom = async (key, btn) => {
+      const [src, i] = key.split(':');
+      const x = src === 'bin' ? items[+i] : found[+i];
+      btn.disabled = true;
+      const p = await restoreRecords(x);
+      if (src === 'bin') {
+        const tt = await trashed();
+        delete tt[p.id];
+        await DB.setSetting('trash', tt);
+      }
+      btn.closest('li').remove();
+      toast(`Restored “${p.title.slice(0, 40)}”`, { label: 'Open', run: () => (location.hash = `#/paper/${p.id}`) });
+    };
+    const wire = (root) =>
+      $$('[data-restore]', root).forEach((b) => b.addEventListener('click', () => restoreFrom(b.dataset.restore, b).catch((err) => toast(err.message))));
+    wire(main);
+    $$('[data-forget]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        const x = items[+b.dataset.forget];
+        if (!confirm(`Delete “${x.paper.title}” forever?`)) return;
+        const tt = await trashed();
+        delete tt[x.paper.id];
+        await DB.setSetting('trash', tt);
+        b.closest('li').remove();
+      })
+    );
+    $('#tr-drive')?.addEventListener('click', async () => {
+      const status = $('#tr-status');
+      $('#tr-drive').disabled = true;
+      status.textContent = 'Looking…';
+      try {
+        found = await Sync.deletedInHistory((n, of) => (status.textContent = `Looking through version ${n} of ${of}…`));
+        const ul = $('#tr-found');
+        ul.innerHTML = found.map((x, i) => row(x, i, 'drive')).join('');
+        status.textContent = found.length ? `Found ${found.length} paper${found.length > 1 ? 's' : ''} you no longer have.` : 'No deleted papers in Drive’s history.';
+        if (found.length > 1) {
+          ul.insertAdjacentHTML('beforebegin', '<div class="row" id="tr-all-row"><button class="btn small" id="tr-all">Restore all</button></div>');
+          $('#tr-all').addEventListener('click', async () => {
+            for (const b of $$('[data-restore^="drive:"]', ul)) await restoreFrom(b.dataset.restore, b);
+            $('#tr-all-row').remove();
+          });
+        }
+        wire(ul);
+      } catch (err) {
+        status.textContent = `Couldn’t search: ${err.message}`;
+      }
+      $('#tr-drive').disabled = false;
+    });
+  }
+
   // ---------- friends ----------
   // Someone's add-me link waits here until this device is signed in.
   const PENDING_ADD = 'paperreads.friend-add';
@@ -2662,6 +2795,7 @@
       <section class="card">
         <h3>Backup</h3>
         <p class="muted small">A .zip of everything, to keep somewhere safe. <a href="#/backup">Backup and restore →</a></p>
+        <p class="muted small">Deleted something by mistake? <a href="#/trash">Recently deleted →</a></p>
       </section>`;
 
     const aiStatus = $('#ai-status');

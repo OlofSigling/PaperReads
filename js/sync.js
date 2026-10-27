@@ -464,6 +464,54 @@ const Sync = (() => {
     return { changes, downloaded, uploaded, failed, positions: remotePositions };
   }
 
+  // ---------------------------------------------------------------- history
+  // Drive keeps earlier versions of the sync file (about 30 days, up to 100
+  // versions). Papers in those versions that this device no longer has can
+  // be brought back: their details, notes, ratings, highlights and log
+  // (not their PDFs and EPUBs, which sync removed from Drive).
+  async function deletedInHistory(onProgress = () => {}) {
+    if (!(await ensureToken(true))) throw new Error('Sign in to Google first');
+    const dataFile = (await listFiles()).get(DATA_NAME);
+    if (!dataFile) return [];
+    const revs = [];
+    let page = '';
+    do {
+      const r = await call('GET', `${API}/${dataFile.id}/revisions?pageSize=200&fields=nextPageToken,revisions(id,modifiedTime)${page ? `&pageToken=${page}` : ''}`);
+      revs.push(...(r.revisions || []));
+      page = r.nextPageToken || '';
+    } while (page);
+    revs.sort((a, b) => (a.modifiedTime < b.modifiedTime ? 1 : -1)); // newest first
+    const have = new Set((await DB.all('papers')).map((p) => p.id));
+    const tomb = await DB.setting('tombstones', {});
+    const found = new Map();
+    for (const [i, rev] of revs.entries()) {
+      onProgress(i + 1, revs.length);
+      let data;
+      try {
+        data = await call('GET', `${API}/${dataFile.id}/revisions/${rev.id}?alt=media`);
+      } catch (err) {
+        if (err instanceof AuthError) throw err;
+        continue;
+      }
+      if (!data || data.format !== FORMAT) continue;
+      const st = data.stores || {};
+      for (const p of st.papers || []) {
+        if (have.has(p.id) || found.has(p.id)) continue; // newest version first: the first one seen is its last state
+        found.set(p.id, {
+          paper: p,
+          rows: {
+            progress: (st.progress || []).filter((r) => r.paperId === p.id),
+            highlights: (st.highlights || []).filter((r) => r.paperId === p.id),
+            links: (st.links || []).filter((r) => r.fromId === p.id || r.toId === p.id),
+          },
+          deletedAt: tomb[`papers:${p.id}`] || null,
+          seenAt: Date.parse(rev.modifiedTime),
+        });
+      }
+    }
+    return [...found.values()].sort((a, b) => (b.deletedAt || b.seenAt) - (a.deletedAt || a.seenAt));
+  }
+
   // ---------------------------------------------------------------- triggers
   let timer = null;
   function schedule(ms = 15000) {
@@ -527,6 +575,7 @@ const Sync = (() => {
     onApplied: null,
     onSignedIn: null,
     redirectUri,
+    deletedInHistory,
     async staysSignedIn() {
       return !!(await DB.setting('googleRefreshToken', ''));
     },

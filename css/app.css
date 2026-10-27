@@ -387,3 +387,8 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .swipe-bg.archive { background: #4a7f5c; }
 .swipe-bg.archive span:first-child, .swipe-bg.delete span:last-child { opacity: 1; }
 .swipe-bg.delete { background: #c2412d; }
+
+/* recently deleted */
+.trash-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.trash-main { min-width: 0; display: flex; flex-direction: column; }
+.trash-link { text-align: center; margin-top: 18px; }

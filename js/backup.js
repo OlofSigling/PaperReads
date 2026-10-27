@@ -18,7 +18,7 @@ const Backup = (() => {
     const stores = {};
     for (const s of DATA_STORES) stores[s] = await DB.all(s);
     // device-only settings stay out: the API key above all
-    stores.settings = stores.settings.filter((r) => !['lastBackup', 'anthropicKey', 'tombstones', 'syncLast', 'syncConnected', 'googleClientId', 'googleClientSecret', 'googleRefreshToken'].includes(r.key) && !r.key.startsWith('socialPublished:'));
+    stores.settings = stores.settings.filter((r) => !['lastBackup', 'anthropicKey', 'tombstones', 'syncLast', 'syncConnected', 'googleClientId', 'googleClientSecret', 'googleRefreshToken', 'trash'].includes(r.key) && !r.key.startsWith('socialPublished:'));
     const files = { pdfs: [], epubs: [] };
     if (includeFiles) {
       const pdfs = await DB.all('pdfs');
