@@ -2797,6 +2797,11 @@
         <h3>Backup</h3>
         <p class="muted small">A .zip of everything, to keep somewhere safe. <a href="#/backup">Backup and restore →</a></p>
         <p class="muted small">Deleted something by mistake? <a href="#/trash">Recently deleted →</a></p>
+      </section>
+      <section class="card stack">
+        <h3>App version</h3>
+        <p class="muted small"><span id="app-ver">…</span>. Updates arrive in the background and apply the next time the app opens.</p>
+        <div class="row"><button type="button" class="btn" id="app-update">Check for updates</button></div>
       </section>`;
 
     const aiStatus = $('#ai-status');
@@ -2898,6 +2903,45 @@
       await Social.signOut().catch(() => {});
       await DB.setSetting('firebaseConfig', null);
       location.reload();
+    });
+    // the version is the name of the offline cache the service worker keeps
+    (async () => {
+      try {
+        const v = Math.max(0, ...(await caches.keys()).map((k) => +(/^paperreads-v(\d+)$/.exec(k) || [])[1] || 0));
+        $('#app-ver').textContent = v ? `Version ${v}` : 'Version unknown';
+      } catch {
+        $('#app-ver').textContent = 'Version unknown';
+      }
+    })();
+    $('#app-update').addEventListener('click', async () => {
+      const btn = $('#app-update');
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (!reg) throw new Error('offline support isn’t set up in this browser');
+        await reg.update();
+        const fresh = reg.installing || reg.waiting;
+        if (!fresh) {
+          btn.textContent = 'Up to date';
+          setTimeout(() => {
+            btn.textContent = 'Check for updates';
+            btn.disabled = false;
+          }, 3000);
+          return;
+        }
+        btn.textContent = 'Updating…';
+        await new Promise((resolve) => {
+          if (fresh.state === 'activated') return resolve();
+          fresh.addEventListener('statechange', () => fresh.state === 'activated' && resolve());
+          setTimeout(resolve, 15000);
+        });
+        location.reload();
+      } catch (err) {
+        btn.textContent = 'Check for updates';
+        btn.disabled = false;
+        toast(`Couldn’t check: ${err.message}`);
+      }
     });
     $('#fb-copy').addEventListener('click', async () => {
       try {
