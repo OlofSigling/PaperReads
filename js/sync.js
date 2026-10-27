@@ -483,20 +483,16 @@ const Sync = (() => {
     revs.sort((a, b) => (a.modifiedTime < b.modifiedTime ? 1 : -1)); // newest first
     const have = new Set((await DB.all('papers')).map((p) => p.id));
     const tomb = await DB.setting('tombstones', {});
+    // the papers deleted on purpose: once all are found, older versions can't add more
+    const wanted = new Set(Object.keys(tomb).filter((k) => k.startsWith('papers:')).map((k) => k.slice(7)).filter((id) => !have.has(id)));
     const found = new Map();
-    for (const [i, rev] of revs.entries()) {
-      onProgress(i + 1, revs.length);
-      let data;
-      try {
-        data = await call('GET', `${API}/${dataFile.id}/revisions/${rev.id}?alt=media`);
-      } catch (err) {
-        if (err instanceof AuthError) throw err;
-        continue;
-      }
-      if (!data || data.format !== FORMAT) continue;
+    const take = (data, rev) => {
+      if (!data || data.format !== FORMAT) return;
       const st = data.stores || {};
       for (const p of st.papers || []) {
-        if (have.has(p.id) || found.has(p.id)) continue; // newest version first: the first one seen is its last state
+        const prior = found.get(p.id);
+        // the newest version wins: a paper's last state before it was deleted
+        if (have.has(p.id) || (prior && prior.seenAt >= Date.parse(rev.modifiedTime))) continue;
         found.set(p.id, {
           paper: p,
           rows: {
@@ -508,6 +504,23 @@ const Sync = (() => {
           seenAt: Date.parse(rev.modifiedTime),
         });
       }
+    };
+    // a few versions at a time, newest first
+    let done = 0;
+    for (let i = 0; i < revs.length; i += 6) {
+      const batch = revs.slice(i, i + 6);
+      const datas = await Promise.all(
+        batch.map((rev) =>
+          call('GET', `${API}/${dataFile.id}/revisions/${rev.id}?alt=media`).catch((err) => {
+            if (err instanceof AuthError) throw err;
+            return null;
+          })
+        )
+      );
+      datas.forEach((d, j) => take(d, batch[j]));
+      done += batch.length;
+      onProgress(done, revs.length);
+      if (wanted.size && [...wanted].every((id) => found.has(id))) break;
     }
     return [...found.values()].sort((a, b) => (b.deletedAt || b.seenAt) - (a.deletedAt || a.seenAt));
   }

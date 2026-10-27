@@ -84,6 +84,7 @@
     return `<div class="bar" role="progressbar" aria-valuenow="${Math.round(pct(p) * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${(pct(p) * 100).toFixed(1)}%"></span></div>`;
   }
 
+  const EPUB_BADGE = '<span class="badge epub" title="Has an EPUB to read">📖 EPUB</span>';
   function paperRow(p, extra = '') {
     return `<li class="paper-row">
       <a href="#/paper/${p.id}" class="paper-link">
@@ -94,7 +95,7 @@
           <span class="badge s-${p.status}">${STATUS[p.status]}</span>
           ${p.rating ? stars(p.rating) : ''}
           ${p.hasPdf ? '<span class="badge">PDF</span>' : ''}
-          ${p.hasEpub ? '<span class="badge">EPUB</span>' : ''}
+          ${p.hasEpub ? EPUB_BADGE : ''}
           ${(p.tags || []).slice(0, 3).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}
         </span>
       </a>${extra}
@@ -866,7 +867,7 @@
     try {
       open = new Set(JSON.parse(localStorage.getItem('paperreads.queue-open') || '[]'));
     } catch {}
-    const meta = (p) => `${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}`;
+    const meta = (p) => `${p.hasEpub ? EPUB_BADGE + ' ' : ''}${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}`;
     const badge = (p) => (p.status === 'want' ? '' : `<span class="badge s-${p.status}">${STATUS[p.status]}</span>`);
     const start = (p) => (p.status === 'want' ? `<button class="btn small" data-start="${p.id}">Start</button>` : '');
     const node = (g, p) => {
