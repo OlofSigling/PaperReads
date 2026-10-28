@@ -1963,6 +1963,7 @@
         <span class="r-title">${esc(p.title)}</span>
         <button class="r-btn" id="r-smaller" aria-label="Smaller text">A−</button>
         <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
+        ${Speech.supported ? '<button class="r-btn" id="r-tts" aria-label="Read aloud">🔊</button>' : ''}
         <button class="r-btn" id="r-ask" aria-label="Ask Claude">💬</button>
         <button class="r-btn" id="r-concerns" aria-label="Concerns">⚠<span class="r-count" id="r-ccount"></span></button>
         <button class="r-btn" id="r-toc" aria-label="Contents">☰</button>
@@ -1978,7 +1979,17 @@
         <button class="btn small" id="hl-note">Highlight + note</button>
         <button class="btn small" id="hl-concern">Concern</button>
         <button class="btn small" id="hl-ask">Ask</button>
+        <button class="btn small" id="hl-define">Define</button>
+        ${Speech.supported ? '<button class="btn small" id="hl-speak">🔊 From here</button>' : ''}
         <button class="r-btn" id="hl-cancel" aria-label="Cancel">✕</button>
+      </div>
+      <div class="r-ttsbar" id="r-ttsbar" hidden>
+        <button class="r-btn" id="tts-play" aria-label="Pause">⏸</button>
+        <button class="r-btn" id="tts-back" aria-label="Previous sentence">⏮</button>
+        <button class="r-btn" id="tts-skip" aria-label="Next sentence">⏭</button>
+        <select id="tts-rate" aria-label="Speed">${[0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5].map((r) => `<option value="${r}">${r}×</option>`).join('')}</select>
+        <select id="tts-voice" aria-label="Voice"></select>
+        <button class="r-btn" id="tts-stop" aria-label="Stop reading aloud">✕</button>
       </div>
       <div class="r-foot"><input type="range" id="r-seek" min="0" max="1000" value="0" aria-label="Position in paper" disabled><span id="r-pct">…</span></div>
       <nav class="r-toc" id="r-toc-panel" hidden></nav>
@@ -2247,6 +2258,231 @@
       };
       dlg.showModal();
     }
+    // --- read aloud ---
+    const ttsBar = $('#r-ttsbar');
+    const tts = { on: false, playing: false, run: 0, blocks: [], bi: 0, sents: [], si: 0, doc: null, lock: null };
+    const ttsRate = $('#tts-rate');
+    const ttsVoice = $('#tts-voice');
+    const ttsPlay = $('#tts-play');
+    const CFI = ePub.CFI;
+    const showSentence = (range) => {
+      const w = range.startContainer.ownerDocument.defaultView;
+      if (w.CSS && w.CSS.highlights && w.Highlight) w.CSS.highlights.set('pr-tts', new w.Highlight(range));
+    };
+    const clearSentence = () => {
+      const c = rendition.getContents()[0];
+      if (c && c.window.CSS && c.window.CSS.highlights) c.window.CSS.highlights.delete('pr-tts');
+    };
+    // the sentence being read stays on screen
+    const follow = async (range) => {
+      const c = rendition.getContents()[0];
+      const loc = rendition.currentLocation();
+      if (!c || !loc || !loc.start) return;
+      let cfi;
+      try {
+        cfi = c.cfiFromRange(range);
+      } catch {
+        return;
+      }
+      const cmp = new CFI();
+      if (cmp.compare(cfi, loc.end.cfi) > 0 || cmp.compare(cfi, loc.start.cfi) < 0) await go(() => rendition.display(cfi));
+    };
+    const loadBlocks = () => {
+      const c = rendition.getContents()[0];
+      if (!c) return false;
+      if (c.document !== tts.doc) {
+        tts.doc = c.document;
+        if (!tts.doc.getElementById('pr-tts-style')) {
+          const st = tts.doc.createElement('style');
+          st.id = 'pr-tts-style';
+          st.textContent = '::highlight(pr-tts){background-color:rgba(42,120,214,.28);}';
+          tts.doc.head.appendChild(st);
+        }
+        tts.blocks = Speech.blocks(tts.doc);
+      }
+      return tts.blocks.length > 0;
+    };
+    // where to start: the selection, else the top of the page
+    const startAt = (node, offset = 0) => {
+      const bi = tts.blocks.findIndex((b) => b.contains(node) || !!(node.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+      tts.bi = Math.max(0, bi);
+      tts.sents = tts.blocks.length ? Speech.sentences(tts.blocks[tts.bi]) : [];
+      tts.si = 0;
+      if (tts.blocks[tts.bi] && tts.blocks[tts.bi].contains(node)) {
+        // the sentence the start falls in
+        const probe = node.ownerDocument.createRange();
+        probe.setStart(node, offset);
+        const k = tts.sents.findIndex((x) => x.range().compareBoundaryPoints(Range.END_TO_START, probe) > 0 || x.range().comparePoint(node, offset) === 0);
+        if (k > 0) tts.si = k;
+      }
+    };
+    const keepAwake = async (on) => {
+      try {
+        if (on && !tts.lock && navigator.wakeLock) tts.lock = await navigator.wakeLock.request('screen');
+        if (!on && tts.lock) {
+          await tts.lock.release();
+          tts.lock = null;
+        }
+      } catch {}
+    };
+    async function ttsLoop() {
+      const run = ++tts.run;
+      tts.playing = true;
+      ttsPlay.textContent = '⏸';
+      ttsPlay.setAttribute('aria-label', 'Pause');
+      keepAwake(true);
+      while (tts.run === run) {
+        if (tts.si >= tts.sents.length) {
+          tts.bi++;
+          tts.si = 0;
+          if (tts.bi >= tts.blocks.length) {
+            stopTts('Finished reading aloud');
+            return;
+          }
+          tts.sents = Speech.sentences(tts.blocks[tts.bi]);
+          continue;
+        }
+        const s = tts.sents[tts.si];
+        const range = s.range();
+        showSentence(range);
+        await follow(range);
+        if (tts.run !== run) return;
+        const ok = await Speech.say(s.text, { rate: +ttsRate.value, voice: ttsVoice.value });
+        if (tts.run !== run) return;
+        if (ok) tts.si++;
+      }
+    }
+    const pauseTts = () => {
+      tts.run++;
+      tts.playing = false;
+      Speech.stop();
+      ttsPlay.textContent = '▶';
+      ttsPlay.setAttribute('aria-label', 'Play');
+      keepAwake(false);
+    };
+    function stopTts(msg) {
+      pauseTts();
+      tts.on = false;
+      ttsBar.hidden = true;
+      clearSentence();
+      if (msg) toast(msg);
+    }
+    async function startTts(range) {
+      if (!loadBlocks()) return toast('Nothing to read on this page');
+      if (range) startAt(range.startContainer, range.startOffset);
+      else {
+        const c = rendition.getContents()[0];
+        const loc = rendition.currentLocation();
+        let r = null;
+        try {
+          r = loc && loc.start && c.range(loc.start.cfi);
+        } catch {}
+        if (r) startAt(r.startContainer, r.startOffset);
+        else startAt(tts.blocks[0]);
+      }
+      if (!tts.on) {
+        await Speech.voicesReady();
+        const vs = Speech.voices();
+        const want = await DB.setting('ttsVoice', '');
+        ttsVoice.innerHTML = '<option value="">Default voice</option>' + vs.map((v) => `<option value="${esc(v.name)}"${v.name === want ? ' selected' : ''}>${esc(v.name.replace(/^(Google|Microsoft)\s+/, ''))} (${esc(v.lang)})</option>`).join('');
+        ttsRate.value = String(await DB.setting('ttsRate', 1));
+        if (!ttsRate.value) ttsRate.value = '1';
+      }
+      tts.on = true;
+      ttsBar.hidden = false;
+      Speech.stop();
+      ttsLoop();
+    }
+    $('#r-tts')?.addEventListener('click', () => (tts.on ? stopTts() : startTts()));
+    $('#hl-speak')?.addEventListener('click', () => {
+      const sel = selection();
+      const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+      clearSelection();
+      hideBar();
+      startTts(range);
+    });
+    ttsPlay.addEventListener('click', () => (tts.playing ? pauseTts() : ttsLoop()));
+    const stepTts = (d) => {
+      Speech.stop();
+      tts.si += d;
+      while (tts.si < 0 && tts.bi > 0) {
+        tts.bi--;
+        tts.sents = Speech.sentences(tts.blocks[tts.bi]);
+        tts.si += tts.sents.length;
+      }
+      tts.si = Math.max(0, tts.si);
+      ttsLoop();
+    };
+    $('#tts-skip').addEventListener('click', () => stepTts(1));
+    $('#tts-back').addEventListener('click', () => stepTts(-1));
+    $('#tts-stop').addEventListener('click', () => stopTts());
+    // a new speed or voice applies from the sentence being read
+    const ttsSettingChanged = async () => {
+      await DB.setSetting('ttsRate', +ttsRate.value);
+      await DB.setSetting('ttsVoice', ttsVoice.value);
+      if (tts.playing) {
+        Speech.stop();
+        ttsLoop();
+      }
+    };
+    ttsRate.addEventListener('change', ttsSettingChanged);
+    ttsVoice.addEventListener('change', ttsSettingChanged);
+
+    // --- define ---
+    $('#hl-define').addEventListener('click', async () => {
+      // (the selection as it is now: the reader's note of it can lag a moment)
+      const now = selection();
+      const nowText = now && !now.isCollapsed ? now.toString().replace(/\s+/g, ' ').trim() : '';
+      if (nowText && pending && nowText !== pending.text) {
+        try {
+          pending = { cfiRange: rendition.getContents()[0].cfiFromRange(now.getRangeAt(0)), text: nowText };
+        } catch {}
+      }
+      const keep = pending;
+      if (!keep) return;
+      const word = Define.term(keep.text);
+      if (!word || word.split(' ').length > 5) return toast('Select a word or a short term to define it');
+      const dlg = $('#dialog');
+      dlg.innerHTML = `<form method="dialog" class="dlg define"><h3>${esc(word)}</h3><p class="muted small" id="def-body">Looking up…</p>
+        <div class="row end wrap" id="def-actions"><button value="ok" class="btn primary">Close</button></div></form>`;
+      dlg.onclose = null;
+      dlg.showModal();
+      let r = null;
+      try {
+        r = await Define.lookup(word);
+      } catch (err) {
+        $('#def-body', dlg).textContent = `Couldn’t look it up: ${err.message}`;
+        return;
+      }
+      const body = $('#def-body', dlg);
+      body.classList.remove('muted', 'small');
+      if (!r) body.innerHTML = '<span class="muted">No definition found.</span>';
+      else if (r.kind === 'dict') {
+        $('h3', dlg).innerHTML = `${esc(r.word)} ${r.phonetic ? `<small class="muted">${esc(r.phonetic)}</small>` : ''}${r.audio ? ' <button type="button" class="r-btn" id="def-say" aria-label="Pronounce">🔈</button>' : ''}`;
+        body.innerHTML =
+          r.meanings
+            .slice(0, 4)
+            .map((m) => `<p class="def-pos"><i>${esc(m.pos)}</i></p><ol class="def-list">${m.defs.slice(0, 3).map((d) => `<li>${esc(d.d)}${d.ex ? `<br><span class="muted small">“${esc(d.ex)}”</span>` : ''}</li>`).join('')}</ol>${m.synonyms.length ? `<p class="muted small">Similar: ${esc(m.synonyms.join(', '))}</p>` : ''}`)
+            .join('') + `<p class="muted small">From <a href="${esc(r.source)}" target="_blank" rel="noopener">Wiktionary</a></p>`;
+        $('#def-say', dlg)?.addEventListener('click', () => new Audio(r.audio).play().catch(() => {}));
+      } else {
+        body.innerHTML = `<p><b>${esc(r.title)}</b></p><p>${esc(r.extract)}</p><p class="muted small">From <a href="${esc(r.url)}" target="_blank" rel="noopener">Wikipedia</a></p>`;
+      }
+      $('#def-actions', dlg).innerHTML = `<button value="ask" class="btn">Ask Claude</button>${r ? '<button value="save" class="btn">Highlight with definition</button>' : ''}<button value="ok" class="btn primary">Close</button>`;
+      dlg.onclose = async () => {
+        if (dlg.returnValue === 'save' && r) {
+          pending = keep;
+          await addHighlight(Define.brief(r));
+        } else if (dlg.returnValue === 'ask') {
+          clearSelection();
+          hideBar();
+          tocPanel.hidden = concernsPanel.hidden = true;
+          askPanel.hidden = false;
+          ask.quote(keep.text);
+        }
+      };
+    });
+
     const resize = async (delta) => {
       fontSize = Math.max(70, Math.min(200, fontSize + delta));
       await go(() => rendition.themes.fontSize(fontSize + '%'));
@@ -2346,6 +2582,7 @@
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('pagehide', commit);
     teardown = async () => {
+      if (tts.on) stopTts();
       if (strip()) strip().removeEventListener('scroll', onStripScroll);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('visibilitychange', onHide);

@@ -31,6 +31,11 @@ Everything below is optional.
 - **Built-in EPUB reader:** paginated, with contents, text size, and a position slider. It resumes where you left
   off, and reading moves the paper's progress forward automatically. Citations, figures, tables and sections are
   links: a citation shows its reference in a pop-up, other links jump there with a **↩ Back** button.
+- **Read aloud** (🔊 in the reader): reads from where you are, sentence by sentence, with the sentence highlighted and
+  pages turning as it goes. It skips citation markers, figures and the reference list. Speed and voice are adjustable
+  (the voices are your phone's own text-to-speech), and **🔊 From here** on a selection starts there.
+- **Define:** select a word in the reader and tap **Define** for its dictionary entry (Wiktionary), or a Wikipedia
+  summary for terms and names. **Highlight with definition** keeps it as a highlight with the definition as its note.
 - **Reading progress:** tracked per paper by page (or percent if the page count is unknown), with a dated
   reading log. Reaching the end offers a **Mark as read** button; a paper is only finished when you say so.
 - **Catalogue:** collections, tags (rename or merge), search across title, authors, notes and abstract, plus filters and sorting.

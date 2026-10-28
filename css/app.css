@@ -395,3 +395,17 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .badge.epub { background: #e3f1e7; color: #2f6b45; font-weight: 600; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .badge.epub { background: #1d3325; color: #8fd3a6; } }
 :root[data-theme='dark'] .badge.epub { background: #1d3325; color: #8fd3a6; }
+
+/* selection menu: wraps when there are more actions than fit */
+.r-selbar { flex-wrap: wrap; border-radius: 18px; row-gap: 6px; }
+/* read aloud */
+.r-ttsbar { position: absolute; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 56px); z-index: 5; display: flex; gap: 6px; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 4px 8px; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
+.r-ttsbar select { min-width: 0; max-width: 34%; padding: 4px 6px; font-size: .85rem; }
+.r-ttsbar #tts-rate { max-width: 5em; }
+.r-selbar:not([hidden]) ~ .r-ttsbar { display: none; }
+/* define */
+.dlg.define h3 small { font-weight: 400; margin-left: 4px; }
+.def-pos { margin: .6em 0 .2em; }
+.def-list { margin: 0 0 .4em; padding-left: 1.3em; }
+.def-list li { margin-bottom: .3em; }
+.dlg.define #def-body { max-height: 55vh; overflow: auto; }
