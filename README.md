@@ -56,6 +56,9 @@ Everything below is optional.
   to snowball: the cited paper is looked up from the reference and joins the trail (and you're back where you were
   reading). On a paper page, **＋ Add a paper found here** does the same; any paper's "found via" can be changed later.
   Each paper shows where it was found and what it led to; 🌳 Discovery trails (under 📁) shows the whole trees.
+- **Bundles:** group papers under a name, flat (no trail needed): **Select** in the Queue or the Library, tick papers,
+  tap **📦 Bundle**. A bundle shows as one collapsible block that moves as a whole in the queue; ⋯ renames or
+  unbundles it. A paper's bundle can also be set on its page.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.
 - **Queue:** drag to prioritise your want-to-read list; swipe a paper right to archive it (kept as Catalogued) or left to delete it, with Undo. Deleted papers wait 30 days in 🗑 Recently deleted (bottom of the Library), and with sync on it can also find papers in Google Drive’s history of the sync file. Papers found through another one are grouped (collapsed)
   under the paper their trail started from, so a whole trail moves as one; open a group to order the papers in it.

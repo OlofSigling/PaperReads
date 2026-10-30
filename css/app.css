@@ -421,3 +421,25 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .im-note { color: var(--text-2); }
 .im-note .danger { color: #c2412d; }
 .im-row input[type='checkbox'] { flex: none; width: 20px; height: 20px; margin: 2px 0 0; }
+
+/* bundles */
+.q-head { align-items: flex-start; gap: 10px; }
+.q-head p { margin: 0; flex: 1; }
+.q-sel, .lib-sel { display: none; flex: none; width: 20px; height: 20px; margin: 0 4px 0 0; }
+.selecting .q-sel, .selecting .lib-sel { display: inline-block; }
+.selecting .handle { visibility: hidden; }
+.paper-row:has(> .lib-sel) { display: flex; align-items: center; gap: 6px; }
+.paper-row > .lib-sel { order: -1; }
+.q-bundle { flex-wrap: wrap; border-color: var(--accent); }
+.q-btoggle { background: none; border: 0; padding: 4px 0; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
+.q-bundle-list { position: relative; flex-basis: 100%; margin: 6px 0 2px; padding-left: 10px; border-left: 3px solid var(--accent-soft); }
+.q-bundle-list > .q-item { box-shadow: none; }
+.q-selbar { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 72px); }
+.lib-bundle { list-style: none; }
+.lib-bundle > details { border: 1px solid var(--accent); border-radius: 12px; background: var(--surface); padding: 6px 10px; }
+.lib-bundle summary { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 0; }
+.lib-bundle summary > button { margin-left: auto; }
+.lib-bundle summary::-webkit-details-marker { display: none; }
+.lib-bundle summary::before { content: '▸'; margin-right: 4px; color: var(--muted); }
+.lib-bundle details[open] > summary::before { content: '▾'; }
+.lib-bundle > details > .list { margin-top: 6px; }
