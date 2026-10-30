@@ -26,6 +26,68 @@ const Lookup = (() => {
     return hit[0] && hit[0].doi ? hit[0].doi : null;
   }
 
+  // A PubMed record's details straight from Europe PMC, for papers whose
+  // DOI isn't known (yet).
+  async function pubmedMeta(url) {
+    const m = /(?:pubmed\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov\/pubmed)\/(\d+)/i.exec(url) || /^PMID:?\s*(\d+)$/i.exec(url);
+    if (!m) return null;
+    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(`EXT_ID:${m[1]} AND SRC:MED`)}&format=json&resultType=core`);
+    if (!res.ok) return null;
+    const r = (((await res.json()).resultList || {}).result || [])[0];
+    if (!r) return null;
+    return {
+      title: (r.title || '').replace(/\.$/, ''),
+      authors: ((r.authorList && r.authorList.author) || []).map((a) => a.fullName || [a.firstName, a.lastName].filter(Boolean).join(' ')).filter(Boolean),
+      year: parseInt(r.pubYear, 10) || null,
+      venue: (r.journalInfo && r.journalInfo.journal && r.journalInfo.journal.title) || r.journalTitle || '',
+      abstract: stripTags(r.abstractText || ''),
+      doi: r.doi || null,
+      url: `https://pubmed.ncbi.nlm.nih.gov/${m[1]}/`,
+      totalPages: null,
+    };
+  }
+
+  // A pasted list of papers: links (PubMed, DOI, arXiv, publisher pages),
+  // bare DOIs, arXiv IDs, PMIDs. One paper per line when the list has lines
+  // (a line can give the same paper twice: "PubMed · arXiv version");
+  // otherwise one per identifier.
+  function listItems(text) {
+    const TOKEN = /https?:\/\/[^\s<>()\[\]]+|\b10\.\d{4,9}\/[^\s"<>()\[\]]+|\barXiv:\s*\d{4}\.\d{4,5}(?:v\d+)?|\bPMID:?\s*\d{5,9}/gi;
+    const tokensOf = (t) => [...t.matchAll(TOKEN)].map((m) => m[0].replace(/[.,;:]+$/, '')).filter((x) => !/^https?:\/\/(www\.)?(google|bing)\./i.test(x));
+    const lines = String(text || '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    const withIds = lines.filter((l) => tokensOf(l).length);
+    const label = (l) =>
+      ((/\[([^\]]+)\]\(/.exec(l) || [])[1] || l.replace(TOKEN, '').replace(/[*_\[\]()·|•-]+/g, ' '))
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+    if (withIds.length >= 2) return withIds.map((l) => ({ label: label(l), tokens: [...new Set(tokensOf(l))] }));
+    return [...new Set(tokensOf(text))].map((t) => ({ label: '', tokens: [t] }));
+  }
+
+  // Details for one listed paper. Its tokens may name it several ways: the
+  // journal DOI wins for the details, an arXiv ID is kept for the PDF.
+  async function resolveItem(item) {
+    let doi = null;
+    let arxiv = null;
+    let pubmed = null;
+    for (const t of item.tokens) {
+      const ids = parse(/^PMID/i.test(t) ? '' : t);
+      if (ids.arxiv) arxiv = arxiv || ids.arxiv;
+      if (ids.doi && !/^10\.48550\/arxiv/i.test(ids.doi)) doi = doi || ids.doi;
+      if (/pubmed|^PMID/i.test(t)) pubmed = pubmed || t;
+    }
+    if (!doi && pubmed) doi = await doiFromPubmed(pubmed).catch(() => null);
+    let meta = null;
+    if (doi) meta = await byDoi(doi).catch(() => null);
+    if (!meta && pubmed) meta = await pubmedMeta(pubmed).catch(() => null);
+    if (!meta && arxiv) meta = await byDoi(`10.48550/arXiv.${arxiv}`).catch(() => null);
+    if (!meta || !meta.title) return null;
+    if (arxiv) meta.arxiv = arxiv;
+    if (!meta.doi && doi) meta.doi = doi;
+    return meta;
+  }
+
   // Page titles from the share sheet often end in " | Site name". Dash
   // suffixes are ambiguous ("Title - a review"), so search() tries both.
   function cleanTitle(t) {
@@ -86,10 +148,11 @@ const Lookup = (() => {
       if (m) pages = Math.max(1, parseInt(m[2], 10) - parseInt(m[1], 10) + 1);
     }
     return {
-      title: (Array.isArray(csl.title) ? csl.title[0] : csl.title || '').replace(/\s+/g, ' ').trim(),
+      // (titles can carry markup: <i>, <sub>, MathML for "Q-learning")
+      title: stripTags(Array.isArray(csl.title) ? csl.title[0] : csl.title || '').replace(/\s+([-–’'),.:;])/g, '$1'),
       authors: (csl.author || []).map(authorName).filter(Boolean),
       year: parts[0] || null,
-      venue: container || csl.publisher || '',
+      venue: stripTags(container || csl.publisher || ''), // ("Health &amp; Care")
       abstract: stripTags(csl.abstract),
       doi: csl.DOI || null,
       url: csl.URL || null,
@@ -322,5 +385,5 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf };
+  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem };
 })();

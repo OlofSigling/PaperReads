@@ -16,6 +16,9 @@ Everything below is optional.
 ## Features
 
 - **Shelves:** Want to read, Reading, Read, or Catalogued (in your library but not on a reading shelf).
+- **Add a list:** paste a list of papers (PubMed, DOI, arXiv or journal links, DOIs, arXiv IDs, PMIDs; one per line,
+  other text is fine) on the Add screen, or tap **Paste a list…**. All are looked up at once, duplicates are flagged,
+  and they're added in order to a shelf of your choice, with PDFs (arXiv or free copies) and EPUBs fetched after.
 - **Share to the app:** share a link (arXiv, DOI, publisher page) or a PDF or EPUB file from any app's share sheet.
 - **Metadata lookup:** a DOI, an arXiv ID/link, or a title fills in title, authors, year, venue and abstract.
   Lookup uses doi.org and Crossref, and only needs internet when you add a paper.

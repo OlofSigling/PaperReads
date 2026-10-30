@@ -412,3 +412,12 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 /* free copies of a paper */
 .free-pdfs { margin-top: 8px; }
 .free-link { display: block; padding: 6px 0; }
+/* add a list */
+.im-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.im-row:last-child { border-bottom: 0; }
+.im-row input { margin-top: 4px; }
+.im-mark { width: 16px; text-align: center; color: var(--muted); }
+.im-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.im-note { color: var(--text-2); }
+.im-note .danger { color: #c2412d; }
+.im-row input[type='checkbox'] { flex: none; width: 20px; height: 20px; margin: 2px 0 0; }

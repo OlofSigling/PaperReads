@@ -636,6 +636,7 @@
     [/^#\/trails$/, viewTrails],
     [/^#\/trail\/(.+)$/, (q, id) => viewTrails(q, id)],
     [/^#\/add$/, (q) => viewEdit(null, q)],
+    [/^#\/import$/, viewImport],
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
     [/^#\/read\/(.+)$/, (q, id) => viewReader(id, q)],
@@ -1093,6 +1094,166 @@
     };
     ul.addEventListener('pointerup', done);
     ul.addEventListener('pointercancel', done);
+  }
+
+  // ---------- add many papers at once ----------
+  const IMPORT_KEY = 'paperreads.import';
+  async function viewImport() {
+    setTitle('Add a list');
+    let text = '';
+    try {
+      text = sessionStorage.getItem(IMPORT_KEY) || '';
+      sessionStorage.removeItem(IMPORT_KEY);
+    } catch {}
+    const cols = (await DB.all('collections')).sort((a, b) => a.name.localeCompare(b.name));
+    main.innerHTML = `<section class="card stack">
+        <p class="muted small">Paste a list of papers: links (PubMed, DOI, arXiv, journal pages), DOIs, arXiv IDs or PMIDs, one paper per line. Other text on the lines is fine.</p>
+        <textarea id="im-text" rows="8" placeholder="https://pubmed.ncbi.nlm.nih.gov/30864333/&#10;10.1016/j.artmed.2023.102742&#10;arXiv:2510.08350">${esc(text)}</textarea>
+        <div class="row wrap">
+          <label>Shelf <select id="im-status">${['want', 'none', 'reading', 'read'].map((st) => `<option value="${st}">${STATUS[st]}</option>`).join('')}</select></label>
+          ${cols.length ? `<label>Collection <select id="im-col"><option value="">None</option>${cols.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></label>` : ''}
+        </div>
+        <label class="check"><input type="checkbox" id="im-pdf" checked> Get the PDFs (arXiv, or a free copy when there is one)</label>
+        <label class="check"><input type="checkbox" id="im-epub" checked> Make EPUBs to read</label>
+        <div class="row"><button class="btn primary" id="im-find">Find papers</button></div>
+        <p class="muted small" id="im-status-line"></p>
+      </section>
+      <section class="card" id="im-results" hidden><ul class="list compact" id="im-list"></ul>
+        <div class="row"><button class="btn primary" id="im-add" disabled>Add</button></div></section>`;
+    let found = [];
+    const line = $('#im-status-line');
+    const list = $('#im-list');
+    const addBtn = $('#im-add');
+    const rowHtml = (x, i) => `<li class="im-row" data-i="${i}">
+        ${x.meta && !x.dupe ? `<input type="checkbox" class="im-pick" data-i="${i}" checked aria-label="Add this one">` : '<span class="im-mark">•</span>'}
+        <div class="im-main"><span class="pr-title">${esc(x.meta ? x.meta.title : x.item.label || x.item.tokens[0])}</span>
+        <span class="pr-meta">${x.meta ? esc([authorsShort(x.meta.authors), x.meta.year, x.meta.venue].filter(Boolean).join(' · ')) : ''}${x.meta && x.meta.arxiv ? ' · arXiv' : ''}</span>
+        <span class="small im-note">${x.state === 'looking' ? 'Looking up…' : x.dupe ? `Already in your library: <a href="#/paper/${x.dupe.id}">open</a>` : !x.meta ? '<span class="danger">Not found</span>' : x.note || ''}</span></div></li>`;
+    const draw = () => {
+      list.innerHTML = found.map(rowHtml).join('');
+      const n = $$('.im-pick:checked', list).length;
+      addBtn.textContent = `Add ${n} paper${n === 1 ? '' : 's'}`;
+      addBtn.disabled = !n || found.some((x) => x.state === 'looking');
+      $$('.im-pick', list).forEach((c) => c.addEventListener('change', () => {
+        found[+c.dataset.i].skip = !c.checked;
+        const k = $$('.im-pick:checked', list).length;
+        addBtn.textContent = `Add ${k} paper${k === 1 ? '' : 's'}`;
+        addBtn.disabled = !k;
+      }));
+      $$('.im-pick', list).forEach((c) => (c.checked = !found[+c.dataset.i].skip));
+    };
+    $('#im-find').addEventListener('click', async () => {
+      const items = Lookup.listItems($('#im-text').value);
+      if (!items.length) return (line.textContent = 'No links, DOIs or IDs found in that text.');
+      if (!navigator.onLine) return (line.textContent = 'You’re offline: looking papers up needs internet.');
+      const all = await papers();
+      const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      const dupeOf = (m) => all.find((x) => (m.doi && (x.doi || '').toLowerCase() === m.doi.toLowerCase()) || (m.arxiv && (x.arxiv || '').replace(/v\d+$/, '') === m.arxiv.replace(/v\d+$/, '')) || (squash(m.title).length > 10 && squash(x.title) === squash(m.title)));
+      found = items.map((item) => ({ item, state: 'looking' }));
+      $('#im-results').hidden = false;
+      draw();
+      line.textContent = `Looking up ${items.length} paper${items.length === 1 ? '' : 's'}…`;
+      // a few at a time
+      let next = 0;
+      const worker = async () => {
+        while (next < found.length) {
+          const x = found[next++];
+          x.meta = await Lookup.resolveItem(x.item).catch(() => null);
+          x.state = 'done';
+          if (x.meta) {
+            x.dupe = dupeOf(x.meta) || found.find((y) => y !== x && y.meta && !y.dupe && y.state === 'done' && found.indexOf(y) < found.indexOf(x) && squash(y.meta.title) === squash(x.meta.title)) || null;
+            if (x.dupe && !x.dupe.id) x.dupe = null, (x.skip = true), (x.note = 'Listed twice');
+          }
+          draw();
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      const ok = found.filter((x) => x.meta && !x.dupe).length;
+      const missing = found.filter((x) => !x.meta).length;
+      const dupes = found.filter((x) => x.dupe).length;
+      line.textContent = `Found ${ok} to add${dupes ? `, ${dupes} already in your library` : ''}${missing ? `, ${missing} not found` : ''}.`;
+      draw();
+    });
+    addBtn.addEventListener('click', async () => {
+      addBtn.disabled = true;
+      const status = $('#im-status').value;
+      const col = $('#im-col') ? $('#im-col').value : '';
+      const wantPdf = $('#im-pdf').checked;
+      const wantEpub = $('#im-epub').checked;
+      const added = [];
+      for (const x of found) {
+        if (!x.meta || x.dupe || x.skip) continue;
+        const m = x.meta;
+        const p = {
+          id: uid(),
+          title: m.title,
+          authors: m.authors || [],
+          year: m.year || null,
+          venue: m.venue || '',
+          doi: m.doi || null,
+          arxiv: m.arxiv || null,
+          url: m.url || null,
+          abstract: m.abstract || '',
+          totalPages: m.totalPages || null,
+          addedAt: now(),
+          currentPage: 0,
+          percent: 0,
+          rating: 0,
+          notes: '',
+          tags: [],
+          collections: col ? [col] : [],
+          status: 'none',
+        };
+        await savePaper(p);
+        await setStatus(p, status); // in list order, so the queue keeps it
+        x.paperId = p.id;
+        x.note = 'Added';
+        added.push(x);
+      }
+      draw();
+      $$('.im-pick', list).forEach((c) => (c.disabled = true));
+      addBtn.hidden = true;
+      toast(`Added ${added.length} paper${added.length === 1 ? '' : 's'}`);
+      if (!wantPdf && !wantEpub) return;
+      // files one paper at a time, in the background
+      let pdfs = 0;
+      let epubs = 0;
+      for (const [k, x] of added.entries()) {
+        line.textContent = `Getting files: paper ${k + 1} of ${added.length}…`;
+        const note = [];
+        if (wantPdf) {
+          try {
+            const p = await DB.get('papers', x.paperId);
+            if (p.arxiv) {
+              await attachPdf(p.id, await Lookup.fetchArxivPdf(p.arxiv));
+              note.push('PDF from arXiv');
+              pdfs++;
+            } else {
+              const r = await findFreePdf(p.id);
+              if (r.attached) note.push(`PDF from ${r.from}`), pdfs++;
+              else note.push(r.count ? 'free copy to download by hand (see the paper)' : 'no free PDF');
+            }
+          } catch {
+            note.push('no PDF');
+          }
+        }
+        if (wantEpub) {
+          try {
+            await makeEpubFor(x.paperId);
+            note.push('EPUB made');
+            epubs++;
+          } catch {
+            note.push('no EPUB');
+          }
+        }
+        x.note = `<a href="#/paper/${x.paperId}">Added</a> · ${note.join(' · ')}`;
+        if (location.hash === '#/import' && document.body.contains(list)) draw();
+      }
+      const msg = `Done: ${added.length} added, ${pdfs} PDF${pdfs === 1 ? '' : 's'}, ${epubs} EPUB${epubs === 1 ? '' : 's'}`;
+      if (document.body.contains(line)) line.textContent = msg + '.';
+      toast(msg);
+    });
+    if (text) $('#im-find').click();
   }
 
   // Free copies the app found but isn't allowed to download itself: one tap
@@ -1614,11 +1775,11 @@
 
     main.innerHTML = `
       ${existing ? '' : `<section class="card">
-        <form id="lookup" class="stack">
+        <form id="lookup" class="stack" data-list-aware="1">
           <label>DOI, arXiv ID, link or title
             <input name="q" placeholder="e.g. 10.1038/nature14539 or arxiv.org/abs/1706.03762" value="${esc(shared || '')}" autocomplete="off">
           </label>
-          <div class="row"><button class="btn primary">Look up</button><label class="btn">Open a file…<input type="file" id="add-file" accept=".pdf,.epub,.mhtml,.mht,.html,.htm,application/pdf,application/epub+zip,multipart/related,text/html" hidden></label></div>
+          <div class="row wrap"><button class="btn primary">Look up</button><a class="btn" href="#/import">Paste a list…</a><label class="btn">Open a file…<input type="file" id="add-file" accept=".pdf,.epub,.mhtml,.mht,.html,.htm,application/pdf,application/epub+zip,multipart/related,text/html" hidden></label></div>
           <p class="muted small" id="lookup-status">${inbox && inbox.file ? `Shared ${fileKind(inbox.file)}: ${esc(inbox.file.name)}. ${isWebFile(inbox.file) ? 'It will be made into an EPUB' : 'It will be attached'} when you save.` : 'Fills in the details automatically (needs internet).'}</p>
           <ul class="list compact" id="results"></ul>
         </form>
@@ -1888,9 +2049,28 @@
           status.textContent = `Lookup failed (${err.message}). Fill in by hand.`;
         }
       };
-      lookup.addEventListener('submit', (e) => {
+      // several papers pasted or shared at once: the list screen
+      const toList = async (t) => {
+        if (Lookup.listItems(t).length < 2) return false;
+        try {
+          sessionStorage.setItem(IMPORT_KEY, t);
+        } catch {}
+        if (inbox) await DB.del('inbox', inbox.id);
+        location.hash = '#/import';
+        return true;
+      };
+      lookup.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (await toList(lookup.q.value)) return;
         run();
+      });
+      // (a pasted list arrives in one go: catch it before a lookup starts)
+      lookup.q.addEventListener('paste', (e) => {
+        const t = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+        if (Lookup.listItems(t).length >= 2) {
+          e.preventDefault();
+          toList(t);
+        }
       });
       const sharedPdf = inbox && inbox.file && fileKind(inbox.file) === 'PDF' ? inbox.file : null;
       const sharedPage = inbox && inbox.file && isWebFile(inbox.file) ? inbox.file : null;
@@ -1904,6 +2084,7 @@
           }
           return;
         }
+        if (shared && !(inbox && inbox.file) && (await toList([q.url, q.text, inbox && inbox.url, inbox && inbox.text].filter(Boolean).join('\n')))) return;
         if (shared) await run();
         // A shared PDF file: if the link (if any) didn't identify it, read the PDF itself.
         if (sharedPdf && !form.doi.value && !form.arxiv.value) {
