@@ -409,3 +409,6 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .def-list { margin: 0 0 .4em; padding-left: 1.3em; }
 .def-list li { margin-bottom: .3em; }
 .dlg.define #def-body { max-height: 55vh; overflow: auto; }
+/* free copies of a paper */
+.free-pdfs { margin-top: 8px; }
+.free-link { display: block; padding: 6px 0; }

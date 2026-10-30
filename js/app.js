@@ -1095,6 +1095,36 @@
     ul.addEventListener('pointercancel', done);
   }
 
+  // Free copies the app found but isn't allowed to download itself: one tap
+  // opens the PDF in the browser; downloading it and sharing it back to
+  // PaperReads puts it on the paper.
+  function freeLinks(p) {
+    if (!p.freePdfs || !p.freePdfs.length) return p.freeChecked ? '<p class="muted small" id="free-none">No free copy found. If you have access through a library or university, open the paper there, download the PDF, then share it to PaperReads.</p>' : '';
+    return `<div class="free-pdfs"><p class="small"><b>Free copies:</b> the sites don’t let the app download them, so tap one, download the PDF in your browser, then share it to PaperReads (or tap Attach PDF). It goes onto this paper.</p>
+      <ul class="list compact">${p.freePdfs
+        .slice(0, 4)
+        .map((c) => `<li><a href="${esc(c.url)}" target="_blank" rel="noopener" class="free-link">📄 ${esc(c.source)}${c.version ? ` <span class="muted small">· ${esc(c.version)}</span>` : ''} ↗</a></li>`)
+        .join('')}</ul></div>`;
+  }
+  // Look for a free copy: download it if allowed, else remember the links.
+  async function findFreePdf(id) {
+    const p = await DB.get('papers', id);
+    const r = await Lookup.fetchFreePdf(p);
+    const fresh = await DB.get('papers', id);
+    if (r.file) {
+      await attachPdf(id, r.file);
+      const done = await DB.get('papers', id);
+      done.freePdfs = [];
+      done.freeChecked = now();
+      await savePaper(done);
+      return { attached: true, from: r.from };
+    }
+    fresh.freePdfs = r.pdfs;
+    fresh.freeChecked = now();
+    await savePaper(fresh);
+    return { attached: false, count: r.pdfs.length };
+  }
+
   async function viewPaper(id) {
     const p = await DB.get('papers', id);
     if (!p) {
@@ -1154,7 +1184,9 @@
                   <label class="btn">Attach PDF<input type="file" accept="application/pdf" id="pdf-file" hidden></label>
                   ${p.arxiv ? '<button class="btn" id="pdf-arxiv">Download from arXiv</button>' : ''}
                   ${p.pdfUrl ? `<button class="btn" id="pdf-link">Download from the link</button>` : ''}
+                  ${p.doi || (p.title && p.title.length > 15) ? '<button class="btn" id="pdf-free">Find a free PDF</button>' : ''}
                 </div>
+                ${freeLinks(p)}
                 ${p.pdfUrl ? `<p class="muted small">This paper was added from <a href="${esc(p.pdfUrl)}" target="_blank" rel="noopener">a PDF link</a>. If the site won’t let the app download it, open the link, download the PDF in your browser, then tap Attach PDF and pick it from Downloads.</p>` : ''}`
             : epub
               ? `<div class="epub-info">${epub.cover ? '<img class="cover-thumb" id="cover-thumb" alt="">' : ''}<div>
@@ -1415,6 +1447,18 @@
         }
         rerender();
       });
+    $('#pdf-free')?.addEventListener('click', async (e) => {
+      const btn = e.target;
+      btn.disabled = true;
+      btn.textContent = 'Looking…';
+      try {
+        const r = await findFreePdf(id);
+        toast(r.attached ? `PDF saved (from ${r.from})` : r.count ? `Found ${r.count} free cop${r.count > 1 ? 'ies' : 'y'}: open one to download it` : 'No free copy found');
+      } catch (err) {
+        toast(navigator.onLine ? err.message : 'You are offline');
+      }
+      rerender();
+    });
     const pdfLinkBtn = $('#pdf-link');
     if (pdfLinkBtn)
       pdfLinkBtn.addEventListener('click', async () => {
@@ -1596,7 +1640,7 @@
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
-        ${!(inbox && inbox.file) ? `<label class="check" id="getpdf-row"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv or a PDF link)</label>` : ''}
+        ${!(inbox && inbox.file) ? `<label class="check" id="getpdf-row"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv, a PDF link, or a free copy if there is one)</label>` : ''}
         ${!(inbox && inbox.file && isEpub(inbox.file)) ? `<label class="check"><input type="checkbox" name="getepub" checked> Make an EPUB for reading in the app</label>` : ''}`}
         <div class="row end"><a class="btn" href="${existing ? `#/paper/${p.id}` : via && q.back === 'read' ? `#/read/${via.id}` : '#/'}">Cancel</a><button class="btn primary">${existing ? 'Save' : 'Add paper'}</button></div>
       </form>`;
@@ -1621,6 +1665,7 @@
       if (meta.authors && meta.authors.length) form.authors.value = meta.authors.join('\n');
       checkDupe();
     };
+    let autoAttached = false; // the details can be checked more than once: attach once
     const checkDupe = async () => {
       const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
       const doi = form.doi.value.trim().toLowerCase();
@@ -1653,6 +1698,11 @@
       });
       const btn = $('#dupe-attach');
       if (!btn) return;
+      // a shared PDF for a paper that has none yet: no question to ask
+      if (kind === 'PDF' && !dupe.hasPdf && inbox && inbox.file && !autoAttached) {
+        autoAttached = true;
+        setTimeout(() => btn.click(), 0);
+      }
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         if (kind === 'web page') {
@@ -1917,6 +1967,15 @@
             if (location.hash === `#/paper/${p.id}`) route();
           })
           .catch((err) => toast(pdfLink ? `Couldn’t download the PDF: ${err.message}. Download it in your browser and attach it.` : 'Could not download the PDF'));
+      } else if (f.getpdf && f.getpdf.checked && (p.doi || p.title) && navigator.onLine) {
+        // no link to a PDF: look for a free copy
+        pdfJob = findFreePdf(p.id)
+          .then((r) => {
+            if (r.attached) toast(`PDF saved offline (free copy from ${r.from})`);
+            else if (r.count) toast('Found a free copy the app can’t download itself: see the paper page');
+            if (location.hash === `#/paper/${p.id}`) route();
+          })
+          .catch(() => {});
       }
       const wantsEpub = f.getepub && f.getepub.checked;
       if (pendingPage && (wantsEpub || !f.getepub)) {

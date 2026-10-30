@@ -20,6 +20,10 @@ Everything below is optional.
 - **Metadata lookup:** a DOI, an arXiv ID/link, or a title fills in title, authors, year, venue and abstract.
   Lookup uses doi.org and Crossref, and only needs internet when you add a paper.
 - **Offline PDFs:** arXiv PDFs download automatically, or you can attach any PDF. The page count is read from the PDF.
+  For other papers the app looks for a free, legal copy (open access, preprints, author manuscripts in university
+  repositories, via OpenAlex) and downloads it when the site allows. Most sites don't let apps download, so then the
+  paper page links straight to the free PDF: download it in your browser and share it to PaperReads, and it goes
+  onto the paper by itself.
 - **EPUBs, with a PDF / EPUB switch per paper:** the app makes an EPUB on the phone, using a port of
   `epubify.py` (same generated covers, same PDF layout analysis). Sources, best first:
   arXiv's HTML version, Europe PMC full text (open-access PubMed Central papers; text and captions, no

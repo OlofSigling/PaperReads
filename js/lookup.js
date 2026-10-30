@@ -238,6 +238,67 @@ const Lookup = (() => {
   }
 
   // arXiv serves PDFs with permissive CORS, so we can keep a copy offline.
+  // Free, legal copies of a paper (open access, preprints, author
+  // manuscripts in university repositories), from OpenAlex. The publisher's
+  // own copy comes first, then the accepted manuscript, then preprints.
+  async function freeCopies({ doi, title }) {
+    let w = null;
+    try {
+      if (doi) {
+        const res = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`);
+        if (res.ok) w = await res.json();
+      }
+      if (!w && title && title.length > 15) {
+        const res = await fetch(`https://api.openalex.org/works?search=${encodeURIComponent(title)}&per-page=3`);
+        const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        if (res.ok) w = ((await res.json()).results || []).find((x) => squash(x.title) === squash(title)) || null;
+      }
+    } catch {
+      return null; // offline, or OpenAlex unreachable
+    }
+    if (!w) return { pdfs: [], arxiv: null };
+    const rank = { publishedVersion: 0, acceptedVersion: 1, submittedVersion: 2 };
+    const label = { publishedVersion: 'published version', acceptedVersion: 'author’s accepted manuscript', submittedVersion: 'preprint' };
+    let arxiv = null;
+    const seen = new Set();
+    const pdfs = [];
+    for (const l of w.locations || []) {
+      const m = /arxiv\.org\/(?:abs|pdf)\/([^?#\s]+?)(?:\.pdf)?$/i.exec(l.landing_page_url || l.pdf_url || '');
+      if (m && !arxiv) arxiv = m[1].replace(/v\d+$/, '');
+      const url = l.pdf_url;
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      let host = '';
+      try {
+        host = new URL(url).hostname.replace(/^www\./, '');
+      } catch {
+        continue;
+      }
+      pdfs.push({ url, host, source: (l.source && l.source.display_name) || host, version: label[l.version] || '', rank: rank[l.version] ?? 3 });
+    }
+    pdfs.sort((a, b) => a.rank - b.rank);
+    return { pdfs: pdfs.map(({ rank, ...x }) => x), arxiv };
+  }
+
+  // Download the first free copy the app is allowed to fetch. Most hosts
+  // don't let web apps download (or answer apps with a robot check), so this
+  // often finds copies it can only link to.
+  async function fetchFreePdf(p) {
+    const found = await freeCopies(p);
+    if (!found) throw new Error('couldn’t reach OpenAlex (offline?)');
+    if (found.arxiv && !p.arxiv) {
+      try {
+        return { file: await fetchArxivPdf(found.arxiv), from: 'arXiv', ...found };
+      } catch {}
+    }
+    for (const c of found.pdfs) {
+      try {
+        return { file: await fetchPdf(c.url), from: c.source, ...found };
+      } catch {}
+    }
+    return { file: null, ...found };
+  }
+
   async function fetchArxivPdf(arxivId) {
     const res = await fetch(`https://arxiv.org/pdf/${arxivId}`);
     if (!res.ok) throw new Error(`PDF download failed (${res.status})`);
@@ -261,5 +322,5 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages };
+  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf };
 })();
