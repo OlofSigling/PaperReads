@@ -84,6 +84,16 @@
     return `<div class="bar" role="progressbar" aria-valuenow="${Math.round(pct(p) * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${(pct(p) * 100).toFixed(1)}%"></span></div>`;
   }
 
+  // Highlight types, each its own colour. Concerns (orange) are the fourth,
+  // kept in the paper's concern list.
+  const HL_KINDS = {
+    key: { label: 'Key point', color: '#f5c518', opacity: '0.38' },
+    spin: { label: 'Spin', color: '#ec4899', opacity: '0.28' },
+    delve: { label: 'Delve into', color: '#3b82f6', opacity: '0.26' },
+  };
+  const CONCERN_COLOR = '#ef4444';
+  const hlKind = (h) => (HL_KINDS[h.kind] ? h.kind : 'key');
+  const hlChip = (h) => `<span class="hl-chip" style="--hl:${HL_KINDS[hlKind(h)].color}">${HL_KINDS[hlKind(h)].label}</span>`;
   const EPUB_BADGE = '<span class="badge epub" title="Has an EPUB to read">📖 EPUB</span>';
   function paperRow(p, extra = '') {
     return `<li class="paper-row">
@@ -1674,16 +1684,17 @@
         </section>
 
         <section class="card">
-          <h3>Highlights</h3>
+          <div class="row between"><h3>Highlights</h3>${highlights.length ? `<div class="chips hl-filter">${['', ...Object.keys(HL_KINDS)].map((k) => `<button type="button" class="chip${k ? '' : ' on'}" data-hlf="${k}" ${k ? `style="--hl:${HL_KINDS[k].color}"` : ''}>${k ? HL_KINDS[k].label : 'All'} <small>${k ? highlights.filter((h) => hlKind(h) === k).length : highlights.length}</small></button>`).join('')}</div>` : ''}</div>
           <ul class="highlights">${highlights
             .sort((a, b) => (a.page || 0) - (b.page || 0))
-            .map((h) => `<li><blockquote>${esc(h.quote)}</blockquote>${h.page ? `<span class="muted small">${h.cfi ? '≈ ' : ''}p. ${h.page}</span>` : ''}${h.note ? `<p class="small">${esc(h.note)}</p>` : ''}<div class="row">${h.cfi && epub ? `<a class="btn small" href="#/read/${p.id}?cfi=${encodeURIComponent(h.cfi)}">Show in reader</a>` : ''}<button class="btn small danger-ghost" data-delh="${h.id}">Delete</button></div></li>`)
+            .map((h) => `<li data-kind="${hlKind(h)}" style="--hl:${HL_KINDS[hlKind(h)].color}">${hlChip(h)}<blockquote>${esc(h.quote)}</blockquote>${h.page ? `<span class="muted small">${h.cfi ? '≈ ' : ''}p. ${h.page}</span>` : ''}${h.note ? `<p class="small">${esc(h.note)}</p>` : ''}<div class="row">${h.cfi && epub ? `<a class="btn small" href="#/read/${p.id}?cfi=${encodeURIComponent(h.cfi)}">Show in reader</a>` : ''}<button class="btn small danger-ghost" data-delh="${h.id}">Delete</button></div></li>`)
             .join('') || '<li class="muted small">No highlights yet.</li>'}</ul>
           <details><summary>Add highlight</summary>
             <form id="hl-form" class="stack">
               <textarea name="quote" rows="3" placeholder="Quote" required></textarea>
               <input name="page" type="number" inputmode="numeric" placeholder="Page">
               <input name="note" placeholder="Your note (optional)">
+              <select name="kind" aria-label="Type">${Object.entries(HL_KINDS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('')}</select>
               <button class="btn primary">Save highlight</button>
             </form>
           </details>
@@ -1971,9 +1982,15 @@
     $('#hl-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = e.target;
-      await DB.put('highlights', { paperId: id, quote: f.quote.value.trim(), page: parseInt(f.page.value, 10) || null, note: f.note.value.trim(), createdAt: now() });
+      await DB.put('highlights', { paperId: id, quote: f.quote.value.trim(), page: parseInt(f.page.value, 10) || null, note: f.note.value.trim(), kind: f.kind.value, createdAt: now() });
       rerender();
     });
+    $$('[data-hlf]').forEach((b) =>
+      b.addEventListener('click', () => {
+        $$('[data-hlf]').forEach((x) => x.classList.toggle('on', x === b));
+        $$('.highlights > li[data-kind]').forEach((li) => (li.hidden = !!b.dataset.hlf && li.dataset.kind !== b.dataset.hlf));
+      })
+    );
     $$('[data-delh]').forEach((b) =>
       b.addEventListener('click', async () => {
         await DB.del('highlights', Number(b.dataset.delh));
@@ -2482,9 +2499,8 @@
       <button class="r-backchip" id="r-back" hidden>↩ Back</button>
       <button class="r-backchip r-syncchip" id="r-sync" hidden></button>
       <div class="r-selbar" id="r-selbar" hidden>
-        <button class="btn small primary" id="hl-add">Highlight</button>
-        <button class="btn small" id="hl-note">Highlight + note</button>
-        <button class="btn small" id="hl-concern">Concern</button>
+        ${Object.entries(HL_KINDS).map(([k, v]) => `<button class="btn small hl-kind" data-kind="${k}" style="--hl:${v.color}">${v.label}</button>`).join('')}
+        <button class="btn small hl-kind" id="hl-concern" style="--hl:${CONCERN_COLOR}">Concern</button>
         <button class="btn small" id="hl-ask">Ask</button>
         <button class="btn small" id="hl-define">Define</button>
         ${Speech.supported ? '<button class="btn small" id="hl-speak">🔊 From here</button>' : ''}
@@ -2639,7 +2655,7 @@
     });
 
     // --- highlights ---
-    const HL_STYLE = { fill: '#f5c518', 'fill-opacity': '0.35', 'mix-blend-mode': 'multiply' };
+    const hlStyle = (h) => ({ fill: HL_KINDS[hlKind(h)].color, 'fill-opacity': HL_KINDS[hlKind(h)].opacity, 'mix-blend-mode': 'multiply' });
     const selbar = $('#r-selbar');
     let pending = null;
     function hideBar() {
@@ -2714,7 +2730,7 @@
     }
     const drawHighlight = (h) => {
       try {
-        rendition.annotations.highlight(h.cfi, { id: h.id }, () => openHighlight(h.id), 'pr-hl', HL_STYLE);
+        rendition.annotations.highlight(h.cfi, { id: h.id }, () => openHighlight(h.id), 'pr-hl', hlStyle(h));
       } catch {} // e.g. a highlight made in an earlier version of this EPUB
     };
     const pageOf = (cfi) => {
@@ -2722,23 +2738,17 @@
       const f = locationsReady ? book.locations.percentageFromCfi(cfi) : lastPct;
       return Math.min(p.totalPages, Math.max(1, Math.round(f * p.totalPages)));
     };
-    const addHighlight = async (note = '') => {
+    const addHighlight = async (note = '', kind = 'key') => {
       if (!pending) return;
-      const h = { paperId: id, quote: pending.text, page: pageOf(pending.cfiRange), note, cfi: pending.cfiRange, createdAt: now() };
+      const h = { paperId: id, quote: pending.text, page: pageOf(pending.cfiRange), note, kind, cfi: pending.cfiRange, createdAt: now() };
       h.id = await DB.put('highlights', h);
       drawHighlight(h);
       clearSelection();
       hideBar();
-      toast('Highlighted');
+      toast(`Highlighted: ${HL_KINDS[kind].label}`, { label: 'Add note', run: () => openHighlight(h.id) });
       refreshPanel();
     };
-    $('#hl-add').addEventListener('click', () => addHighlight());
-    $('#hl-note').addEventListener('click', async () => {
-      const keep = pending;
-      const note = await askNote('Note for this highlight');
-      pending = keep;
-      if (note !== null) await addHighlight(note);
-    });
+    $$('#r-selbar [data-kind]').forEach((b) => b.addEventListener('click', () => addHighlight('', b.dataset.kind)));
     $('#hl-cancel').addEventListener('click', () => {
       clearSelection();
       hideBar();
@@ -2747,15 +2757,39 @@
       const h = await DB.get('highlights', hid);
       if (!h) return;
       const dlg = $('#dialog');
-      dlg.innerHTML = `<form method="dialog" class="dlg"><blockquote class="hl-quote">${esc(h.quote)}</blockquote>
+      let kind = hlKind(h);
+      dlg.innerHTML = `<form method="dialog" class="dlg"><blockquote class="hl-quote" style="--hl:${HL_KINDS[kind].color}">${esc(h.quote)}</blockquote>
+        <div class="seg hl-seg" role="group" aria-label="Type">${Object.entries(HL_KINDS).map(([k, v]) => `<button type="button" data-k="${k}" style="--hl:${v.color}" class="${k === kind ? 'on' : ''}">${v.label}</button>`).join('')}</div>
         <textarea name="note" rows="3" placeholder="Add a note">${esc(h.note || '')}</textarea>
-        <div class="row between"><button value="delete" class="btn danger-ghost">Delete</button>
+        <div class="row between wrap"><span class="row"><button value="delete" class="btn danger-ghost">Delete</button><button value="concern" class="btn" style="--hl:${CONCERN_COLOR}">Make it a concern</button></span>
         <span class="row"><button value="cancel" class="btn" formnovalidate>Close</button><button value="ok" class="btn primary">Save</button></span></div></form>`;
+      $$('[data-k]', dlg).forEach((b) =>
+        b.addEventListener('click', () => {
+          kind = b.dataset.k;
+          $$('[data-k]', dlg).forEach((x) => x.classList.toggle('on', x === b));
+          $('.hl-quote', dlg).style.setProperty('--hl', HL_KINDS[kind].color);
+        })
+      );
       dlg.onclose = async () => {
         if (dlg.returnValue === 'ok') {
+          const was = hlKind(h);
           h.note = $('[name=note]', dlg).value.trim();
+          h.kind = kind;
           await DB.put('highlights', h);
-          toast('Note saved');
+          if (was !== kind) {
+            rendition.annotations.remove(h.cfi, 'highlight');
+            drawHighlight(h);
+            toast(`Now: ${HL_KINDS[kind].label}`);
+          } else toast('Saved');
+        } else if (dlg.returnValue === 'concern') {
+          // the passage moves to the concern list (orange), its note as the concern
+          const note = $('[name=note]', dlg).value.trim();
+          const text = note || (await askNote('What’s the concern?'));
+          if (text === null) return;
+          await DB.del('highlights', h.id);
+          rendition.annotations.remove(h.cfi, 'highlight');
+          await concerns.add({ text, quote: h.quote, cfi: h.cfi, page: h.page });
+          toast('Moved to concerns');
         } else if (dlg.returnValue === 'delete') {
           await DB.del('highlights', h.id);
           rendition.annotations.remove(h.cfi, 'highlight');
@@ -2975,11 +3009,11 @@
       } else {
         body.innerHTML = `<p><b>${esc(r.title)}</b></p><p>${esc(r.extract)}</p><p class="muted small">From <a href="${esc(r.url)}" target="_blank" rel="noopener">Wikipedia</a></p>`;
       }
-      $('#def-actions', dlg).innerHTML = `<button value="ask" class="btn">Ask Claude</button>${r ? '<button value="save" class="btn">Highlight with definition</button>' : ''}<button value="ok" class="btn primary">Close</button>`;
+      $('#def-actions', dlg).innerHTML = `<button value="ask" class="btn">Ask Claude</button>${r ? '<button value="save" class="btn">Highlight (Delve into) with definition</button>' : ''}<button value="ok" class="btn primary">Close</button>`;
       dlg.onclose = async () => {
         if (dlg.returnValue === 'save' && r) {
           pending = keep;
-          await addHighlight(Define.brief(r));
+          await addHighlight(Define.brief(r), 'delve');
         } else if (dlg.returnValue === 'ask') {
           clearSelection();
           hideBar();
@@ -3007,7 +3041,7 @@
     };
     $('#r-toc').addEventListener('click', () => showPanel(tocPanel));
     // Concerns: same list as the paper page, in a side panel
-    const CONCERN_STYLE = { fill: '#f97316', 'fill-opacity': '0.22', 'mix-blend-mode': 'multiply' };
+    const CONCERN_STYLE = { fill: CONCERN_COLOR, 'fill-opacity': '0.24', 'mix-blend-mode': 'multiply' };
     const drawConcern = (c) => {
       try {
         rendition.annotations.highlight(c.cfi, { id: c.id }, () => {
@@ -3065,7 +3099,7 @@
         '<h4>Contents</h4>' +
         (tocHtml || '<p class="muted small">No contents</p>') +
         `<h4>Highlights (${hls.length})</h4>` +
-        (hls.map((h) => `<a href="#" data-href="${esc(h.cfi)}" class="hl-item"><q>${esc(h.quote.length > 140 ? h.quote.slice(0, 140) + '…' : h.quote)}</q>${h.note ? `<small>${esc(h.note)}</small>` : ''}</a>`).join('') ||
+        (hls.map((h) => `<a href="#" data-href="${esc(h.cfi)}" class="hl-item" style="--hl:${HL_KINDS[hlKind(h)].color}">${hlChip(h)}<q>${esc(h.quote.length > 140 ? h.quote.slice(0, 140) + '…' : h.quote)}</q>${h.note ? `<small>${esc(h.note)}</small>` : ''}</a>`).join('') ||
           '<p class="muted small">Select text to highlight it.</p>');
       $$('[data-href]', tocPanel).forEach((a) =>
         a.addEventListener('click', (e) => {
