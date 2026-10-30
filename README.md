@@ -26,7 +26,9 @@ Everything below is optional.
   For other papers the app looks for a free, legal copy (open access, preprints, author manuscripts in university
   repositories, via OpenAlex) and downloads it when the site allows. Most sites don't let apps download, so then the
   paper page links straight to the free PDF: download it in your browser and share it to PaperReads, and it goes
-  onto the paper by itself.
+  onto the paper by itself. On a laptop, the **PaperReads helper** browser extension (⚙ Settings → Laptop helper) downloads
+  those for you, through your browser and with your own access, including paywalled papers when your network or
+  login has a licence.
 - **EPUBs, with a PDF / EPUB switch per paper:** the app makes an EPUB on the phone, using a port of
   `epubify.py` (same generated covers, same PDF layout analysis). Sources, best first:
   arXiv's HTML version, Europe PMC full text (open-access PubMed Central papers; text and captions, no

@@ -1345,7 +1345,7 @@
                   <label class="btn">Attach PDF<input type="file" accept="application/pdf" id="pdf-file" hidden></label>
                   ${p.arxiv ? '<button class="btn" id="pdf-arxiv">Download from arXiv</button>' : ''}
                   ${p.pdfUrl ? `<button class="btn" id="pdf-link">Download from the link</button>` : ''}
-                  ${p.doi || (p.title && p.title.length > 15) ? '<button class="btn" id="pdf-free">Find a free PDF</button>' : ''}
+                  ${p.doi || (p.title && p.title.length > 15) ? `<button class="btn" id="pdf-free">${Helper.available() ? 'Get the PDF' : 'Find a free PDF'}</button>` : ''}
                 </div>
                 ${freeLinks(p)}
                 ${p.pdfUrl ? `<p class="muted small">This paper was added from <a href="${esc(p.pdfUrl)}" target="_blank" rel="noopener">a PDF link</a>. If the site won’t let the app download it, open the link, download the PDF in your browser, then tap Attach PDF and pick it from Downloads.</p>` : ''}`
@@ -3274,6 +3274,21 @@
         <h3>Backup</h3>
         <p class="muted small">A .zip of everything, to keep somewhere safe. <a href="#/backup">Backup and restore →</a></p>
         <p class="muted small">Deleted something by mistake? <a href="#/trash">Recently deleted →</a></p>
+      </section>
+      <section class="card stack">
+        <h3>Laptop helper</h3>
+        <p class="muted small">Most journals and repositories don’t let web apps download their PDFs, so on a laptop a small browser extension can do it for PaperReads: it downloads through your browser, with your own access. That gets free copies the app can’t fetch itself, and paywalled papers when your network or login has access (on a hospital or university network, for example). It only works on the PaperReads site and only ever passes on PDFs.</p>
+        <p class="small" id="helper-state">${Helper.available() ? `✓ Installed (version ${esc(Helper.version)}).` : 'Not installed in this browser.'}</p>
+        <details class="small"><summary>Install it (Chrome or Edge, once, about 2 minutes)</summary>
+          <ol class="steps">
+            <li><a href="paperreads-helper.zip" download>Download the helper</a> and unzip it (double-click the .zip). Keep the folder somewhere it can stay, e.g. Documents.</li>
+            <li>Open <code>chrome://extensions</code> (in Edge: <code>edge://extensions</code>) by typing it in the address bar.</li>
+            <li>Turn on <b>Developer mode</b> (top right).</li>
+            <li>Click <b>Load unpacked</b> and pick the unzipped <b>paperreads-helper</b> folder.</li>
+            <li>Reload PaperReads. This card then says “Installed”.</li>
+          </ol>
+          <p class="muted">Chrome warns that it can “read and change data on all websites”: it needs that to download from any journal’s site. It only acts when PaperReads asks for a PDF. Phones’ Chrome doesn’t take extensions.</p>
+        </details>
       </section>
       <section class="card stack">
         <h3>App version</h3>

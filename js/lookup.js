@@ -242,12 +242,17 @@ const Lookup = (() => {
     try {
       res = await fetch(url);
     } catch {
+      // not allowed from a web page: the laptop helper can, if installed
+      if (typeof Helper !== 'undefined' && (await Helper.ready)) return Helper.pdf(url);
       throw new Error('the site doesn’t let apps download its PDFs');
     }
     if (!res.ok) throw new Error(`the site answered ${res.status}`);
     const blob = await res.blob();
     const head = new TextDecoder('latin1').decode(await blob.slice(0, 1024).arrayBuffer());
-    if (!head.includes('%PDF-')) throw new Error('the site sent a web page instead of the PDF');
+    if (!head.includes('%PDF-')) {
+      if (typeof Helper !== 'undefined' && (await Helper.ready)) return Helper.pdf(url);
+      throw new Error('the site sent a web page instead of the PDF');
+    }
     const name = decodeURIComponent((new URL(res.url || url).pathname.split('/').filter(Boolean).pop() || 'paper').replace(/\.pdf$/i, '')) + '.pdf';
     return new File([blob], name, { type: 'application/pdf' });
   }
@@ -357,6 +362,12 @@ const Lookup = (() => {
     for (const c of found.pdfs) {
       try {
         return { file: await fetchPdf(c.url), from: c.source, ...found };
+      } catch {}
+    }
+    // with the laptop helper: the publisher's own PDF, if your network or login has access
+    if (p.doi && typeof Helper !== 'undefined' && (await Helper.ready)) {
+      try {
+        return { file: await Helper.byDoi(p.doi), from: 'the publisher, through your browser', ...found };
       } catch {}
     }
     return { file: null, ...found };
