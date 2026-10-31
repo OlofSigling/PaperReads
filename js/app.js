@@ -2849,7 +2849,29 @@
       const item = target.closest('li, p, .ltx_bibitem') || target;
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
         <p class="ref-pop">${esc(item.textContent.replace(/\s+/g, ' ').trim())}</p>
-        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
+        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button type="button" class="btn" id="ref-web">Open on the web ↗</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
+      // the paper's own page: from a DOI or link in the reference, else a
+      // title search; failing that, a Google Scholar search for it
+      $('#ref-web', dlg).addEventListener('click', async () => {
+        const text = item.textContent.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '').replace(/(\p{Ll})- (\p{Ll})/gu, '$1$2');
+        const win = window.open('about:blank', '_blank'); // opened now, while it's a tap (else it's blocked as a popup)
+        dlg.close();
+        toast('Looking it up…');
+        let url = null;
+        try {
+          const ids = Lookup.parse(text);
+          if (ids.arxiv) url = `https://arxiv.org/abs/${ids.arxiv}`;
+          else if (ids.doi) url = `https://doi.org/${ids.doi}`;
+          else if (ids.url) url = ids.url;
+          else if (navigator.onLine) {
+            const hit = (await Lookup.search(text))[0];
+            if (hit && hit.confident) url = hit.doi ? `https://doi.org/${hit.doi}` : hit.arxiv ? `https://arxiv.org/abs/${hit.arxiv}` : hit.url;
+          }
+        } catch {}
+        if (!url) url = `https://scholar.google.com/scholar?q=${encodeURIComponent(text.slice(0, 300))}`;
+        if (win && !win.closed) win.location.href = url;
+        else window.open(url, '_blank', 'noopener');
+      });
       dlg.onclose = () => {
         // snowballing: add the cited paper, remembering it was found here
         if (dlg.returnValue === 'add') location.hash = `#/add?via=${id}&cites=1&back=read&text=${encodeURIComponent(item.textContent.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '').replace(/(\p{Ll})- (\p{Ll})/gu, '$1$2'))}`;

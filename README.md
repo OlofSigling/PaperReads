@@ -39,7 +39,8 @@ Everything below is optional.
   pick it with **Open a file…** on the Add screen. Saved pages also work for paywalled articles you're logged into.
 - **Built-in EPUB reader:** paginated, with contents, text size, and a position slider. It resumes where you left
   off, and reading moves the paper's progress forward automatically. Citations, figures, tables and sections are
-  links: a citation shows its reference in a pop-up, other links jump there with a **↩ Back** button.
+  links: a citation shows its reference in a pop-up (with **＋ Add to library** and **Open on the web**, which finds
+  the paper's own page), other links jump there with a **↩ Back** button.
 - **Read aloud** (🔊 in the reader): reads from where you are, sentence by sentence, with the sentence highlighted and
   pages turning as it goes. It skips citation markers, figures and the reference list. Speed and voice are adjustable
   (the voices are your phone's own text-to-speech), and **🔊 From here** on a selection starts there.

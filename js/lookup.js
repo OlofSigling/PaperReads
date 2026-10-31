@@ -275,9 +275,37 @@ const Lookup = (() => {
     });
   }
 
+  // The title inside a reference: after the authors (and an APA "(2019)."),
+  // before the venue. "Sutskever I, Vinyals O, Le QV. Sequence to sequence
+  // learning with neural networks. In Advances in …" → the middle part.
+  function refTitle(ref) {
+    let t = String(ref || '').replace(/\s+/g, ' ').replace(/^\s*\[?\d+[\].]?\s+/, '').trim();
+    const apa = /\((?:19|20)\d\d[a-z]?\)\.?\s+(.+)/.exec(t);
+    if (apa) t = apa[1];
+    const parts = t.split(/(?<=[\p{L}0-9)”"?!])[.?!]\s+(?=[A-Z0-9“"(])/u).map((x) => x.trim()).filter(Boolean);
+    // single initials ("Ba, J.") end a piece too early: glue them back on
+    const merged = [];
+    for (const x of parts) {
+      if (merged.length && /(^|[\s,])[A-Z]$/.test(merged.at(-1)) && /^[A-Z](?![\p{L}])/u.test(x)) merged[merged.length - 1] += '. ' + x;
+      else merged.push(x);
+    }
+    const venueish = (x) => /^(In|Proc(eedings)?|Advances in|arXiv|CoRR|Journal|J\.|pages?|pp\.|vol(ume)?\.?|doi|https?:|Available|Retrieved)\b/i.test(x) || /^\d/.test(x);
+    // references start with the authors (APA's were cut off with the year)
+    const rest = apa ? merged : merged.slice(1);
+    const pick = rest.find((x) => !venueish(x) && x.split(' ').length >= 2) || merged[0];
+    return (pick || t).replace(/[.,;:]+$/, '').slice(0, 300);
+  }
+
   // The other indexes together; the first exact title in this order wins.
   async function otherIndexes(query, norm, variants) {
-    const lists = await Promise.all([s2Search, openAlexSearch, europePmcSearch].map((f) => f(query, norm, variants).catch(() => [])));
+    // a reference: search by the title in it
+    const guess = query.length > 80 || /\b(19|20)\d\d\b/.test(query) ? refTitle(query) : query;
+    if (guess !== query) variants = new Set([...variants, norm(guess)]);
+    const lists = await Promise.all([s2Search, openAlexSearch, europePmcSearch].map((f) => f(guess, norm, variants).catch(() => [])));
+    // a whole reference ("Smith J, Lee K. Title of paper. In Venue, 2014.")
+    // contains the title rather than being it
+    const q = ` ${norm(query)} `;
+    for (const x of lists.flat()) if (!x.exact && norm(x.title).split(' ').length >= 4 && q.includes(` ${norm(x.title)} `)) x.exact = true;
     const exact = lists.map((l) => l.find((x) => x.exact)).filter(Boolean);
     if (exact.length) {
       // fill gaps from the others (a DOI or an arXiv ID one of them knows)
@@ -550,5 +578,5 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem };
+  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
 })();
