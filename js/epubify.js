@@ -2104,7 +2104,34 @@ const Epubify = (() => {
     });
   }
 
+  // LaTeX's \resizebox comes through arXiv's HTML as a box of fixed size
+  // (sized for the printed page) with the content scaled inside it. On a
+  // phone the box is too wide and too short, so the table spills over the
+  // text after it. Let the content take its natural size; CSS fits it.
+  function unboxScaled(root) {
+    for (const el of root.querySelectorAll('[style]')) {
+      const st = el.getAttribute('style');
+      if (!/(^|;)\s*(transform|width|height)\s*:/i.test(st) || !el.querySelector('table, img, svg')) continue;
+      if (!/ltx_transformed|ltx_inline-block/.test(el.className) && !/transform\s*:/i.test(st)) continue;
+      const kept = st
+        .split(';')
+        .filter((d) => d.trim() && !/^\s*(transform|width|height|vertical-align)\s*:/i.test(d))
+        .join(';');
+      if (kept) el.setAttribute('style', kept);
+      else el.removeAttribute('style');
+    }
+    // (a table can't sit inside an inline element in an EPUB: make those blocks)
+    for (const sp of [...root.querySelectorAll('span')].reverse()) {
+      if (!sp.querySelector('table')) continue;
+      const div = sp.ownerDocument.createElement('div');
+      for (const at of sp.attributes) div.setAttribute(at.name, at.value);
+      div.append(...sp.childNodes);
+      sp.replaceWith(div);
+    }
+  }
+
   function cleanFragment(root, title) {
+    unboxScaled(root);
     dropDuplicateHeading(root, title);
     sanitizeIds(root);
     fixDanglingFragments(root);
@@ -2959,7 +2986,8 @@ p.byline{font-style:italic;}
 img{max-width:100%;height:auto;}
 figure{margin:1em 0;text-align:center;}
 figcaption{font-size:.9em;text-align:left;}
-table{border-collapse:collapse;font-size:.85em;display:block;overflow-x:auto;}
+table{border-collapse:collapse;font-size:.85em;max-width:100%;}
+td,th{overflow-wrap:break-word;}
 td,th{border:1px solid #9995;padding:.2em .4em;}
 .equation,.ltx_equation{display:block;overflow-x:auto;}
 .ltx_tag_equation{float:right;}

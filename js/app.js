@@ -2660,7 +2660,12 @@
       body: { background: dark ? '#121211 !important' : '#fcfcfb !important', color: dark ? '#f0efec !important' : '#0b0b0b !important' },
       a: { color: dark ? '#6aa7f0 !important' : '#2a78d6 !important' },
       'img, svg': { 'max-width': '100% !important' },
-      'td, th': { 'border-color': '#8885 !important' },
+      'td, th': { 'border-color': '#8885 !important', 'overflow-wrap': 'break-word' },
+      // wide tables fit the page instead of running under the next text
+      // (also in EPUBs made before the converter unboxed LaTeX's resized tables)
+      table: { 'max-width': '100% !important', 'font-size': '0.82em' },
+      '.ltx_transformed_outer': { width: 'auto !important', height: 'auto !important', 'vertical-align': 'baseline !important', display: 'block !important' },
+      '.ltx_transformed_inner': { transform: 'none !important' },
     });
     rendition.themes.select('pr');
     let fontSize = await DB.setting('readerFontSize', 100);
