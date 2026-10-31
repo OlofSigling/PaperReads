@@ -107,13 +107,22 @@ Keep answers short unless asked for depth: lead with the answer, then the suppor
    * Ask a question. history is the stored conversation (paper.chat).
    * onText(delta) streams the answer. Returns the two turns to append.
    */
-  async function ask(p, history, question, { quote = '', onText = () => {}, signal } = {}) {
+  // A passage thread by default sends only an excerpt: the paper's details,
+  // its abstract and the text around the passage. Much cheaper than the
+  // whole paper; the thread can switch to the whole paper when needed.
+  function excerptBlock(p, quote, excerpt) {
+    const meta = [`Title: ${p.title}`, p.authors?.length ? `Authors: ${p.authors.join(', ')}` : '', p.year ? `Year: ${p.year}` : '', p.venue ? `Venue: ${p.venue}` : ''].filter(Boolean).join('\n');
+    const text = `<paper_excerpt>\n${meta}\n\n${p.abstract ? `Abstract: ${p.abstract}\n\n` : ''}The passage in its surroundings:\n${(excerpt || quote || '').slice(0, 12000)}\n</paper_excerpt>\n\n(Only this excerpt of the paper is provided, not the full text. If answering properly needs other parts of the paper, say so briefly so the reader can switch to the whole paper.)`;
+    return { kind: 'excerpt', block: { type: 'text', text } };
+  }
+
+  async function ask(p, history, question, { quote = '', excerpt = '', context = 'paper', onText = () => {}, signal } = {}) {
     const { Anthropic, api } = await client();
     const m = await model();
     const first = !history.length;
     const prompt = `${quote ? `About this passage:\n"${quote}"\n\n` : ''}${question}${first ? userNotes(p) : ''}`;
     const userTurn = { role: 'user', content: [{ type: 'text', text: prompt }], question, quote, ts: Date.now() };
-    const { block, kind } = await paperBlock(p);
+    const { block, kind } = context === 'passage' ? excerptBlock(p, quote, excerpt) : await paperBlock(p);
     const messages = [...history, userTurn].map((t, i) => ({
       role: t.role,
       // the paper rides in front of the first question, rebuilt each time

@@ -458,3 +458,12 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .hl-filter { gap: 4px; }
 .hl-filter .chip[style]::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--hl); margin-right: 4px; }
 .toast { z-index: 60; }
+
+/* chat threads on passages */
+.ask-anchor { margin: 8px 0; padding: 6px 10px; border-left: 3px dashed #6b7280; background: var(--surface-2); border-radius: 0 8px 8px 0; font-size: .9rem; }
+.ask-threads { margin: 6px 0 10px; }
+.ask-threads summary { cursor: pointer; font-weight: 600; font-size: .9rem; padding: 4px 0; }
+.ask-thread { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: 0; padding: 6px 0; font: inherit; color: var(--text); cursor: pointer; }
+.ask-thread q { font-size: .88rem; }
+.ask-scope { margin: 4px 0 8px; }
+.ask-ctx { margin: 0 0 8px; color: var(--text-2); }

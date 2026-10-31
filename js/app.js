@@ -487,32 +487,80 @@
   }
 
   const ASK_SUGGESTIONS = ['Summarise the main claims and evidence', 'What are the weak points?', 'Explain the methods simply', 'What should I check before believing this?'];
+  const PASSAGE_SUGGESTIONS = ['Explain this simply', 'Is this claim supported?', 'What does this mean for the results?'];
 
-  function askUI(root, paperId, { addConcern = null } = {}) {
-    let quote = '';
+  // Ask Claude. The general chat (p.chat) is about the whole paper; a question
+  // about a selected passage starts a thread anchored to it (p.threads), like
+  // a comment in a document: the passage is marked in the reader and opens
+  // its thread again.
+  function askUI(root, paperId, { addConcern = null, jump = null, onThreads = null } = {}) {
+    let view = null; // null: the general chat; else a thread id
+    let draft = null; // a new passage thread, saved with its first question
     let busy = false;
     let controller = null;
+    const short = (t, n = 200) => (t.length > n ? t.slice(0, n) + '…' : t);
+    const threadOf = (p) => (view ? (p.threads || []).find((t) => t.id === view) || (draft && draft.id === view ? draft : null) : null);
+    const chatOf = (p) => (view ? (threadOf(p) || {}).chat || [] : p.chat || []);
     const turnHtml = (t, i) =>
       t.role === 'user'
-        ? `<div class="turn u">${t.quote ? `<q>${esc(t.quote.length > 200 ? t.quote.slice(0, 200) + '…' : t.quote)}</q>` : ''}${esc(t.question)}</div>`
+        ? `<div class="turn u">${t.quote && !view ? `<q>${esc(short(t.quote))}</q>` : ''}${esc(t.question)}</div>`
         : `<div class="turn a">${md(t.text)}${t.notice ? `<p class="muted small">${esc(t.notice)}</p>` : ''}
             <div class="turn-actions"><button type="button" class="link small" data-tonote="${i}">→ Notes</button>${addConcern ? `<button type="button" class="link small" data-toconcern="${i}">→ Concern</button>` : ''}<span class="muted small" title="${esc(Ask.MODELS[t.model]?.label || t.model || '')}, from the paper’s ${esc(t.source || 'text')}">${money(t.cost || 0)}</span></div></div>`;
+    const costOf = (chat) => chat.reduce((sum, t) => sum + (t.cost || 0), 0);
+    // save one chat back where it belongs
+    async function saveChat(mutate) {
+      const fresh = await DB.get('papers', paperId);
+      if (!view) fresh.chat = mutate(fresh.chat || []);
+      else {
+        const threads = fresh.threads || [];
+        let t = threads.find((x) => x.id === view);
+        var created = false;
+        if (!t && draft && draft.id === view) {
+          t = { ...draft, chat: [] };
+          threads.push(t);
+          draft = null;
+          created = true;
+        }
+        if (t) t.chat = mutate(t.chat || []);
+        fresh.threads = threads;
+      }
+      await savePaper(fresh);
+      if (created && onThreads) onThreads(); // mark the passage, now it's saved
+      return fresh;
+    }
 
     async function draw() {
       const [p, key] = await Promise.all([DB.get('papers', paperId), DB.setting('anthropicKey', '')]);
-      const chat = p.chat || [];
-      const total = chat.reduce((sum, t) => sum + (t.cost || 0), 0);
       if (!key) {
         root.innerHTML = `<h3>Ask Claude</h3><p class="muted small">Ask questions about this paper, have passages explained, or get help with your concerns. Add your Anthropic API key in <a href="#/settings">Settings</a> to start.</p>`;
         return;
       }
-      root.innerHTML = `<h3>Ask Claude ${total ? `<span class="muted small">${money(total)} so far</span>` : ''}</h3>
-        <div class="chat">${chat.map(turnHtml).join('')}<div class="turn u" id="ask-q" hidden></div><div class="turn a" id="ask-live" hidden></div></div>
-        ${chat.length ? '' : `<div class="chips">${ASK_SUGGESTIONS.map((x) => `<button type="button" class="chip" data-suggest>${esc(x)}</button>`).join('')}</div>`}
-        <div class="ask-quote" ${quote ? '' : 'hidden'}><q>${esc(quote.length > 200 ? quote.slice(0, 200) + '…' : quote)}</q><button type="button" class="r-btn" id="ask-unquote" aria-label="Don’t ask about this passage">✕</button></div>
-        <form class="ask-form"><textarea name="q" rows="2" placeholder="${quote ? 'What about this passage?' : 'Ask about this paper…'}" aria-label="Question"></textarea><button class="btn primary" id="ask-go">Ask</button></form>
-        <p class="muted small" id="ask-err" hidden></p>
-        ${chat.length ? '<button type="button" class="link small" id="ask-clear">Clear conversation</button>' : ''}`;
+      const thread = threadOf(p);
+      if (view && !thread) view = null; // deleted elsewhere
+      const chat = chatOf(p);
+      const threads = (p.threads || []).slice().sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+      const total = costOf(p.chat || []) + threads.reduce((s2, t) => s2 + costOf(t.chat || []), 0);
+      if (view) {
+        root.innerHTML = `<div class="row between"><button type="button" class="link small" id="ask-back">← All chats</button>${thread.cfi && jump ? '<button type="button" class="link small" id="ask-jump">Show in text</button>' : ''}</div>
+          <blockquote class="ask-anchor">${esc(short(thread.quote, 400))}</blockquote>
+          <p class="small ask-ctx">${thread.context === 'paper' ? '📄 Claude reads <b>the whole paper</b> for this thread.' : '✂️ Claude reads <b>only this passage</b>, the text around it and the abstract (cheap).'} <button type="button" class="link small" id="ask-ctx">${thread.context === 'paper' ? 'Passage only' : 'Use the whole paper'}</button></p>
+          <div class="chat">${chat.map(turnHtml).join('')}<div class="turn u" id="ask-q" hidden></div><div class="turn a" id="ask-live" hidden></div></div>
+          ${chat.length ? '' : `<div class="chips">${PASSAGE_SUGGESTIONS.map((x) => `<button type="button" class="chip" data-suggest>${esc(x)}</button>`).join('')}</div>`}
+          <form class="ask-form"><textarea name="q" rows="2" placeholder="${chat.length ? 'Ask a follow-up…' : 'What about this passage?'}" aria-label="Question"></textarea><button class="btn primary" id="ask-go">Ask</button></form>
+          <p class="muted small" id="ask-err" hidden></p>
+          ${chat.length ? `<button type="button" class="link small" id="ask-clear">Delete this thread</button> <span class="muted small">${money(costOf(chat))}</span>` : ''}`;
+      } else {
+        root.innerHTML = `<h3>Ask Claude ${total ? `<span class="muted small">${money(total)} so far</span>` : ''}</h3>
+          ${threads.length ? `<details class="ask-threads" open><summary>💬 Passage threads (${threads.length})</summary><ul class="list compact">${threads
+            .map((t) => `<li><button type="button" class="ask-thread" data-thread="${t.id}"><q>${esc(short(t.quote, 120))}</q><span class="muted small">${Math.ceil((t.chat || []).length / 2)} question${(t.chat || []).length === 2 ? '' : 's'}</span></button></li>`)
+            .join('')}</ul></details>` : ''}
+          <p class="muted small ask-scope">About the whole paper. To ask about a passage, select it in the reader and tap <b>Ask</b>: it gets its own thread.</p>
+          <div class="chat">${chat.map(turnHtml).join('')}<div class="turn u" id="ask-q" hidden></div><div class="turn a" id="ask-live" hidden></div></div>
+          ${chat.length ? '' : `<div class="chips">${ASK_SUGGESTIONS.map((x) => `<button type="button" class="chip" data-suggest>${esc(x)}</button>`).join('')}</div>`}
+          <form class="ask-form"><textarea name="q" rows="2" placeholder="Ask about this paper…" aria-label="Question"></textarea><button class="btn primary" id="ask-go">Ask</button></form>
+          <p class="muted small" id="ask-err" hidden></p>
+          ${chat.length ? '<button type="button" class="link small" id="ask-clear">Clear conversation</button>' : ''}`;
+      }
       const form = $('.ask-form', root);
       form.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -524,23 +572,45 @@
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) form.requestSubmit();
       });
       $$('[data-suggest]', root).forEach((b) => b.addEventListener('click', () => send(b.textContent)));
-      $('#ask-unquote', root)?.addEventListener('click', () => {
-        quote = '';
+      $$('[data-thread]', root).forEach((b) => b.addEventListener('click', () => api.openThread(b.dataset.thread)));
+      $('#ask-back', root)?.addEventListener('click', () => {
+        view = null;
+        draft = null;
+        draw();
+      });
+      $('#ask-jump', root)?.addEventListener('click', () => jump(thread.cfi));
+      $('#ask-ctx', root)?.addEventListener('click', async () => {
+        const to = thread.context === 'paper' ? 'passage' : 'paper';
+        if (draft && draft.id === view) draft.context = to;
+        else {
+          const fresh = await DB.get('papers', paperId);
+          const t = (fresh.threads || []).find((x) => x.id === view);
+          if (t) {
+            t.context = to;
+            await savePaper(fresh);
+          }
+        }
         draw();
       });
       $('#ask-clear', root)?.addEventListener('click', async () => {
-        if (!confirm('Clear this conversation?')) return;
+        if (!confirm(view ? 'Delete this thread?' : 'Clear this conversation?')) return;
         const fresh = await DB.get('papers', paperId);
-        fresh.chat = [];
+        if (view) {
+          fresh.threads = (fresh.threads || []).filter((t) => t.id !== view);
+          view = null;
+        } else fresh.chat = [];
         await savePaper(fresh);
+        if (onThreads) onThreads();
         draw();
       });
       $$('[data-tonote]', root).forEach((b) =>
         b.addEventListener('click', async () => {
           const fresh = await DB.get('papers', paperId);
-          const t = fresh.chat[Number(b.dataset.tonote)];
-          const q = fresh.chat[Number(b.dataset.tonote) - 1];
-          fresh.notes = `${(fresh.notes || '').trim()}${fresh.notes ? '\n\n' : ''}Q: ${q ? q.question : ''}\nClaude: ${t.text.trim()}`;
+          const c = chatOf(fresh);
+          const t = c[Number(b.dataset.tonote)];
+          const q = c[Number(b.dataset.tonote) - 1];
+          const about = view ? `On “${short(threadOf(fresh).quote, 160)}”\n` : '';
+          fresh.notes = `${(fresh.notes || '').trim()}${fresh.notes ? '\n\n' : ''}${about}Q: ${q ? q.question : ''}\nClaude: ${t.text.trim()}`;
           await savePaper(fresh);
           toast('Added to your notes');
         })
@@ -548,13 +618,15 @@
       $$('[data-toconcern]', root).forEach((b) =>
         b.addEventListener('click', async () => {
           const fresh = await DB.get('papers', paperId);
+          const c = chatOf(fresh);
           const i = Number(b.dataset.toconcern);
-          const t = fresh.chat[i];
-          const q = fresh.chat[i - 1] || {};
+          const t = c[i];
+          const q = c[i - 1] || {};
           const first = t.text.trim().split(/\n\s*\n/)[0].replace(/[*_`#]/g, '');
           const text = await askNote('Concern', first.length > 300 ? first.slice(0, 300) + '…' : first);
           if (text === null) return;
-          await addConcern({ text, quote: q.quote || '' });
+          const th = threadOf(fresh);
+          await addConcern(th ? { text, quote: th.quote, cfi: th.cfi, page: th.page } : { text, quote: q.quote || '' });
           toast('Concern added');
         })
       );
@@ -568,11 +640,10 @@
       const form = $('.ask-form', root);
       const qEl = $('#ask-q', root);
       const live = $('#ask-live', root);
-      const err = $('#ask-err', root);
       $('.chips', root)?.remove();
-      err.hidden = true;
+      $('#ask-err', root).hidden = true;
       qEl.hidden = false;
-      qEl.innerHTML = `${quote ? `<q>${esc(quote.length > 200 ? quote.slice(0, 200) + '…' : quote)}</q>` : ''}${esc(question)}`;
+      qEl.textContent = question;
       live.hidden = false;
       live.innerHTML = '<p class="muted thinking">Reading the paper and thinking…</p>';
       form.q.value = '';
@@ -584,8 +655,14 @@
       const chatEl = $('.chat', root);
       try {
         const p = await DB.get('papers', paperId);
-        const turns = await Ask.ask(p, Ask.sendable(p.chat || []), question, {
-          quote,
+        const history = Ask.sendable(chatOf(p));
+        const th = threadOf(p);
+        // a thread's passage goes with its first question; later turns build on it
+        const turns = await Ask.ask(p, history, question, {
+          quote: th && !history.length ? th.quote : '',
+          // a passage thread sends its excerpt unless switched to the whole paper
+          context: th && th.context !== 'paper' ? 'passage' : 'paper',
+          excerpt: th ? th.excerpt || th.quote : '',
           signal: controller.signal,
           onText: (d) => {
             text += d;
@@ -597,10 +674,16 @@
             });
           },
         });
-        const fresh = await DB.get('papers', paperId);
-        fresh.chat = [...(fresh.chat || []), ...turns];
-        await savePaper(fresh);
-        quote = '';
+        await saveChat((c) => [...c, ...turns]);
+        if (view) {
+          // the thread's last activity, for the list order
+          const fresh = await DB.get('papers', paperId);
+          const t = (fresh.threads || []).find((x) => x.id === view);
+          if (t) {
+            t.updatedAt = now();
+            await savePaper(fresh);
+          }
+        }
         busy = false;
         await draw();
       } catch (e) {
@@ -616,15 +699,37 @@
       }
     }
 
-    draw();
-    return {
+    const api = {
       refresh: draw,
-      // ask about a selected passage
+      // a question about a passage: its existing thread, or a new one
+      async passage({ quote, cfi = null, page = null, excerpt = '' }) {
+        const p = await DB.get('papers', paperId);
+        const same = (p.threads || []).find((t) => (cfi && t.cfi === cfi) || t.quote === quote);
+        if (same) view = same.id;
+        else {
+          draft = { id: uid(), quote, cfi, page, excerpt, context: 'passage', createdAt: now() };
+          view = draft.id;
+        }
+        await draw();
+        $('.ask-form textarea', root)?.focus();
+      },
+      async openThread(id) {
+        view = id;
+        draft = null;
+        await draw();
+      },
+      async general() {
+        view = null;
+        draft = null;
+        await draw();
+      },
+      // (old name, kept for callers)
       quote(text) {
-        quote = text;
-        draw().then(() => $('.ask-form textarea', root)?.focus());
+        return api.passage({ quote: text });
       },
     };
+    draw();
+    return api;
   }
 
   async function allTags() {
@@ -1799,7 +1904,7 @@
     );
 
     const paperConcerns = concernsUI($('#concerns-card'), id);
-    askUI($('#ask-card'), id, { addConcern: (c) => paperConcerns.add(c) });
+    askUI($('#ask-card'), id, { addConcern: (c) => paperConcerns.add(c), jump: epub ? (cfi) => (location.hash = `#/read/${id}?cfi=${encodeURIComponent(cfi)}`) : null });
 
     // Files: PDF / EPUB
     $$('[data-format]').forEach((b) =>
@@ -3016,13 +3121,7 @@
         if (dlg.returnValue === 'save' && r) {
           pending = keep;
           await addHighlight(Define.brief(r), 'delve');
-        } else if (dlg.returnValue === 'ask') {
-          clearSelection();
-          hideBar();
-          tocPanel.hidden = concernsPanel.hidden = true;
-          askPanel.hidden = false;
-          ask.quote(keep.text);
-        }
+        } else if (dlg.returnValue === 'ask') askAbout(keep);
       };
     });
 
@@ -3072,17 +3171,67 @@
     });
     setCount(p);
     $('#r-concerns').addEventListener('click', () => showPanel(concernsPanel));
-    const ask = askUI(askPanel, id, { addConcern: (c) => concerns.add(c) });
-    $('#r-ask').addEventListener('click', () => showPanel(askPanel));
-    $('#hl-ask').addEventListener('click', () => {
-      const keep = pending;
-      if (!keep) return;
+    // passages with a chat thread: a dashed underline that reopens it
+    const THREAD_STYLE = { stroke: '#6b7280', 'stroke-opacity': '0.85', 'stroke-dasharray': '3 2', 'stroke-width': '1.5' };
+    let threadMarks = [];
+    const drawThreads = async () => {
+      for (const cfi of threadMarks) try { rendition.annotations.remove(cfi, 'underline'); } catch {}
+      threadMarks = [];
+      const fresh = await DB.get('papers', id);
+      for (const t of (fresh && fresh.threads) || []) {
+        if (!t.cfi) continue;
+        try {
+          rendition.annotations.underline(t.cfi, { thread: t.id }, () => {
+            tocPanel.hidden = concernsPanel.hidden = true;
+            askPanel.hidden = false;
+            ask.openThread(t.id);
+          }, 'pr-thread', THREAD_STYLE);
+          threadMarks.push(t.cfi);
+        } catch {}
+      }
+    };
+    const ask = askUI(askPanel, id, {
+      addConcern: (c) => concerns.add(c),
+      jump: (cfi) => {
+        askPanel.hidden = true;
+        rememberSpot();
+        backBtn.hidden = false;
+        go(() => rendition.display(cfi));
+      },
+      onThreads: drawThreads,
+    });
+    // the text around a passage: the nearest heading, and the paragraphs
+    // before and after it (what a passage thread sends instead of the paper)
+    const excerptAt = (cfi, quote) => {
+      try {
+        const c = rendition.getContents()[0];
+        const r = c.range(cfi);
+        const node = r.startContainer.nodeType === 3 ? r.startContainer.parentElement : r.startContainer;
+        const blocks = [...c.document.querySelectorAll('h1, h2, h3, h4, p, li, blockquote, figcaption')].filter((el) => !el.querySelector('p, li') && el.textContent.trim());
+        const i = blocks.findIndex((b) => b.contains(node));
+        if (i < 0) return quote;
+        const heading = blocks.slice(0, i + 1).reverse().find((b) => /^h\d$/.test(b.localName));
+        const around = blocks.slice(Math.max(0, i - 2), i + 3).filter((b) => b !== heading);
+        const text = (el) => el.textContent.replace(/\s+/g, ' ').trim();
+        return [heading ? `[Section: ${text(heading)}]` : '', ...around.map(text)].filter(Boolean).join('\n\n').slice(0, 8000);
+      } catch {
+        return quote;
+      }
+    };
+    const askAbout = (sel) => {
+      const excerpt = excerptAt(sel.cfiRange, sel.text);
       clearSelection();
       hideBar();
       tocPanel.hidden = concernsPanel.hidden = true;
       askPanel.hidden = false;
-      ask.quote(keep.text);
+      ask.passage({ quote: sel.text, cfi: sel.cfiRange, page: pageOf(sel.cfiRange), excerpt });
+    };
+    // the top button: the chat about the whole paper
+    $('#r-ask').addEventListener('click', () => {
+      showPanel(askPanel);
+      if (!askPanel.hidden) ask.general();
     });
+    $('#hl-ask').addEventListener('click', () => pending && askAbout(pending));
     $('#hl-concern').addEventListener('click', async () => {
       const keep = pending;
       const text = await askNote('What’s the concern?');
@@ -3141,6 +3290,7 @@
     await go(() => rendition.display(q.cfi || p.epubCfi || undefined), true);
     if (strip()) strip().addEventListener('scroll', onStripScroll);
     (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi).forEach(drawHighlight);
+    drawThreads();
     (p.concerns || []).filter((c) => c.cfi && !c.done).forEach(drawConcern);
     // Locations give a stable percentage across the whole book; generating
     // them takes a moment, so the bar enables once they're ready.

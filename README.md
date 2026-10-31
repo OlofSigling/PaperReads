@@ -66,8 +66,10 @@ Everything below is optional.
 - **Queue:** drag to prioritise your want-to-read list; swipe a paper right to archive it (kept as Catalogued) or left to delete it, with Undo. Deleted papers wait 30 days in 🗑 Recently deleted (bottom of the Library), and with sync on it can also find papers in Google Drive’s history of the sync file. Papers found through another one are grouped (collapsed)
   under the paper their trail started from, so a whole trail moves as one; open a group to order the papers in it.
   The top items show as "Next up" on the home screen.
-- **Ask Claude** (optional): ask about a paper on its page or in the reader (💬), or select a passage and tap
-  **Ask**. Answers can go to your notes or concerns. Uses your own Anthropic API key (⚙ Settings), pay-as-you-go:
+- **Ask Claude** (optional): 💬 in the reader (or the paper page) is a chat about the whole paper. Select a passage
+  and tap **Ask** to start a thread on that passage, like a comment in a document: the passage gets a dashed underline
+  that reopens its thread, and 💬 lists all threads. A passage thread sends Claude only the passage, the text around it
+  and the abstract, which costs a fraction of sending the paper; **Use the whole paper** switches it when needed. Answers can go to your notes or concerns. Uses your own Anthropic API key (⚙ Settings), pay-as-you-go:
   a question costs a few cents. The paper's text is sent to Anthropic with your question; the key stays on the device.
 - **Sync between devices** (optional): through a hidden app folder in your own Google Drive, so phone and laptop
   stay in step. Syncs on opening the app and shortly after changes; field by field, the newer edit wins. Free, but
