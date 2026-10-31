@@ -1,7 +1,7 @@
 // Service worker: caches the app shell for offline use and receives shares.
 importScripts('js/db.js');
 
-const CACHE = 'paperreads-v41';
+const CACHE = 'paperreads-v42';
 const SHELL = [
   './',
   'index.html',
