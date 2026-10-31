@@ -49,7 +49,7 @@ Everything below is optional.
   reading log. Reaching the end offers a **Mark as read** button; a paper is only finished when you say so.
 - **Catalogue:** collections, tags (rename or merge), search across title, authors, notes and abstract, plus filters and sorting.
 - **Notes & review, 1–5 star rating, and highlights** (quote + page + comment). Highlights come in colours that mean
-  something: **Key point** (yellow), **Spin** (pink), **Delve into** (blue), **Unclear** (purple), **Doubt** (teal), and **Concern** (red, which also goes on the
+  something: **Key point** (yellow), **Spin** (pink), **Delve into** (blue), **Unclear** (purple), **Doubt** (teal), **Explanation** (green), and **Concern** (red, which also goes on the
   paper's concern list). Tap a highlight to change its type, add a note, or turn it into a concern; the paper page
   filters highlights by type.
 - **Concerns:** a per-paper checklist of doubts and things to verify, on the paper page and in the reader
