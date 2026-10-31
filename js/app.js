@@ -327,8 +327,26 @@
   }
 
   // Make an EPUB in the background and store it (used after adding a paper).
+  // An arXiv version gives the best EPUB (its web version has the figures):
+  // look for one the paper doesn't know about yet.
+  async function ensureArxiv(id, log = () => {}) {
+    let p = await DB.get('papers', id);
+    if (p.arxiv || !p.doi || !navigator.onLine || p.arxivChecked) return p;
+    const found = await Lookup.freeCopies(p).catch(() => null);
+    p = await DB.get('papers', id);
+    if (found) {
+      if (found.arxiv) {
+        p.arxiv = found.arxiv;
+        log(`→ found an arXiv version: ${found.arxiv}`);
+      }
+      p.arxivChecked = now();
+      await savePaper(p);
+    }
+    return p;
+  }
+
   async function makeEpubFor(id, source = 'auto') {
-    const p = await DB.get('papers', id);
+    const p = source === 'auto' ? await ensureArxiv(id) : await DB.get('papers', id);
     const pdf = await DB.get('pdfs', id);
     const res = await Epubify.make(p, { source, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null });
     await attachEpub(id, res.file, { cover: res.cover, source: res.source, missingFigures: res.missingFigures });
@@ -1648,14 +1666,18 @@
     const p = await DB.get('papers', id);
     const r = await Lookup.fetchFreePdf(p);
     const fresh = await DB.get('papers', id);
+    // an arXiv version found on the way: remember it (its web version makes
+    // the best EPUB, with figures)
     if (r.file) {
       await attachPdf(id, r.file);
       const done = await DB.get('papers', id);
       done.freePdfs = [];
       done.freeChecked = now();
+      if (r.arxiv && !done.arxiv) done.arxiv = r.arxiv;
       await savePaper(done);
       return { attached: true, from: r.from };
     }
+    if (r.arxiv && !fresh.arxiv) fresh.arxiv = r.arxiv;
     fresh.freePdfs = r.pdfs;
     fresh.freeChecked = now();
     await savePaper(fresh);
@@ -1735,7 +1757,7 @@
               : ''}
           ${format === 'epub' ? `<form id="epub-make" class="stack"${epub ? ' hidden' : ''}>
               ${epubSources.length ? `<label>Make an EPUB from
-                <select name="source">${epubSources.map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
+                <select name="source"><option value="auto">Best available (automatic)</option>${epubSources.map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
                 <button class="btn primary">Make EPUB</button>` : '<p class="muted small">Add an arXiv ID or DOI, or attach the PDF, to make an EPUB.</p>'}
               <label class="btn">Import .epub<input type="file" accept=".epub,application/epub+zip" id="epub-file" hidden></label>
             </form>
@@ -1960,7 +1982,9 @@
           out.scrollTop = out.scrollHeight;
         };
         try {
-          const res = await Epubify.make(p, { source: makeForm.source.value, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null, log });
+          const source = makeForm.source.value;
+          const paper = source === 'auto' ? await ensureArxiv(id, log) : p;
+          const res = await Epubify.make(paper, { source, pdf: pdf ? { blob: pdf.blob, name: pdf.name } : null, log });
           await attachEpub(id, res.file, { cover: res.cover, source: res.source, missingFigures: res.missingFigures });
           if (res.warnings.length) alert(res.warnings.join('\n\n'));
           toast('EPUB ready');

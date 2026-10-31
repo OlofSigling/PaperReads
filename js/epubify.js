@@ -3130,7 +3130,13 @@ ${manifest.join('\n')}
     linkify(src.root, log);
     const wanted = src.root.querySelectorAll('img, object[data]').length;
     const media = await localizeImages(src.root, src.baseUrl, src.pdfImages || [], log);
-    const missingFigures = src.root.querySelectorAll('figure').length && src.label !== 'PDF' ? Math.max(0, wanted - media.length) : 0;
+    let missingFigures = src.root.querySelectorAll('figure').length && src.label !== 'PDF' ? Math.max(0, wanted - media.length) : 0;
+    // a text source that left the figures out entirely (some manuscripts in
+    // PubMed Central) while the text refers to them: count those as missing
+    if (!missingFigures && src.label !== 'PDF' && src.label !== 'arXiv HTML' && !src.root.querySelector('figure, img')) {
+      const nums = new Set([...src.root.textContent.matchAll(/\b(?:Fig(?:ure)?s?\.?)\s*(\d{1,2})\b/gi)].map((m) => m[1]));
+      missingFigures = nums.size;
+    }
     // Text sources whose figure images are off-limits to apps (PubMed Central
     // manuscripts, Europe PMC): the stored PDF has the pictures, so use it
     // when it actually yields them.
