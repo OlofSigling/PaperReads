@@ -97,6 +97,9 @@
   const CONCERN_COLOR = '#ef4444';
   const hlKind = (h) => (HL_KINDS[h.kind] ? h.kind : 'key');
   const hlChip = (h) => `<span class="hl-chip" style="--hl:${HL_KINDS[hlKind(h)].color}">${HL_KINDS[hlKind(h)].label}</span>`;
+  // PubPeer: post-publication discussion of a paper (no API here: a link to
+  // its PubPeer search, which lands on the paper's page when there is one)
+  const pubpeerUrl = (p) => `https://pubpeer.com/search?q=${encodeURIComponent(p.doi || (p.arxiv ? p.arxiv : p.title || ''))}`;
   const EPUB_BADGE = '<span class="badge epub" title="Has an EPUB to read">📖 EPUB</span>';
   function paperRow(p, extra = '') {
     return `<li class="paper-row">
@@ -1725,6 +1728,7 @@
           ${p.doi ? `<a href="https://doi.org/${esc(p.doi)}" target="_blank" rel="noopener">DOI: ${esc(p.doi)}</a>` : ''}
           ${p.arxiv ? `<a href="https://arxiv.org/abs/${esc(p.arxiv)}" target="_blank" rel="noopener">arXiv: ${esc(p.arxiv)}</a>` : ''}
           ${p.url && !p.arxiv ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">Link</a>` : ''}
+          ${p.doi || p.arxiv || p.title ? `<a href="${esc(pubpeerUrl(p))}" target="_blank" rel="noopener" title="Comments on this paper by other researchers">PubPeer</a>` : ''}
         </p>
 
         <section class="card files">
@@ -2854,9 +2858,15 @@
       const item = target.closest('li, p, .ltx_bibitem') || target;
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
         <p class="ref-pop">${esc(item.textContent.replace(/\s+/g, ' ').trim())}</p>
-        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button type="button" class="btn" id="ref-web">Open on the web ↗</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
+        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button type="button" class="btn" id="ref-web">Open on the web ↗</button><button type="button" class="btn" id="ref-pubpeer">PubPeer ↗</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
       // the paper's own page: from a DOI or link in the reference, else a
       // title search; failing that, a Google Scholar search for it
+      // PubPeer for the cited paper: by its DOI if the reference gives one, else its title
+      $('#ref-pubpeer', dlg).addEventListener('click', () => {
+        const text = item.textContent.replace(/\s+/g, ' ').trim();
+        const ids = Lookup.parse(text);
+        window.open(pubpeerUrl({ doi: ids.arxiv ? null : ids.doi, arxiv: ids.arxiv, title: Lookup.refTitle(text) }), '_blank', 'noopener');
+      });
       $('#ref-web', dlg).addEventListener('click', async () => {
         const text = item.textContent.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '').replace(/(\p{Ll})- (\p{Ll})/gu, '$1$2');
         const win = window.open('about:blank', '_blank'); // opened now, while it's a tap (else it's blocked as a popup)
