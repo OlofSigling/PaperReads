@@ -91,6 +91,7 @@
     spin: { label: 'Spin', color: '#ec4899', opacity: '0.28' },
     delve: { label: 'Delve into', color: '#3b82f6', opacity: '0.26' },
     unclear: { label: 'Unclear', color: '#8b5cf6', opacity: '0.26' },
+    doubt: { label: 'Doubt', color: '#14b8a6', opacity: '0.28' },
   };
   const CONCERN_COLOR = '#ef4444';
   const hlKind = (h) => (HL_KINDS[h.kind] ? h.kind : 'key');
