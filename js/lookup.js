@@ -176,11 +176,139 @@ const Lookup = (() => {
     return fromCsl(csl);
   }
 
+  // OpenAlex by title: it also lists papers Crossref doesn't have, such as
+  // NeurIPS/ICML proceedings, JMLR and other venues without DOIs.
+  async function openAlexSearch(query, norm, variants) {
+    const res = await fetch(`https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=8&select=doi,title,publication_year,authorships,primary_location,locations,abstract_inverted_index,cited_by_count`);
+    if (!res.ok) return [];
+    const words = (a) => {
+      // the abstract comes as word → positions
+      if (!a) return '';
+      const out = [];
+      for (const [w, ps] of Object.entries(a)) for (const i of ps) out[i] = w;
+      return out.filter(Boolean).join(' ');
+    };
+    return ((await res.json()).results || [])
+      .filter((w) => w.title)
+      .map((w) => {
+        let arxiv = null;
+        for (const l of w.locations || []) {
+          const m = /arxiv\.org\/(?:abs|pdf)\/([^?#\s]+?)(?:\.pdf)?$/i.exec(l.landing_page_url || l.pdf_url || '');
+          if (m) arxiv = arxiv || m[1].replace(/v\d+$/, '');
+        }
+        const doi = w.doi ? w.doi.replace(/^https?:\/\/doi\.org\//i, '') : null;
+        const ax = doi && /^10\.48550\/arxiv\.(.+)$/i.exec(doi);
+        if (ax) arxiv = arxiv || ax[1];
+        const loc = w.primary_location || {};
+        const title = stripTags(w.title);
+        return {
+          title,
+          authors: (w.authorships || []).map((a) => a.author && a.author.display_name).filter(Boolean),
+          year: w.publication_year || null,
+          venue: (loc.source && loc.source.display_name) || '',
+          abstract: words(w.abstract_inverted_index),
+          doi: ax ? null : doi,
+          arxiv,
+          url: arxiv ? `https://arxiv.org/abs/${arxiv}` : loc.landing_page_url || null,
+          totalPages: null,
+          cites: w.cited_by_count || 0,
+          exact: variants.has(norm(title)),
+          score: variants.has(norm(title)) ? 10 : 0,
+          source: 'OpenAlex',
+        };
+      })
+      .sort((a, b) => b.exact - a.exact || b.cites - a.cites);
+  }
+
+  // Semantic Scholar's title match (free, but busy at times: one retry).
+  async function s2Search(query, norm, variants) {
+    const url = `https://api.semanticscholar.org/graph/v1/paper/search/match?query=${encodeURIComponent(query)}&fields=title,year,venue,authors,externalIds,abstract,citationCount`;
+    let res = await fetch(url);
+    if (res.status === 429) {
+      await new Promise((r) => setTimeout(r, 1500));
+      res = await fetch(url);
+    }
+    if (!res.ok) return [];
+    return ((await res.json()).data || []).map((w) => {
+      const ids = w.externalIds || {};
+      const arxiv = ids.ArXiv || null;
+      return {
+        title: w.title,
+        authors: (w.authors || []).map((a) => a.name).filter(Boolean),
+        year: w.year || null,
+        venue: w.venue || '',
+        abstract: w.abstract || '',
+        doi: ids.DOI && !/^10\.48550\//i.test(ids.DOI) ? ids.DOI : null,
+        arxiv,
+        url: arxiv ? `https://arxiv.org/abs/${arxiv}` : ids.PubMed ? `https://pubmed.ncbi.nlm.nih.gov/${ids.PubMed}/` : null,
+        totalPages: null,
+        cites: w.citationCount || 0,
+        exact: variants.has(norm(w.title)),
+        score: variants.has(norm(w.title)) ? 10 : 0,
+        source: 'Semantic Scholar',
+      };
+    });
+  }
+
+  // Europe PMC by title (life sciences, and anything deposited in PubMed Central).
+  async function europePmcSearch(query, norm, variants) {
+    const q = `TITLE:"${query.replace(/"/g, '')}"`;
+    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(q)}&format=json&resultType=core&pageSize=5`);
+    if (!res.ok) return [];
+    return (((await res.json()).resultList || {}).result || []).map((r) => {
+      const title = (r.title || '').replace(/\.$/, '');
+      return {
+        title,
+        authors: ((r.authorList && r.authorList.author) || []).map((a) => a.fullName || [a.firstName, a.lastName].filter(Boolean).join(' ')).filter(Boolean),
+        year: parseInt(r.pubYear, 10) || null,
+        venue: (r.journalInfo && r.journalInfo.journal && r.journalInfo.journal.title) || r.journalTitle || '',
+        abstract: stripTags(r.abstractText || ''),
+        doi: r.doi || null,
+        arxiv: null,
+        url: r.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${r.pmid}/` : null,
+        totalPages: null,
+        cites: r.citedByCount || 0,
+        exact: variants.has(norm(title)),
+        score: variants.has(norm(title)) ? 10 : 0,
+        source: 'Europe PMC',
+      };
+    });
+  }
+
+  // The other indexes together; the first exact title in this order wins.
+  async function otherIndexes(query, norm, variants) {
+    const lists = await Promise.all([s2Search, openAlexSearch, europePmcSearch].map((f) => f(query, norm, variants).catch(() => [])));
+    const exact = lists.map((l) => l.find((x) => x.exact)).filter(Boolean);
+    if (exact.length) {
+      // fill gaps from the others (a DOI or an arXiv ID one of them knows)
+      const best = { ...exact[0] };
+      for (const x of exact.slice(1)) {
+        if (!best.doi && x.doi) best.doi = x.doi;
+        if (!best.arxiv && x.arxiv) best.arxiv = x.arxiv;
+        if (!best.abstract && x.abstract) best.abstract = x.abstract;
+        if ((!best.authors || !best.authors.length) && x.authors.length) best.authors = x.authors;
+      }
+      return [best];
+    }
+    return lists.flat().slice(0, 4);
+  }
+
   async function search(query) {
     query = cleanTitle(query);
+    const norm0 = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const variants0 = new Set([norm0(query), norm0(dropDashSuffix(query))]);
     const url = `https://api.crossref.org/works?rows=20&select=DOI,title,author,issued,container-title,publisher,is-referenced-by-count,update-to&query.bibliographic=${encodeURIComponent(query)}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Search failed (${res.status})`);
+    let res = null;
+    try {
+      res = await fetch(url);
+    } catch {}
+    if (!res || !res.ok) {
+      // Crossref down: OpenAlex alone
+      const oa = await otherIndexes(query, norm0, variants0);
+      if (!oa.length && res) throw new Error(`Search failed (${res.status})`);
+      if (oa[0] && oa[0].exact) oa[0].confident = true;
+      return oa;
+    }
     const json = await res.json();
     // Crossref's relevance ranking lets obscure near-matches beat the famous
     // paper, so re-rank: title similarity first, then citation count.
@@ -210,6 +338,14 @@ const Lookup = (() => {
       }))
       .sort((a, b) => b.score - a.score || a.notice - b.notice || b.cites - a.cites)
       .slice(0, 8);
+    // No exact title at Crossref: the paper may not be there at all (NeurIPS,
+    // JMLR, ...). OpenAlex has those.
+    if (!(results[0] && results[0].exact && !results[0].notice)) {
+      const oa = await otherIndexes(query, norm, variants);
+      const hit = oa.find((x) => x.exact);
+      if (hit) results.unshift(hit);
+      else results.push(...oa.slice(0, 3));
+    }
     // Confident when the best hit is an exact title match and not a notice.
     if (results[0] && results[0].exact && !results[0].notice) results[0].confident = true;
     return results;
@@ -322,7 +458,25 @@ const Lookup = (() => {
         if (res.ok) w = ((await res.json()).results || []).find((x) => squash(x.title) === squash(title)) || null;
       }
     } catch {
-      return null; // offline, or OpenAlex unreachable
+      w = null; // offline, or OpenAlex unreachable
+    }
+    // OpenAlex refused (its daily budget per connection) or doesn't know it:
+    // Semantic Scholar knows free copies and arXiv versions too
+    if (!w && doi) {
+      try {
+        const res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=externalIds,openAccessPdf`);
+        if (res.ok) {
+          const r = await res.json();
+          const arxiv = (r.externalIds && r.externalIds.ArXiv) || null;
+          const url = r.openAccessPdf && r.openAccessPdf.url;
+          let host = '';
+          try {
+            host = url ? new URL(url).hostname.replace(/^www\./, '') : '';
+          } catch {}
+          return { pdfs: url && host ? [{ url, host, source: host, version: '' }] : [], arxiv };
+        }
+      } catch {}
+      if (!navigator.onLine) return null;
     }
     if (!w) return { pdfs: [], arxiv: null };
     const rank = { publishedVersion: 0, acceptedVersion: 1, submittedVersion: 2 };
