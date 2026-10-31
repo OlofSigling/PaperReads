@@ -467,3 +467,16 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .ask-thread q { font-size: .88rem; }
 .ask-scope { margin: 4px 0 8px; }
 .ask-ctx { margin: 0 0 8px; color: var(--text-2); }
+
+/* supplementary material */
+.supp-item { display: flex; align-items: center; gap: 6px; }
+.supp-open { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: flex-start; text-align: left; background: none; border: 0; padding: 6px 0; font: inherit; color: var(--text); cursor: pointer; }
+.supp-ico { font-size: 1.2rem; line-height: 1.2; }
+.supp-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.supp-view { max-width: min(96vw, 900px); }
+.supp-img { display: block; max-width: 100%; max-height: 65vh; margin: 8px auto; background: #fff; }
+.supp-cap { color: var(--text-2); max-height: 20vh; overflow: auto; }
+.supp-table { max-height: 60vh; overflow: auto; }
+.supp-table table { border-collapse: collapse; font-size: .8rem; }
+.supp-table td, .supp-table th { border: 1px solid var(--border); padding: 2px 6px; white-space: nowrap; }
+.supp-table pre { white-space: pre-wrap; font-size: .8rem; }

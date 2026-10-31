@@ -63,6 +63,12 @@ Everything below is optional.
 - **Bundles:** group papers under a name, flat (no trail needed): **Select** in the Queue or the Library, tick papers,
   tap **📦 Bundle**. A bundle shows as one collapsible block that moves as a whole in the queue; ⋯ renames or
   unbundles it. A paper's bundle can also be set on its page.
+- **Supplementary material:** supplementary figures, tables, data and files, kept with the paper on the device. For papers
+  in PubMed Central they're fetched automatically from Europe PMC in the background (with labels and captions; this can
+  take a few minutes); for others, download them and use **Add files**. They're listed on the paper page and under 📎 in
+  the reader, where mentions in the text ("Fig. S3", "Table S2", "S1 Fig", "Additional file 1", "Figure 2—figure
+  supplement 1") open them. Images and CSV tables show in the app; other files open in their apps. Not synced or in
+  backups.
 - **PubPeer:** each paper page links to its PubPeer discussion (comments by other researchers after publication), and so
   does the reference pop-up in the reader, for cited papers.
 - **Related papers:** link papers as *related to*, *cites* or *builds on*. Each paper shows its links in both directions.

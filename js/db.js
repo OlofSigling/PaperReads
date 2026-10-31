@@ -2,7 +2,7 @@
 // service worker (importScripts) and the page share the same schema.
 (function (global) {
   const DB_NAME = 'paperreads';
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
 
   const STORES = {
     papers: { keyPath: 'id', indexes: ['status', 'updatedAt'] },
@@ -14,6 +14,7 @@
     epubs: { keyPath: 'paperId' },
     settings: { keyPath: 'key' },
     inbox: { keyPath: 'id', autoIncrement: true },
+    supps: { keyPath: 'paperId' }, // supplementary material, kept on this device
   };
 
   let dbPromise = null;

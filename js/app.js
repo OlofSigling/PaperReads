@@ -1493,6 +1493,116 @@
     ul.addEventListener('pointercancel', done);
   }
 
+  // ---------- supplementary material ----------
+  // Find a paper's supplementary files (Europe PMC), keeping files added by hand.
+  async function findSupps(id, log = () => {}) {
+    const p = await DB.get('papers', id);
+    const r = await Supp.find(p, { log });
+    const old = (await DB.get('supps', id)) || { paperId: id, items: [] };
+    const added = (old.items || []).filter((x) => x.added);
+    const items = [...r.items.filter((x) => !added.some((a) => a.name === x.name)), ...added];
+    await DB.put('supps', { paperId: id, items, source: r.items.length ? r.source : old.source || null, pmcid: r.pmcid || null, checkedAt: now(), reason: r.items.length ? '' : r.reason });
+    return r;
+  }
+  // The supplementary item a mention in the text points at.
+  function suppFor(items, mention) {
+    const keys = Supp.keysOf(mention);
+    const hit = keys.length && items.find((it) => it.key && keys.some((k) => it.key.split(' ').includes(k)));
+    if (hit) return hit;
+    // one supplementary file, or a mention without a number ("Supplementary information"): the file
+    if (items.length === 1 || !/\d/.test(mention)) return items.find((it) => !it.key) || (items.length === 1 ? items[0] : null);
+    return null;
+  }
+  // Show or open one supplementary file.
+  function openSupp(it) {
+    const file = new File([it.blob], it.name, { type: it.type });
+    const dlg = $('#dialog');
+    const head = `<h3>${Supp.icon(it)} ${esc(it.label)}</h3>${it.caption ? `<p class="small supp-cap">${esc(it.caption)}</p>` : ''}`;
+    const actions = `<div class="row end wrap"><button type="button" class="btn" id="supp-out">${/pdf/.test(it.type) ? 'Open' : 'Open with…'}</button><button value="ok" class="btn primary">Close</button></div>`;
+    const out = () => {
+      if (/pdf/.test(it.type)) {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        if (/Android/i.test(navigator.userAgent)) a.download = it.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } else shareOrSave(file, it.label);
+    };
+    if (/^image\//.test(it.type) && !/tiff/.test(it.type)) {
+      const url = URL.createObjectURL(it.blob);
+      dlg.innerHTML = `<form method="dialog" class="dlg supp-view">${head}<img class="supp-img" src="${url}" alt="">${actions}</form>`;
+      dlg.onclose = () => URL.revokeObjectURL(url);
+    } else if (/csv|tab-separated|text\/plain/.test(it.type) && it.size < 3e6) {
+      dlg.innerHTML = `<form method="dialog" class="dlg supp-view">${head}<div class="supp-table"><p class="muted small">Reading…</p></div>${actions}</form>`;
+      dlg.onclose = null;
+      it.blob.text().then((t) => {
+        const box = $('.supp-table', dlg);
+        if (!box) return;
+        if (/text\/plain/.test(it.type)) return (box.innerHTML = `<pre>${esc(t.slice(0, 20000))}</pre>`);
+        const sep = /tab-separated/.test(it.type) || (t.split('\t').length > t.split(',').length) ? '\t' : ',';
+        // (quoted fields with separators inside are kept together)
+        const rows = t.split(/\r?\n/).filter((l) => l.trim()).slice(0, 300).map((l) => (l.match(new RegExp(`("([^"]|"")*"|[^${sep}]*)(${sep}|$)`, 'g')) || []).filter((x, i, a) => i < a.length - 1 || x).map((c) => c.replace(new RegExp(`${sep}$`), '').replace(/^"|"$/g, '').replace(/""/g, '"')));
+        box.innerHTML = `<table>${rows.map((r, i) => `<tr>${r.map((c) => (i ? `<td>${esc(c)}</td>` : `<th>${esc(c)}</th>`)).join('')}</tr>`).join('')}</table>${t.split(/\r?\n/).length > 300 ? '<p class="muted small">First 300 rows.</p>' : ''}`;
+      });
+    } else {
+      dlg.innerHTML = `<form method="dialog" class="dlg supp-view">${head}<p class="muted small">${esc(it.name)} · ${(it.size / 1048576).toFixed(1)} MB. This kind of file opens in another app.</p>${actions}</form>`;
+      dlg.onclose = null;
+    }
+    $('#supp-out', dlg).addEventListener('click', out);
+    dlg.showModal();
+  }
+  // The list of a paper's supplementary files, with Find and Add (paper page and reader).
+  function suppUI(root, id, { onChange = () => {} } = {}) {
+    let busy = false;
+    async function draw(status = '') {
+      const [rec, p] = await Promise.all([DB.get('supps', id), DB.get('papers', id)]);
+      const items = (rec && rec.items) || [];
+      root.innerHTML = `<h3>Supplementary material${items.length ? ` <span class="muted small">${items.length}</span>` : ''}</h3>
+        ${items.length ? `<ul class="list compact supp-list">${items.map((it, i) => `<li class="supp-item"><button type="button" class="supp-open" data-i="${i}"><span class="supp-ico">${Supp.icon(it)}</span><span class="supp-txt"><b>${esc(it.label)}</b>${it.caption ? `<span class="muted small">${esc(it.caption.length > 140 ? it.caption.slice(0, 140) + '…' : it.caption)}</span>` : ''}</span></button><button type="button" class="r-btn" data-del="${i}" aria-label="Remove">✕</button></li>`).join('')}</ul>` : `<p class="muted small">${rec && rec.reason ? esc(rec.reason) + ' ' : ''}Supplementary figures, tables and data files are kept here; mentions like “Fig. S3” in the text link to them.</p>`}
+        <div class="row wrap">${p && (p.doi || p.url) ? `<button type="button" class="btn small" id="supp-find"${busy ? ' disabled' : ''}>${busy ? 'Looking…' : items.length ? 'Look again' : 'Find automatically'}</button>` : ''}<label class="btn small">Add files<input type="file" multiple hidden id="supp-add"></label></div>
+        <p class="muted small" id="supp-status">${esc(status)}</p>`;
+      $$('.supp-open', root).forEach((b) => b.addEventListener('click', () => openSupp(items[+b.dataset.i])));
+      $$('[data-del]', root).forEach((b) =>
+        b.addEventListener('click', async () => {
+          const r = await DB.get('supps', id);
+          r.items.splice(+b.dataset.del, 1);
+          await DB.put('supps', r);
+          onChange();
+          draw();
+        })
+      );
+      $('#supp-add', root).addEventListener('change', async (e) => {
+        const r = (await DB.get('supps', id)) || { paperId: id, items: [] };
+        for (const f of e.target.files) r.items.push({ ...Supp.fromFile(f), added: true });
+        await DB.put('supps', r);
+        onChange();
+        draw(`Added ${e.target.files.length} file${e.target.files.length > 1 ? 's' : ''}.`);
+      });
+      $('#supp-find', root)?.addEventListener('click', async () => {
+        busy = true;
+        draw('Looking in Europe PMC…');
+        let msg = '';
+        try {
+          const r = await findSupps(id, (m) => {
+            const el = $('#supp-status', root);
+            if (el) el.textContent = m;
+          });
+          msg = r.items.length ? `Found ${r.items.length} file${r.items.length > 1 ? 's' : ''}.` : r.reason;
+        } catch (err) {
+          msg = navigator.onLine ? `Couldn’t fetch them: ${err.message}` : 'You’re offline.';
+        }
+        busy = false;
+        onChange();
+        draw(msg);
+      });
+    }
+    draw();
+    return { refresh: draw };
+  }
+
   // ---------- add many papers at once ----------
   const IMPORT_KEY = 'paperreads.import';
   async function viewImport() {
@@ -1643,6 +1753,10 @@
             note.push('no EPUB');
           }
         }
+        try {
+          const r = await findSupps(x.paperId);
+          if (r.items.length) note.push(`${r.items.length} supplementary file${r.items.length > 1 ? 's' : ''}`);
+        } catch {}
         x.note = `<a href="#/paper/${x.paperId}">Added</a> · ${note.join(' · ')}`;
         if (location.hash === '#/import' && document.body.contains(list)) draw();
       }
@@ -1768,6 +1882,7 @@
             <pre class="conv-log" id="conv-log" hidden></pre>` : ''}
         </section>
 
+        <section class="card" id="supp-card"></section>
         <section class="card" id="concerns-card"></section>
         <section class="card" id="ask-card"></section>
 
@@ -1930,6 +2045,7 @@
       })
     );
 
+    suppUI($('#supp-card'), id);
     const paperConcerns = concernsUI($('#concerns-card'), id);
     askUI($('#ask-card'), id, { addConcern: (c) => paperConcerns.add(c), jump: epub ? (cfi) => (location.hash = `#/read/${id}?cfi=${encodeURIComponent(cfi)}`) : null });
 
@@ -2598,6 +2714,12 @@
           })
           .catch(() => toast('No EPUB made. Try “Make EPUB” on the paper page'));
       }
+      // supplementary material, quietly in the background (slow: a few minutes)
+      if (p.doi && navigator.onLine)
+        pdfJob
+          .then(() => findSupps(p.id))
+          .then((r) => r.items.length && toast(`Supplementary material saved (${r.items.length} file${r.items.length > 1 ? 's' : ''})`))
+          .catch(() => {});
       if (viaPaper && q.back === 'read') {
         toast('Added. Back to reading');
         location.hash = `#/read/${viaPaper.id}`;
@@ -2625,6 +2747,7 @@
         <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
         ${Speech.supported ? '<button class="r-btn" id="r-tts" aria-label="Read aloud">🔊</button>' : ''}
         <button class="r-btn" id="r-ask" aria-label="Ask Claude">💬</button>
+        <button class="r-btn" id="r-supp" aria-label="Supplementary material">📎<span class="r-count" id="r-scount"></span></button>
         <button class="r-btn" id="r-concerns" aria-label="Concerns">⚠<span class="r-count" id="r-ccount"></span></button>
         <button class="r-btn" id="r-toc" aria-label="Contents">☰</button>
       </div>
@@ -2654,6 +2777,7 @@
       <nav class="r-toc" id="r-toc-panel" hidden></nav>
       <section class="r-toc r-concerns" id="r-concerns-panel" hidden></section>
       <section class="r-toc r-concerns r-ask" id="r-ask-panel" hidden></section>
+      <section class="r-toc r-concerns r-supp" id="r-supp-panel" hidden></section>
     </div>`;
 
     const ePub = await Epubify.epubjs();
@@ -2763,6 +2887,32 @@
 
     const prev = () => go(() => rendition.prev());
     const next = () => go(() => rendition.next());
+    // A tap on a link (or a supplementary mention) under a page-turn zone
+    // goes to the link, not the next page.
+    const tapThrough = (e) => {
+      const ifr = $('#r-view iframe');
+      const c = rendition.getContents()[0];
+      if (!ifr || !c || e.detail === 0) return false;
+      const box = ifr.getBoundingClientRect();
+      const x = e.clientX - box.left;
+      const y = e.clientY - box.top;
+      const d = c.document;
+      const el = d.elementFromPoint(x, y);
+      const a = el && el.closest && el.closest('a[href]');
+      if (a) {
+        a.dispatchEvent(new c.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+        return true;
+      }
+      if (c.suppRanges && c.suppRanges.length && d.caretRangeFromPoint) {
+        const r = d.caretRangeFromPoint(x, y);
+        const hit = r && c.suppRanges.find((s) => s.range.comparePoint(r.startContainer, r.startOffset) === 0 && !(r.startContainer === s.range.endContainer && r.startOffset === s.range.endOffset));
+        if (hit) {
+          openSupp(hit.item);
+          return true;
+        }
+      }
+      return false;
+    };
     // a press that moved (a drag to select) isn't a page turn
     let zoneDown = null;
     for (const [sel, fn] of [['#r-prev', prev], ['#r-next', next]]) {
@@ -2771,7 +2921,9 @@
       z.addEventListener('click', (e) => {
         const moved = zoneDown && Math.hypot(e.clientX - zoneDown.x, e.clientY - zoneDown.y) > 6;
         zoneDown = null;
-        if (!moved || e.detail === 0) fn(); // detail 0: keyboard
+        if (moved && e.detail !== 0) return;
+        if (tapThrough(e)) return;
+        fn(); // (detail 0: keyboard)
       });
     }
     const onKey = (e) => {
@@ -3198,10 +3350,84 @@
     const tocPanel = $('#r-toc-panel');
     const concernsPanel = $('#r-concerns-panel');
     const askPanel = $('#r-ask-panel');
+    const suppPanel = $('#r-supp-panel');
     // one side panel at a time
     const showPanel = (panel) => {
-      for (const x of [tocPanel, concernsPanel, askPanel]) x.hidden = x !== panel || !x.hidden;
+      for (const x of [tocPanel, concernsPanel, askPanel, suppPanel]) x.hidden = x !== panel || !x.hidden;
     };
+    // Supplementary material: a panel, and mentions in the text ("Fig. S3",
+    // "Additional file 1") that open the file. Mentions are marked with a
+    // highlight and found by where the tap lands, so the text itself (and
+    // the positions highlights are saved by) stays untouched.
+    let suppItems = [];
+    const markSupps = () => {
+      const c = rendition.getContents()[0];
+      if (!c) return;
+      const doc = c.document;
+      const w = c.window;
+      c.suppRanges = [];
+      if (w.CSS && w.CSS.highlights) w.CSS.highlights.delete('pr-supp');
+      if (!suppItems.length) return;
+      if (!doc.getElementById('pr-supp-style')) {
+        const st = doc.createElement('style');
+        st.id = 'pr-supp-style';
+        st.textContent = '::highlight(pr-supp){color:#2a78d6;text-decoration:underline dotted;}';
+        doc.head.appendChild(st);
+      }
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n.parentElement.closest('a, .refs, script, style')) continue;
+        for (const m of n.data.matchAll(Supp.MENTION)) {
+          const item = suppFor(suppItems, m[0]);
+          if (!item) continue;
+          const r = doc.createRange();
+          r.setStart(n, m.index);
+          r.setEnd(n, m.index + m[0].length);
+          c.suppRanges.push({ range: r, item });
+        }
+      }
+      if (c.suppRanges.length && w.Highlight && w.CSS.highlights) w.CSS.highlights.set('pr-supp', new w.Highlight(...c.suppRanges.map((x) => x.range)));
+    };
+    const loadSupps = async () => {
+      const rec = await DB.get('supps', id);
+      suppItems = (rec && rec.items) || [];
+      $('#r-scount').textContent = suppItems.length ? String(suppItems.length) : '';
+      markSupps();
+    };
+    suppUI(suppPanel, id, { onChange: loadSupps });
+    $('#r-supp').addEventListener('click', () => showPanel(suppPanel));
+    rendition.hooks.content.register((contents) => {
+      setTimeout(markSupps, 0);
+      contents.document.addEventListener(
+        'click',
+        (e) => {
+          if (!contents.suppRanges || !contents.suppRanges.length || hasSelection()) return;
+          const d = contents.document;
+          let node = null;
+          let off = 0;
+          if (d.caretRangeFromPoint) {
+            const r = d.caretRangeFromPoint(e.clientX, e.clientY);
+            if (r) [node, off] = [r.startContainer, r.startOffset];
+          } else if (d.caretPositionFromPoint) {
+            const pos = d.caretPositionFromPoint(e.clientX, e.clientY);
+            if (pos) [node, off] = [pos.offsetNode, pos.offset];
+          }
+          if (!node) return;
+          const hit = contents.suppRanges.find((x) => {
+            try {
+              return x.range.comparePoint(node, off) === 0 && !(node === x.range.endContainer && off === x.range.endOffset);
+            } catch {
+              return false;
+            }
+          });
+          if (!hit) return;
+          e.preventDefault();
+          e.stopPropagation();
+          openSupp(hit.item);
+        },
+        true
+      );
+    });
     $('#r-toc').addEventListener('click', () => showPanel(tocPanel));
     // Concerns: same list as the paper page, in a side panel
     const CONCERN_STYLE = { fill: CONCERN_COLOR, 'fill-opacity': '0.24', 'mix-blend-mode': 'multiply' };
@@ -3353,6 +3579,7 @@
     if (strip()) strip().addEventListener('scroll', onStripScroll);
     (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi).forEach(drawHighlight);
     drawThreads();
+    loadSupps();
     (p.concerns || []).filter((c) => c.cfi && !c.done).forEach(drawConcern);
     // Locations give a stable percentage across the whole book; generating
     // them takes a moment, so the bar enables once they're ready.
