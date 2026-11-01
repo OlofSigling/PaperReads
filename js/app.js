@@ -2883,8 +2883,23 @@
     const onStripScroll = () => {
       const c = strip();
       if (!navigating && pageScroll !== null && hasSelection() && Math.abs(c.scrollLeft - pageScroll) > 1) c.scrollLeft = pageScroll;
+      // pages never move up or down: dragging a selection near the bottom
+      // edge made the browser nudge them, and the selection jump back
+      if (c.scrollTop) c.scrollTop = 0;
     };
+    const onWinScroll = () => {
+      if (!zoomed() && (window.scrollY || window.scrollX)) window.scrollTo(0, 0);
+    };
+    window.addEventListener('scroll', onWinScroll);
+    rendition.hooks.content.register((contents) => {
+      const se = contents.document.scrollingElement || contents.document.documentElement;
+      contents.window.addEventListener('scroll', () => {
+        if (se.scrollTop) se.scrollTop = 0;
+      });
+    });
 
+    // pinch-zoomed in (the page is bigger than the screen)
+    const zoomed = () => !!(window.visualViewport && window.visualViewport.scale > 1.02);
     const prev = () => go(() => rendition.prev());
     const next = () => go(() => rendition.next());
     // A tap on a link (or a supplementary mention) under a page-turn zone
@@ -2923,6 +2938,7 @@
         zoneDown = null;
         if (moved && e.detail !== 0) return;
         if (tapThrough(e)) return;
+        if (zoomed() && e.detail !== 0) return; // zoomed in: the edges are for panning
         fn(); // (detail 0: keyboard)
       });
     }
@@ -2934,16 +2950,24 @@
     rendition.on('keyup', onKey);
     let touchX = null;
     let touchT = 0;
+    let pinch = false; // two fingers were down during this touch
     rendition.on('touchstart', (e) => {
-      touchX = e.changedTouches[0].screenX;
-      touchT = Date.now();
+      if (e.touches.length > 1) pinch = true;
+      if (e.touches.length === 1 && !pinch) {
+        touchX = e.changedTouches[0].screenX;
+        touchT = Date.now();
+      }
     });
     rendition.on('touchend', (e) => {
+      if (e.touches.length) return; // fingers still down
+      const was = pinch;
+      pinch = false;
       if (touchX === null) return;
       const dx = e.changedTouches[0].screenX - touchX;
       touchX = null;
-      // a long press, or a drag while text is selected, is selecting, not swiping
-      if (Date.now() - touchT > 450 || hasSelection()) return;
+      // a pinch, a zoomed-in page (a swipe pans it), a long press, or a drag
+      // while text is selected: not a page turn
+      if (was || zoomed() || Date.now() - touchT > 450 || hasSelection()) return;
       if (Math.abs(dx) > 50) (dx < 0 ? next : prev)();
     });
 
@@ -3563,6 +3587,7 @@
     window.addEventListener('pagehide', commit);
     teardown = async () => {
       if (tts.on) stopTts();
+      window.removeEventListener('scroll', onWinScroll);
       if (strip()) strip().removeEventListener('scroll', onStripScroll);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('visibilitychange', onHide);
