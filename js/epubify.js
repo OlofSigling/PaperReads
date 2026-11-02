@@ -1508,7 +1508,19 @@ const Epubify = (() => {
       // further left but runs into the column. Decide per block of lines.
       const lineKind = new Map();
       if (twoCol && leftEdge > -Infinity) {
-        const outer = pg.lines.filter((l) => horizontal(l) && l.bbox[0] < leftEdge - 6).sort((a, b) => a.bbox[1] - b.bbox[1]);
+        // (a paragraph or section number hanging left of the text, "1  This
+        // Code covers…", "1.1  To which…", is part of its line, not a margin)
+        const LABEL = /^\s*\(?(?:\d{1,3}(?:\.\d{1,2}){0,3}|[ivxlc]{1,5}|[IVXLC]{1,5}|[a-zA-Z])[.)]?\s*$/;
+        const atEdge = (x) => Math.abs(x - leftEdge) <= 4;
+        const hanging = (l) => {
+          const sp = l.spans.filter((x) => x.text.trim()).sort((a, b) => a.bbox[0] - b.bbox[0]);
+          if (!sp.length || !LABEL.test(sp[0].text)) return false;
+          if (sp[1]) return atEdge(sp[1].bbox[0]);
+          const yc = (l.bbox[1] + l.bbox[3]) / 2;
+          return pg.lines.some((o) => o !== l && atEdge(o.bbox[0]) && Math.abs((o.bbox[1] + o.bbox[3]) / 2 - yc) < (l.bbox[3] - l.bbox[1]));
+        };
+        const big = (l) => Math.max(...l.spans.map((x) => x.size)) >= bodySize * 1.6; // (a title is never a margin note)
+        const outer = pg.lines.filter((l) => horizontal(l) && l.bbox[0] < leftEdge - 6 && !hanging(l) && !big(l)).sort((a, b) => a.bbox[1] - b.bbox[1]);
         let block = [];
         const close = () => {
           const wide = block.filter((l) => l.bbox[2] > leftEdge + 20).length;
@@ -1666,9 +1678,18 @@ const Epubify = (() => {
         const bodyLines = ordered.filter((t) => t[0] >= 0 && t[2].length >= 30 && Math.abs(t[3] - bodySize) <= 1);
         // (a page all in smaller type, like the reference list: any real column lines will do)
         const anyLines = ordered.filter((t) => t[0] >= 0 && t[2].length >= 30);
-        const colTop = cluster(bodyLines) ?? cluster(anyLines) ?? ysOf(anyLines)[0] ?? Infinity;
+        let colTop = cluster(bodyLines) ?? cluster(anyLines) ?? ysOf(anyLines)[0] ?? Infinity;
+        // both columns already run above that (a section opening with a lead
+        // paragraph in big type beside a short intro): the columns start there
+        const above = (k) => ordered.filter((t) => t[0] === k && t[1] < colTop - 2 && t[2].length >= 20 && t[3] < bodySize * 1.6); // (not a title)
+        const [a0, a1] = [above(0), above(1)];
+        if (a0.length >= 2 && a1.length >= 2) {
+          const [lo0, hi0, lo1, hi1] = [Math.min(...a0.map((t) => t[1])), Math.max(...a0.map((t) => t[1])), Math.min(...a1.map((t) => t[1])), Math.max(...a1.map((t) => t[1]))];
+          if (lo0 < hi1 && lo1 < hi0) colTop = Math.min(lo0, lo1);
+        }
         // headings side by side at the top of each column ("Introduction" | "Methods") stay in their columns
-        const sideBySide = (t) => ordered.some((o) => o !== t && o[0] === 1 - t[0] && Math.abs(o[1] - t[1]) <= 3 && (t[0] === 0 ? o[4] - t[6] : t[4] - o[6]) > 20);
+        // (also a little offset, when both are set in a heading style)
+        const sideBySide = (t) => ordered.some((o) => o !== t && o[0] === 1 - t[0] && (Math.abs(o[1] - t[1]) <= 3 || ((t[7] || t[3] >= bodySize + 2) && (o[7] || o[3] >= bodySize + 2) && Math.abs(o[3] - t[3]) < 0.5 && Math.abs(o[1] - t[1]) <= t[3] * 2)) && (t[0] === 0 ? o[4] - t[6] : t[4] - o[6]) > 20);
         for (const t of ordered) {
           if (t[0] === -1 && t[1] > colTop) t[0] = 2;
           else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2 && !sideBySide(t)) t[0] = -1; // author lines etc. above the columns
@@ -1722,7 +1743,31 @@ const Epubify = (() => {
       };
       const SECTION = /^((\d+(\.\d+)*\.?|[A-Z]\.|[IVX]+\.)\s+\S|(abstract|introduction|background|related work|methods?|materials and methods|results|discussion|conclusions?|acknowledge?ments?|references|appendix)\b)/i;
       let lastHeading = null;
+      let lastLead = null; // the last line of a paragraph set in big type
       let lastSmall = null; // the section heading just emitted, to join a wrapped second line
+      // A contents page in the front matter: the EPUB has its own contents,
+      // and the printed one comes out jumbled (entries, page numbers, columns)
+      // a labelled heading wrapped onto lines that run on in lowercase ("5.2 Research
+      // misconduct, / questionable research practices / and minor shortcomings")
+      const headingLike = (t) => t[7] || t[5] || t[3] >= bodySize + 2;
+      for (const t of ordered) {
+        if (!headingLike(t) || !/^(?:\d{1,2}(?:\.\d{1,2})*|[A-Z])\.?\s+\p{Lu}/u.test(t[2])) continue;
+        for (;;) {
+          const n = ordered
+            .filter((o) => o !== t && o[0] === t[0] && o[1] > t[1] && o[1] - t[1] < t[3] * 2.4)
+            .sort((a, b) => a[1] - b[1])[0];
+          if (!n || n[7] !== t[7] || n[5] !== t[5] || Math.abs(n[3] - t[3]) >= 0.5 || !/^\p{Ll}/u.test(n[2]) || (t[2] + ' ' + n[2]).split(/\s+/).length > 16) break;
+          t[2] += ' ' + n[2];
+          t[1] = n[1];
+          t[6] = Math.max(t[6], n[6]);
+          ordered.splice(ordered.indexOf(n), 1);
+        }
+      }
+      if (pdf.pages.indexOf(pg) < 5 && ordered.some((t) => /^(table of )?contents?$/i.test(t[2].trim()))) {
+        const rest = ordered.filter((t) => !/^(table of )?contents?$/i.test(t[2].trim()));
+        const tocish = rest.filter((t) => /\s\d{1,3}$/.test(t[2].trim()) || /^\d{1,2}(\.\d{1,2})*\.?\s+\S/.test(t[2].trim()));
+        if (rest.length && tocish.length >= rest.length * 0.6) ordered = [];
+      }
       for (let [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
         // first-page badges, not content
         if (pg === pdf.pages[0] && /^(open access|(research|review|original|brief) (article|research|report|communication)|research|r e s e a r c h.*)$/i.test(txt.trim())) continue;
@@ -1761,12 +1806,15 @@ const Epubify = (() => {
           (bold && sz >= bodySize - 1.2 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
             ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))) ||
           (standalone && sz >= bodySize - 0.5 && sz < bodySize + 3 && headingText(txt) && (styled || capsHeading(txt))) ||
-          (capsHeading(txt) && NUMBERED.test(txt) && sz >= bodySize - 2.5)
+          (capsHeading(txt) && NUMBERED.test(txt) && sz >= bodySize - 2.5) ||
+          // "1.1 Vision for a new publication culture": decimal-numbered, short, on its own
+          // (some layouts mark headings by colour only)
+          (standalone && /^\d{1,2}\.\d{1,2}(?:\.\d{1,2})*\.?\s+\p{Lu}/u.test(txt) && nWords <= 12 && !endsWithAny(txt, '.:;,') && sz >= bodySize - 0.5 && sz < bodySize + 3)
         ) {
           flushPara();
           const tag = minor && !bold ? 'h4' : 'h3';
           // a heading wrapped onto a second line is one heading
-          if (lastSmall && lastSmall.tag === tag && lastSmall.c === c && y > lastSmall.y && y - lastSmall.y < sz * 2.4 && parts.length - 1 === lastSmall.i && !endsWithAny(lastSmall.text, '.') &&
+          if (lastSmall && lastSmall.tag === tag && lastSmall.minor === minor && lastSmall.c === c && y > lastSmall.y && y - lastSmall.y < sz * 2.4 && parts.length - 1 === lastSmall.i && !endsWithAny(lastSmall.text, '.') &&
             !NUMBERED.test(txt) && !SECTION_WORD.test(txt) && !(SECTION_WORD.test(lastSmall.text) && lastSmall.text.split(/\s+/).length <= 2)) {
             lastSmall.text += ' ' + txt;
             lastSmall.y = y;
@@ -1776,19 +1824,30 @@ const Epubify = (() => {
             continue;
           }
           parts.push(`<${tag}>${escRich(headingCase(txt))}</${tag}>`);
-          lastSmall = { i: parts.length - 1, tag, text: txt, c, y };
+          lastSmall = { i: parts.length - 1, tag, text: txt, c, y, minor };
           prev = null;
           lastHeading = null;
           continue;
         }
         // big type is a heading, unless it's running text set large (an abstract or lead)
-        const bigText = txt.split(/\s+/).length > 14 || (lastHeading && (lastHeading.text + ' ' + txt).split(/\s+/).length > 24);
+        // (a lead paragraph set large: lines start lowercase or follow a large
+        // line of running text in the same size)
+        // (a title wrapped onto a second line starts lowercase too: "a new publication culture";
+        // "eLife digest" doesn't count as lowercase)
+        const wrapsTitle = lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2;
+        const bigText0 = txt.split(/\s+/).length > 14 || (lastHeading && (lastHeading.text + ' ' + txt).split(/\s+/).length > 24) || (/^\p{Ll}+(?:\s|$)/u.test(txt) && !wrapsTitle) ||
+          /[.!?]\s+\p{Lu}|,$/u.test(txt.replace(/^\s*\d{1,2}(\.\d{1,2})*\.?\s+/, '')) || // sentences: running text (after any section number)
+          (lastHeading && lastHeading.sz >= sz * 1.5 && txt.split(/\s+/).length >= 5) || // the paragraph under a title, in much smaller type
+          (lastLead && lastLead.c === c && Math.abs(lastLead.sz - sz) < 0.5 && y > lastLead.y && y - lastLead.y < sz * 1.8);
+        // (a bold numbered subheading is a heading, whatever follows: "1.1 To which activities does this Code apply?")
+        const bigText = bigText0 && !(bold && /^\d{1,2}\.\d{1,2}\.?\s+\p{Lu}/u.test(txt) && txt.split(/\s+/).length <= 14 && !/[.!?]\s+\p{Lu}/u.test(txt));
+        if (sz >= bodySize + 3 && bigText) lastLead = { c, y, sz };
         if (sz >= bodySize + 3 && !bigText) {
           flushPara();
           txt = txt.replace(/\s+(?:DOI|doi):?\s*10\.\S+.*$/, ''); // a DOI printed beside the title
           // a heading wrapped onto two lines is one heading
           // (a title runs on after its colon: "Hiring as Cultural Matching: The Case of …")
-          if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, lastHeading.tag === 'h1' ? '.' : '.:')) {
+          if (lastHeading && Math.abs(lastHeading.sz - sz) < 0.6 && lastHeading.c === c && y - lastHeading.y < sz * 2.2 && !endsWithAny(lastHeading.text, lastHeading.tag === 'h1' || /^\p{Ll}/u.test(txt) ? '.' : '.:')) {
             lastHeading.text += ' ' + txt;
             lastHeading.y = y;
             parts[lastHeading.i] = `<${lastHeading.tag}>${escRich(lastHeading.text)}</${lastHeading.tag}>`;
@@ -1803,6 +1862,13 @@ const Epubify = (() => {
           continue;
         }
         lastHeading = null;
+        // "2.4 Inequities in access to journals and other / publication venues"
+        if (lastSmall && parts.length - 1 === lastSmall.i && lastSmall.minor === minor && lastSmall.c === c && y > lastSmall.y && y - lastSmall.y < sz * 2.2 && /^\p{Ll}/u.test(txt) && txt.split(/\s+/).length <= 6 && !endsWithAny(txt, '.:;,') && !endsWithAny(lastSmall.text, '.:')) {
+          lastSmall.text += ' ' + txt;
+          lastSmall.y = y;
+          parts[lastSmall.i] = `<${lastSmall.tag}>${escRich(headingCase(lastSmall.text))}</${lastSmall.tag}>`;
+          continue;
+        }
         const x = bodyX0.get(c);
         let startsPara = x !== undefined && x0 > x + 3;
         if (prev && prev.c === c && lineGap.has(c) && y - prev.y > lineGap.get(c) * 1.6) startsPara = true;
@@ -1918,6 +1984,13 @@ const Epubify = (() => {
     }
     flushPara();
     pdf.doc.destroy();
+    // a chapter title on a divider page, printed again atop the next page: one heading
+    const H2 = /^<h2>(.*)<\/h2>$/;
+    const norm = (h) => h.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    for (let i = parts.length - 1; i > 0; i--) {
+      const [a, b] = [H2.exec(parts[i - 1]), H2.exec(parts[i])];
+      if (a && b && norm(a[1]).length >= 4 && (norm(b[1]) === norm(a[1]) || norm(b[1]).endsWith(' ' + norm(a[1])))) parts.splice(i - 1, 1);
+    }
     return { parts, images, title: dropScripts(title) || pdf.meta.title.trim() || stem, author: pdf.meta.author.trim(), twoCol };
   }
 
