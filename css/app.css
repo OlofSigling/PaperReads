@@ -480,3 +480,12 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .supp-table table { border-collapse: collapse; font-size: .8rem; }
 .supp-table td, .supp-table th { border: 1px solid var(--border); padding: 2px 6px; white-space: nowrap; }
 .supp-table pre { white-space: pre-wrap; font-size: .8rem; }
+.supp-office { max-height: 65vh; overflow: auto; font-size: .9rem; line-height: 1.45; }
+.supp-office img { display: block; max-width: 100%; height: auto; margin: 8px auto; background: #fff; }
+.supp-office p { margin: .4em 0; }
+.supp-office p.li { padding-left: 1em; text-indent: -.8em; }
+.supp-office h2, .supp-office h3, .supp-office h4 { margin: .9em 0 .3em; }
+.office-tbl { overflow-x: auto; margin: 8px 0; }
+.office-tbl table { border-collapse: collapse; font-size: .8rem; }
+.office-tbl td, .office-tbl th { border: 1px solid var(--border); padding: 2px 6px; vertical-align: top; }
+.office-tbl td p { margin: 0; }

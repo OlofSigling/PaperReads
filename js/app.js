@@ -1518,7 +1518,7 @@
     const file = new File([it.blob], it.name, { type: it.type });
     const dlg = $('#dialog');
     const head = `<h3>${Supp.icon(it)} ${esc(it.label)}</h3>${it.caption ? `<p class="small supp-cap">${esc(it.caption)}</p>` : ''}`;
-    const actions = `<div class="row end wrap"><button type="button" class="btn" id="supp-out">${/pdf/.test(it.type) ? 'Open' : 'Open with…'}</button><button value="ok" class="btn primary">Close</button></div>`;
+    const actions = `<div class="row end wrap"><button type="button" class="btn" id="supp-out">${/pdf/.test(it.type) ? 'Open' : 'Download'}</button><button value="ok" class="btn primary">Close</button></div>`;
     const out = () => {
       if (/pdf/.test(it.type)) {
         const url = URL.createObjectURL(file);
@@ -1529,7 +1529,12 @@
         if (/Android/i.test(navigator.userAgent)) a.download = it.name;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-      } else shareOrSave(file, it.label);
+      } else {
+        // a download, not the share sheet: sharing copies the whole file first (slow)
+        // and offers apps that take any file (the camera), not ones that open it
+        downloadFile(file);
+        toast('Saved to Downloads: tap Open in the download notice to choose an app');
+      }
     };
     if (/^image\//.test(it.type) && !/tiff/.test(it.type)) {
       const url = URL.createObjectURL(it.blob);
@@ -1547,8 +1552,24 @@
         const rows = t.split(/\r?\n/).filter((l) => l.trim()).slice(0, 300).map((l) => (l.match(new RegExp(`("([^"]|"")*"|[^${sep}]*)(${sep}|$)`, 'g')) || []).filter((x, i, a) => i < a.length - 1 || x).map((c) => c.replace(new RegExp(`${sep}$`), '').replace(/^"|"$/g, '').replace(/""/g, '"')));
         box.innerHTML = `<table>${rows.map((r, i) => `<tr>${r.map((c) => (i ? `<td>${esc(c)}</td>` : `<th>${esc(c)}</th>`)).join('')}</tr>`).join('')}</table>${t.split(/\r?\n/).length > 300 ? '<p class="muted small">First 300 rows.</p>' : ''}`;
       });
+    } else if (Office.canShow(it.type, it.name)) {
+      // Word, Excel, PowerPoint: shown here, offline
+      dlg.innerHTML = `<form method="dialog" class="dlg supp-view">${head}<div class="supp-office"><p class="muted small">Opening…</p></div>${actions}</form>`;
+      let urls = [];
+      dlg.onclose = () => urls.forEach((u) => URL.revokeObjectURL(u));
+      Office.render(it.blob, it.type, it.name)
+        .then((r) => {
+          const box = $('.supp-office', dlg);
+          if (!r || !box || !dlg.open) return r && r.urls.forEach((u) => URL.revokeObjectURL(u));
+          urls = r.urls;
+          box.innerHTML = r.html;
+        })
+        .catch(() => {
+          const box = $('.supp-office', dlg);
+          if (box) box.innerHTML = `<p class="muted small">Couldn’t read this file here. Download it to open it in another app.</p>`;
+        });
     } else {
-      dlg.innerHTML = `<form method="dialog" class="dlg supp-view">${head}<p class="muted small">${esc(it.name)} · ${(it.size / 1048576).toFixed(1)} MB. This kind of file opens in another app.</p>${actions}</form>`;
+      dlg.innerHTML = `<form method="dialog" class="dlg supp-view">${head}<p class="muted small">${esc(it.name)} · ${(it.size / 1048576).toFixed(1)} MB. This kind of file opens in another app: download it, then tap Open.</p>${actions}</form>`;
       dlg.onclose = null;
     }
     $('#supp-out', dlg).addEventListener('click', out);
