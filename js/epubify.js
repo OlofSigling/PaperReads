@@ -99,7 +99,33 @@ const Epubify = (() => {
       } else out += ch;
     }
     if (open) out += `</${open}>`;
-    return out.replace(/<(sup|sub)>\s*<\/\1>/g, '');
+    return mathLetters(out.replace(/<(sup|sub)>\s*<\/\1>/g, ''));
+  }
+  // Maths letters (𝑄, 𝜋, 𝐱) as plain letters in italic or bold: e-reader fonts
+  // often lack the maths alphabets, and an accent on one ("𝑄̂") comes out as a box
+  const MATH_RUN = /(?:[\u{1D400}-\u{1D7FF}][\u0300-\u036F]*)+/gu;
+  function mathLetters(html) {
+    return html.replace(MATH_RUN, (run) => {
+      let out = '';
+      let style = null;
+      let buf = '';
+      const flush = () => {
+        if (buf) out += style ? `<${style}>${buf}</${style}>` : buf;
+        buf = '';
+      };
+      for (const m of run.matchAll(/([\u{1D400}-\u{1D7FF}])([\u0300-\u036F]*)/gu)) {
+        const cp = m[1].codePointAt(0);
+        const italic = (cp >= 0x1d434 && cp <= 0x1d49b) || (cp >= 0x1d6e2 && cp <= 0x1d755);
+        const bold = (cp >= 0x1d400 && cp <= 0x1d433) || (cp >= 0x1d6a8 && cp <= 0x1d6e1) || (cp >= 0x1d7ce && cp <= 0x1d7d7);
+        const plain = italic || bold || m[2] || cp >= 0x1d7ce;
+        const st = italic ? 'i' : bold ? 'b' : null;
+        if (st !== style) flush();
+        style = st;
+        buf += (plain ? m[1].normalize('NFKC') : m[1]) + m[2];
+      }
+      flush();
+      return out;
+    });
   }
   const startsWithAny = (s, prefixes) => prefixes.some((p) => s.startsWith(p));
 
@@ -716,9 +742,177 @@ const Epubify = (() => {
   const imgTag = (n, fig, box) =>
     `<p><img src="pdfimg:${n}" alt=""${fig ? ` data-fig="${fig}"` : ''}/></p>` + (box && box.caption ? `<p>${escRich(box.caption)}</p>` : '');
 
+  // Spans (sorted by height on the page, each with .y its middle) into lines.
+  function lineRows(group, bodySize, c = 0) {
+    // Lines from the full-size type; then each small piece (a sub- or
+    // superscript, an accent) joins the line it sits on. Chained
+    // together, the pieces of maths between two lines would glue the
+    // lines into one ("When 𝑄̂ FQE has / been learned").
+    // (a stretched bracket on its own sits off the middle of its line too)
+    const DELIM = /^[\s[\](){}|⟨⟩‖]+$/;
+    const reach = (s) => (DELIM.test(s.text) ? 10 : 6);
+    const small = (s) => (s.size < bodySize * 0.85 || DELIM.test(s.text)) && group.some((o) => o !== s && o.size >= bodySize * 0.85 && !DELIM.test(o.text) && Math.abs(o.y - s.y) <= reach(s));
+    const own = [];
+    let cur = null;
+    for (const s of group) {
+      if (small(s)) continue;
+      if (cur && Math.abs(s.y - cur.at(-1).y) <= 5 && Math.abs(s.y - cur.base) <= 5) cur.push(s);
+      else {
+        if (cur) own.push(cur);
+        cur = [s];
+        cur.col = c;
+        cur.base = s.y;
+      }
+    }
+    if (cur) own.push(cur);
+    for (const s of group) {
+      if (!small(s)) continue;
+      let best = null;
+      for (const r of own) if (Math.abs(r.base - s.y) <= reach(s) && (!best || Math.abs(r.base - s.y) < Math.abs(best.base - s.y))) best = r;
+      if (best) best.push(s);
+      else {
+        const r = [s];
+        r.col = c;
+        r.base = s.y;
+        own.push(r);
+      }
+    }
+    own.sort((a, b) => a.base - b.base);
+    return own;
+  }
+
+  // Display equations: lines mostly of maths, set off from the text
+  // (indented, or numbered "(8)" at the right), become pictures of
+  // themselves: as text their pieces come out jumbled or dropped.
+  // rows: arrays of spans { text, x0, x1, y (middle), size, font }, each
+  // with .col and .base (the line's middle). → crop boxes, each with .reg
+  // (its rows) and .alt.
+  // (LaTeX sets maths in ordinary letters, in its own maths fonts)
+  const EQ_FONT = /CMMI|CMSY|CMEX|CMBSY|MSBM|MSAM|EUSM|EUFM|RSFS|TXMI|TXSY|NewTXMI|LMMath|STIXMath|Cambria.?Math|XITSMath|MathematicalPi|MTMI|MTSY|Symbol/i;
+  function findEquations(rows, bodySize) {
+    const MATH = /[\u{1D400}-\u{1D7FF}\u0370-\u03FF∑∏∫∮∈∉⊂⊆∪∩≤≥≠≈≡∝∞∀∃∂∇√±∓×÷·⋅∗∣‖′″∧∨¬⇒⇔→↦⊧⊢…\u0302\u0303\u0304\u0307=<>+−^_|∶]/u;
+    const MATH_WORD = /^(?:max|min|arg|argmax|argmin|sup|inf|lim|log|exp|sin|cos|tan|det|var|cov|mod|tr|diag|sgn|softmax)$/;
+    const STRONG = /[\u{1D400}-\u{1D7FF}∑∏∫∮∈∉⊂⊆∪∩≡∝∞∀∃∂∇√∧∨¬⇒⇔→↦⊧⊢∣‖\u0302\u0303\u0304\u0307]/u;
+    const NUMBER = /^\(\d{1,3}[a-z]?\)$/;
+    const textOf = (r) => [...r].sort((a, b) => a.x0 - b.x0).map((z) => z.text).join(' ');
+    // characters of maths, of signs only maths uses, and plain words, in some spans
+    const tally = (spans) => {
+      let n = 0;
+      let m = 0;
+      let strong = 0;
+      let words = 0;
+      for (const z of spans) {
+        const mf = EQ_FONT.test(z.font || '');
+        const cps = [...z.text.replace(/[\s\d.,;:()[\]{}]/g, '')]; // (numbers and brackets count for neither)
+        n += cps.length;
+        for (const ch of cps) {
+          if (mf || MATH.test(ch)) m++;
+          if ((mf && /\p{L}|[^\x00-\x7f]/u.test(ch)) || STRONG.test(ch)) strong++;
+        }
+        if (!mf) words += (z.text.match(/(?<![\p{L}\d])[a-z]{3,}(?![\p{L}\d])/gu) || []).filter((w) => !MATH_WORD.test(w)).length; // plain words, not maths letters
+      }
+      return { n, m, strong, words };
+    };
+    const mathy = (r) => {
+      const { n, m, strong, words } = tally(r);
+      // (at least one sign only maths uses: a table row of "12.1 ± 3.4 < 0.05" isn't maths)
+      return n >= 2 && strong >= 1 && m >= 2 && m >= n * 0.3 && words <= 3;
+    };
+    const numbered = (r) => r.some((z) => NUMBER.test(z.text.trim()));
+    const rights = new Counter();
+    rows.filter((r) => r.length && textOf(r).length > 40).forEach((r) => rights.add(`${r.col}:${pyRound(Math.max(...r.map((z) => z.x1)))}`));
+    const rightOf = (c) => {
+      let best = null;
+      for (const [k, n] of rights.entries()) if (k.startsWith(c + ':') && (!best || n > best[1])) best = [Number(k.split(':')[1]), n];
+      return best ? best[0] : null;
+    };
+    const lefts = new Counter();
+    rows.filter((r) => r.length && textOf(r).length > 40).forEach((r) => lefts.add(`${r.col}:${pyRound(Math.min(...r.map((z) => z.x0)))}`));
+    const leftOf = (c) => {
+      let best = null;
+      for (const [k, n] of lefts.entries()) if (k.startsWith(c + ':') && (!best || n > best[1])) best = [Number(k.split(':')[1]), n];
+      return best ? best[0] : null;
+    };
+    const indented = (r) => {
+      const left = leftOf(r.col);
+      return left !== null && Math.min(...r.map((z) => z.x0)) - left > 12;
+    };
+    const prose = (r) => textOf(r).length > 40 && !indented(r);
+    const cand = rows.filter((r) => r.col >= -1 && r.length && mathy(r));
+    const used = new Set();
+    const regions = [];
+    for (const r of cand.sort((a, b) => a.base - b.base)) {
+      if (used.has(r)) continue;
+      const reg = [r];
+      used.add(r);
+      // the lines of one equation, and the bits of maths between them
+      for (let grew = true; grew; ) {
+        grew = false;
+        const lo = Math.min(...reg.map((x) => x.base));
+        const hi = Math.max(...reg.map((x) => x.base));
+        for (const o of rows) {
+          if (used.has(o) || o.col !== r.col || !o.length) continue;
+          const near = o.base > lo - bodySize * 1.9 && o.base < hi + bodySize * 1.9;
+          if (near && (mathy(o) || (o.base > lo && o.base < hi) || textOf(o).trim().length <= 3 || numbered(o) || (indented(o) && !prose(o) && o.base > lo - bodySize * 1.6 && o.base < hi + bodySize * 1.6))) {
+            reg.push(o);
+            used.add(o);
+            grew = true;
+          }
+        }
+      }
+      regions.push(reg);
+    }
+    const boxes = [];
+    for (const reg of regions) {
+      const all = reg.flat();
+      const x0 = Math.min(...all.map((z) => z.x0));
+      // (one equation number goes beside the picture as text: cropped with it,
+      // the gap to the margin would shrink the maths on a phone)
+      const nums = all.filter((z) => NUMBER.test(z.text.trim()));
+      const inner = nums.length === 1 ? all.filter((z) => z !== nums[0]) : all;
+      const x1 = Math.max(...inner.map((z) => z.x1));
+      const left = leftOf(reg[0].col);
+      const lo = Math.min(...reg.map((x) => x.base));
+      const hi = Math.max(...reg.map((x) => x.base));
+      // (an unnumbered bit of maths with running text right beside it is inline: a tall fraction in a sentence)
+      const inline = !reg.some(numbered) && rows.some((o) => o.col === reg[0].col && !reg.includes(o) && prose(o) && o.base > lo - bodySize * 1.1 && o.base < hi + bodySize * 1.1);
+      const setOff = !inline && (reg.some(numbered) || reg.length >= 2 || (left !== null && x0 - left > 12));
+      const txt = textOf(all);
+      // (a block full of words, or of numbers, is a table or a list, not an equation)
+      const wordy = (txt.match(/(?<![\p{L}\d])[A-Za-z]{3,}(?![\p{L}\d])/gu) || []).length > reg.length * 2 + 4 ||
+        tally(all).strong < reg.length * 1.5; // (a table of numbers with a symbol here and there)
+      // (numbered lines of an algorithm, "6: Define a* = …", are a listing)
+      const listing = reg.some((r) => /^\d{1,3}:$/.test([...r].sort((p, q) => p.x0 - q.x0)[0].text.trim()));
+      // (a sentence with maths in it, a full line of the text: "where F(s) = … and …")
+      const right = rightOf(reg[0].col);
+      const sentence = tally(all).words >= 3 && reg.some((r) => !indented(r) && right !== null && Math.max(...r.map((z) => z.x1)) > right - 10);
+      if (!setOff || wordy || listing || sentence || txt.replace(/\s/g, '').length < 4) continue;
+      let y0 = Math.min(...all.map((z) => z.y - z.size * 0.8));
+      let y1 = Math.max(...all.map((z) => z.y + z.size * 0.7));
+      // (not into the lines above and below)
+      for (const o of rows) {
+        if (reg.includes(o) || !o.length || o.col !== reg[0].col && o.col !== -1) continue;
+        const ox0 = Math.min(...o.map((z) => z.x0));
+        const ox1 = Math.max(...o.map((z) => z.x1));
+        if (ox1 < x0 || ox0 > x1) continue;
+        if (o.base < y0 + 1 && o.base + o[0].size * 0.45 > y0) y0 = o.base + o[0].size * 0.45;
+        if (o.base > y1 - 1 && o.base - o[0].size * 0.45 < y1) y1 = o.base - o[0].size * 0.45;
+      }
+      const box = [Math.max(0, x0 - 3), Math.max(0, y0), x1 + 3, y1];
+      box.reg = reg;
+      const num = nums[0];
+      box.alt = num ? `Equation ${num.text.trim()}` : 'Equation';
+      box.no = nums.length === 1 ? num.text.trim() : '';
+      box.em = (box[2] - box[0]) / bodySize; // (as wide as in the PDF, measured in its text size)
+      boxes.push(box);
+    }
+    return boxes;
+  }
+
+  const eqTag = (n, alt, no, em) => `<p class="equation${no ? ' numbered' : ''}"><img src="pdfimg:${n}" alt="${esc(alt)}"${em ? ` style="width:${Number(em).toFixed(2)}em"` : ''}/>${no ? `<span class="eqno">${esc(no)}</span>` : ''}</p>`;
+
   // Render the page once and crop each image box (PyMuPDF get_pixmap(clip=…)).
-  async function cropImages(pg, boxes) {
-    const scale = 2;
+  async function cropImages(pg, boxes, scale = 2) {
     const vp = pg.page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.ceil(vp.width);
@@ -1108,17 +1302,24 @@ const Epubify = (() => {
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
           if (t.trim()) {
-            spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y0: s.bbox[1], y1: s.bbox[3], yc: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, bold: isBold(s), font: s.font });
+            spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y0: s.bbox[1], y1: s.bbox[3], yc: (s.bbox[1] + s.bbox[3]) / 2, y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, bold: isBold(s), font: s.font });
           }
         }
       }
       spans.sort((a, b) => a.yc - b.yc || a.x0 - b.x0);
-      const rows = [];
-      for (const s of spans) {
-        if (rows.length && Math.abs(s.yc - rows[rows.length - 1].at(-1).yc) <= 4) rows[rows.length - 1].push(s);
-        else rows.push([s]);
-      }
+      const rows = lineRows(spans, bodySize);
       const items = [];
+      // display equations, as pictures
+      const eqs = findEquations(rows, bodySize);
+      if (eqs.length) {
+        const blobs = await cropImages(pg, eqs, 3).catch(() => []);
+        eqs.forEach((box, k) => {
+          if (!blobs[k]) return;
+          images.push(blobs[k]);
+          for (const r of box.reg) rows.splice(rows.indexOf(r), 1);
+          items.push({ kind: 'eq', y0: box[1], y1: box[3], n: images.length - 1, alt: box.alt, no: box.no, em: box.em });
+        });
+      }
       for (const r of rows) {
         r.sort((a, b) => a.x0 - b.x0);
         const txt = resolveHat(ws(joinSpans(r)).trim());
@@ -1231,6 +1432,12 @@ const Epubify = (() => {
             parts.push(`<h1>${escRich(title)}</h1>`);
             state.titleDone = true;
           }
+          continue;
+        }
+        if (it.kind === 'eq') {
+          flush();
+          parts.push(eqTag(it.n, it.alt, it.no, it.em));
+          pageStart = false;
           continue;
         }
         if (it.kind === 'img') {
@@ -1555,16 +1762,8 @@ const Epubify = (() => {
       const rows = [];
       for (const c of [-3, -2, -1, 0, 1]) {
         const group = spans.filter((sp) => colOf(sp) === c).sort((a, b) => a.y - b.y || a.x0 - b.x0);
-        let cur = null;
-        for (const s of group) {
-          if (cur && Math.abs(s.y - cur.at(-1).y) <= 5) cur.push(s);
-          else {
-            if (cur) rows.push(cur);
-            cur = [s];
-            cur.col = c;
-          }
-        }
-        if (cur) rows.push(cur);
+        const own = lineRows(group, bodySize, c);
+        rows.push(...own);
       }
       if (twoCol) {
         // a full-width span's row also takes same-height spans from the columns
@@ -1588,6 +1787,25 @@ const Epubify = (() => {
         a.col = b.col = rows[i].col;
         rows.splice(i, 1, a, b);
       }
+      {
+        const boxes = findEquations(rows, bodySize);
+        if (boxes.length) {
+          const blobs = await cropImages(pg, boxes, 3).catch(() => []);
+          boxes.forEach((box, k) => {
+            if (!blobs[k]) return;
+            images.push(blobs[k]);
+            const n = images.length - 1;
+            const first = [...box.reg].sort((a, b) => a.base - b.base)[0];
+            for (const r of box.reg) rows.splice(rows.indexOf(r), 1);
+            const sp = { text: `\uE000${n}\uE001${box.alt}\uE001${box.no}\uE001${box.em}`, x0: box[0], x1: box[2], y: first.base, size: bodySize, font: '', bold: false, line: first[0].line };
+            const row = [sp];
+            row.col = first.col;
+            row.base = first.base;
+            row.eq = true;
+            rows.splice(rows.indexOf(first) >= 0 ? rows.indexOf(first) : rows.length, 0, row);
+          });
+        }
+      }
       let ordered = [];
       const pageAsides = [];
       const marginRows = [];
@@ -1595,6 +1813,10 @@ const Epubify = (() => {
       const leftBlockRows = [];
       for (let row of rows) {
         const rowCol = row.col; // (row gets replaced by filtered copies below)
+        if (row.eq) {
+          ordered.push([twoCol ? rowCol : 0, row[0].y, row[0].text, bodySize, row[0].x0, false, row[0].x1, false, false]);
+          continue;
+        }
         if (rowCol === -2 || rowCol === -3) {
           // margin notes and boxed inserts: after the page's text, so they
           // don't interrupt the narrative (as the script does for boxes)
@@ -1769,6 +1991,13 @@ const Epubify = (() => {
         if (rest.length && tocish.length >= rest.length * 0.6) ordered = [];
       }
       for (let [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
+        if (txt.startsWith('\uE000')) {
+          const [n, alt, no, em] = txt.slice(1).split('\uE001');
+          flushPara();
+          parts.push(eqTag(n, alt, no, em));
+          prev = null;
+          continue;
+        }
         // first-page badges, not content
         if (pg === pdf.pages[0] && /^(open access|(research|review|original|brief) (article|research|report|communication)|research|r e s e a r c h.*)$/i.test(txt.trim())) continue;
         if (capBuf) {
@@ -2095,7 +2324,7 @@ const Epubify = (() => {
         } catch {}
         let type = blob ? (blob.type || '').split(';')[0] : '';
         // tiny files are spacers/pixels; text/html is a bot-check or error page
-        if (!blob || blob.size < 1024 || (type && type !== 'application/octet-stream' && !type.startsWith('image/'))) {
+        if (!blob || (blob.size < 1024 && !(bestSrc(img) || '').startsWith('pdfimg:')) || (type && type !== 'application/octet-stream' && !type.startsWith('image/'))) {
           img.remove();
           continue;
         }
@@ -2106,7 +2335,7 @@ const Epubify = (() => {
         const name = `images/img${String(i).padStart(3, '0')}${IMG_TYPES[type]}`;
         media.push({ name, blob, type });
         img.setAttribute('src', name);
-        for (const a of ['srcset', 'data-srcset', 'data-src', 'loading', 'decoding', 'sizes', 'width', 'height', 'style']) img.removeAttribute(a);
+        for (const a of ['srcset', 'data-srcset', 'data-src', 'loading', 'decoding', 'sizes', 'width', 'height', 'style']) if (!(a === 'style' && img.parentElement && img.parentElement.classList.contains('equation'))) img.removeAttribute(a); // (an equation keeps its size in em)
         if (!img.hasAttribute('alt')) img.setAttribute('alt', '');
       }
     };
@@ -3151,6 +3380,9 @@ table{border-collapse:collapse;font-size:.85em;max-width:100%;}
 td,th{overflow-wrap:break-word;}
 td,th{border:1px solid #9995;padding:.2em .4em;}
 .equation,.ltx_equation{display:block;overflow-x:auto;}
+.equation.numbered{display:flex;align-items:center;justify-content:space-between;gap:0.6em;}
+.equation img{min-width:0;max-width:100%;}
+.eqno{flex:none;}
 .ltx_tag_equation{float:right;}
 .ltx_bibitem{font-size:.9em;}
 small{font-size:.85em;}

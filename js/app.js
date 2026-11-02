@@ -2809,6 +2809,8 @@
       body: { background: dark ? '#121211 !important' : '#fcfcfb !important', color: dark ? '#f0efec !important' : '#0b0b0b !important' },
       a: { color: dark ? '#6aa7f0 !important' : '#2a78d6 !important' },
       'img, svg': { 'max-width': '100% !important' },
+      // equations cut from a PDF are black on white: light on dark at night
+      ...(dark ? { '.equation img': { filter: 'invert(0.93) hue-rotate(180deg)' } } : {}),
       'td, th': { 'border-color': '#8885 !important', 'overflow-wrap': 'break-word' },
       // wide tables fit the page instead of running under the next text
       // (also in EPUBs made before the converter unboxed LaTeX's resized tables)
