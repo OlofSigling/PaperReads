@@ -754,7 +754,7 @@ const Epubify = (() => {
   // Scan for the vertical line that body-text lines don't cross.
   function findGutter(pdf, pageW) {
     const sizes = new Counter();
-    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size));
+    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size), s.text.trim().length); // (by amount of text: short labels mustn't outvote the body)
     const body = sizes.mostCommon();
     const lines = [];
     for (const pg of pdf.pages)
@@ -804,7 +804,7 @@ const Epubify = (() => {
     // The gutter test above is fooled by labels inside figures. Second test:
     // in two-column text, almost no full lines of body text cross the centre.
     const sizes = new Counter();
-    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size));
+    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size), s.text.trim().length); // (by amount of text: short labels mustn't outvote the body)
     const body = sizes.mostCommon();
     let left = 0;
     let right = 0;
@@ -1327,7 +1327,7 @@ const Epubify = (() => {
       for (const l of pg.lines) {
         for (const s of l.spans) {
           if (!s.text.trim()) continue;
-          sizes.add(pyRound(s.size));
+          sizes.add(pyRound(s.size), s.text.trim().length);
           globX0.add(pyRound(s.bbox[0] / 5) * 5);
         }
       }
@@ -1384,7 +1384,7 @@ const Epubify = (() => {
         if (y < ph * 0.1 || y > ph * 0.9) {
           const t = edgeKey(l.spans.map((s) => s.text).join(''));
           if (t) seen.add(t);
-          if (horizontal(l)) for (const sp of l.spans) if (sp.text.trim()) edge.push({ y: (sp.bbox[1] + sp.bbox[3]) / 2, x: sp.bbox[0], text: sp.text });
+          if (horizontal(l)) for (const sp of l.spans) if (sp.text.trim()) edge.push({ y: (sp.bbox[1] + sp.bbox[3]) / 2, x: sp.bbox[0], x1: sp.bbox[2], text: sp.text });
         }
       }
       // whole visual rows too: a footer can be several runs ("the bmj" logo +
@@ -1393,9 +1393,22 @@ const Epubify = (() => {
       let row = [];
       const addRow = () => {
         if (!row.length) return;
-        const sorted = row.sort((a, b) => a.x - b.x).map((r) => r.text).join(' ');
+        row.sort((a, b) => a.x - b.x);
+        const sorted = row.map((r) => r.text).join(' ');
         seen.add(edgeKey(sorted));
         seen.add(edgeKey(sorted.replace(/^\s*[\divxlc]{1,4}\s+|\s+[\divxlc]{1,4}\s*$/gi, '')));
+        // and each piece of the row on its own ("Journal (2024) 12:32" … "Page 5 of 13"):
+        // the columns can take a header apart
+        let piece = [row[0]];
+        const flush = () => piece.length < row.length && seen.add(edgeKey(piece.map((r) => r.text).join(' ')));
+        for (let k = 1; k < row.length; k++) {
+          if (row[k].x - (row[k - 1].x1 ?? row[k - 1].x) > 24) {
+            flush();
+            piece = [];
+          }
+          piece.push(row[k]);
+        }
+        flush();
         row = [];
       };
       for (const e of edge) {
@@ -1508,11 +1521,23 @@ const Epubify = (() => {
         }
         close();
       }
+      // A line running across the gutter without a break is full width,
+      // whatever pieces it comes in (a caption split at a bold "Fig. 6" or
+      // at each special hyphen would otherwise be cut into the two columns)
+      const fullWidth = new Set();
+      if (twoCol)
+        for (const l of pg.lines) {
+          if (!horizontal(l) || !(l.bbox[0] < mid - 12 && l.bbox[2] > mid + 12)) continue;
+          const sp = l.spans.filter((x) => x.text.trim()).sort((a, b) => a.bbox[0] - b.bbox[0]);
+          const gapAtMid = sp.some((x, k) => k && x.bbox[0] - sp[k - 1].bbox[2] > 6 && sp[k - 1].bbox[2] < mid + 20 && x.bbox[0] > mid - 20);
+          if (sp.length && !gapAtMid) fullWidth.add(l);
+        }
       const colOf = (sp) => {
         if (!twoCol) return 0;
         const kind = lineKind.get(sp.line);
         if (kind === 'margin') return -2;
         if (kind === 'box') return -3;
+        if (fullWidth.has(sp.line)) return -1;
         return sp.x0 < mid - 12 && sp.x1 > mid + 12 ? -1 : (sp.x0 + sp.x1) / 2 < mid ? 0 : 1;
       };
       const rows = [];
@@ -1606,7 +1631,18 @@ const Epubify = (() => {
         // Labels inside vector figures ("weight layer", "iter. (1e4)"): short
         // runs of smaller type, or rows that are mostly numbers.
         const letters = (txt.match(/\p{L}/gu) || []).length;
-        if (!CAPTION.test(txt) && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4) || letters < txt.replace(/\s/g, '').length * 0.4)) continue;
+        // (but the short last line of a caption or note continues the long line above it)
+        const continues = () => {
+          const x0 = Math.min(...row.map((z) => z.x0));
+          return rows.some((o) => {
+            if (o === row || !o.length || !(o[0].y < row[0].y) || row[0].y - o[0].y > sz * 1.9 || Math.abs(o[0].size - row[0].size) > 0.6) return false;
+            const ot = o.map((z) => z.text).join(' ').trim();
+            return Math.abs(Math.min(...o.map((z) => z.x0)) - x0) < 4 && ot.length > 40 && !/[.!?:]\s*$/.test(ot);
+          });
+        };
+        // (a bold line a size below the body that reads like words is a subheading, not a label)
+        const subhead = row.every((z) => z.bold || !z.text.trim()) && sz >= bodySize - 1.2 && /^\p{Lu}/u.test(txt) && txt.split(/\s+/).length >= 2 && letters > txt.replace(/\s/g, '').length * 0.8;
+        if (!CAPTION.test(txt) && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead) || letters < txt.replace(/\s/g, '').length * 0.4)) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
         const bold = row.every((sp) => sp.bold || !sp.text.trim());
         const fw = new Counter();
@@ -1636,6 +1672,17 @@ const Epubify = (() => {
         for (const t of ordered) {
           if (t[0] === -1 && t[1] > colTop) t[0] = 2;
           else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2 && !sideBySide(t)) t[0] = -1; // author lines etc. above the columns
+        }
+        // the last line of a full-width paragraph (a caption's "policy
+        // inspection") is short, so it sits in a column: it goes with the
+        // line above it when nothing stands beside it in the other column
+        const byY = [...ordered].sort((a, b) => a[1] - b[1]);
+        for (const t of byY) {
+          if (t[0] < 0 || t[0] > 1) continue;
+          const above = byY.filter((o) => o !== t && (o[0] === -1 || o[0] === 2) && o[1] < t[1] && t[1] - o[1] < t[3] * 1.8 && Math.abs(o[3] - t[3]) < 0.6 && Math.abs(o[4] - t[4]) < 4).pop();
+          if (!above) continue;
+          if (ordered.some((o) => o !== t && o[0] >= 0 && o[0] <= 1 && o[0] !== t[0] && Math.abs(o[1] - t[1]) < t[3])) continue;
+          t[0] = above[0];
         }
         // a bare "Table 5" label over a full-width title goes with its title
         for (const t of ordered) {
@@ -1681,23 +1728,37 @@ const Epubify = (() => {
         if (pg === pdf.pages[0] && /^(open access|(research|review|original|brief) (article|research|report|communication)|research|r e s e a r c h.*)$/i.test(txt.trim())) continue;
         if (capBuf) {
           // (a caption's wide first line counts as full width, its next line as a column)
-          const gapBreak = (c !== capBuf.c && c !== -1 && capBuf.c !== -1) || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
+          let gapBreak = (c !== capBuf.c && c !== -1 && capBuf.c !== -1) || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
+          // (in a block of notes, a sentence ending short of the margin ends its note)
+          if (capBuf.aside && endsWithAny(capBuf.lines.at(-1).trimEnd(), TERMINAL) && capBuf.lastX1 < capBuf.maxX1 - 20) gapBreak = true;
           if (!gapBreak) {
             capBuf.lines.push(txt);
             capBuf.y = y;
+            capBuf.lastX1 = x1;
+            capBuf.maxX1 = Math.max(capBuf.maxX1 || 0, x1);
             continue;
           }
           endCaption();
         }
-        if (CAPTION.test(txt)) {
+        // (a sentence that wraps onto "Fig. 3. Best performing …" isn't a
+        // caption: the line before it in the same type didn't end a sentence)
+        const midSentence = prev && prev.c === c && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.4 && Math.abs(sz - prev.sz) < 0.5 && !endsWithAny(prev.txt.trimEnd(), TERMINAL);
+        if (CAPTION.test(txt) && !midSentence) {
           capBuf = { lines: [txt], c, y, sz };
+          continue;
+        }
+        // full-width lines in small type between the columns (a table's
+        // note) are a block of their own: they mustn't take in the column
+        // text that follows, which continues the page before
+        if ((c === -1 || c === 2) && sz <= bodySize - 1 && !headingText(txt) && txt.split(/\s+/).length >= 4) {
+          capBuf = { lines: [txt], c, y, sz, aside: true, lastX1: x1, maxX1: x1 };
           continue;
         }
         // bold, body-sized, short and numbered (or a standard name): a section heading
         const nWords = txt.split(/\s+/).length;
         const standalone = !paraBuf.length || endsWithAny(paraBuf.at(-1).trimEnd(), TERMINAL);
         if (
-          (bold && sz >= bodySize - 0.5 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
+          (bold && sz >= bodySize - 1.2 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
             ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))) ||
           (standalone && sz >= bodySize - 0.5 && sz < bodySize + 3 && headingText(txt) && (styled || capsHeading(txt))) ||
           (capsHeading(txt) && NUMBERED.test(txt) && sz >= bodySize - 2.5)
@@ -1758,11 +1819,15 @@ const Epubify = (() => {
         // (prose only: indented table rows stay one per line)
         const prose = (txt.match(/\p{L}{2,}/gu) || []).length >= 4 && (txt.match(/\d/g) || []).length < txt.length * 0.15;
         if (indented && sameIndent && prose) startsPara = false;
+        // the short last line of an indented paragraph ("like him.") continues
+        // the line above when that one didn't end a sentence
+        const tail = indented && prev && prev.c === c && prev.indented && Math.abs(x0 - prev.x0) <= 1.5 && Math.abs(sz - prev.sz) < 0.5 && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && !endsWithAny(prev.txt.trimEnd(), TERMINAL);
+        if (tail) startsPara = false;
         if (startsWithAny(txt.trimStart(), ['•', '–', '- ', '* '])) startsPara = true;
         if (startsPara) {
           flushPara();
           paraQuote = indented && sz < bodySize - 0.4;
-        } else if (!(indented && sameIndent && prose)) paraQuote = paraQuote && indented;
+        } else if (!(indented && sameIndent && prose) && !tail) paraQuote = paraQuote && indented;
         paraBuf.push(txt);
         prev = { c, y, sz, x1, txt, x0, indented, indent: x0 - (x ?? x0) };
       }
@@ -2371,11 +2436,34 @@ const Epubify = (() => {
         const AUTHOR_START = /(?<=[\p{L}\d)]\.\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}(?:,\s[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}[,.]|\.\s(?:1[89]|20)\d\d))/u;
         // social-science style: "Surname, First[, First Surname][ and First Surname]. 1998."
         const NAMED_START = /(?<=\s)(?=[\p{Lu}][\p{L}'’-]+,\s[\p{Lu}][\p{L}'’-]+(?:\s[\p{Lu}]\.)*(?:,\s[\p{Lu}][\p{L}'’.\s-]{1,40}?)*(?:,?\s(?:and|&)\s[\p{Lu}][\p{L}'’.\s-]{1,40}?)?\.\s(?:1[89]|20)\d\d[a-z]?\.)/u;
-        out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).flatMap((x) => x.split(NAMED_START)).map((x) => x.trim()).filter(Boolean)));
+        // APA: "Grice, H. P. (1975). Logic and …" (not inside an author list: "…, & Hope, K. (2004).")
+        const APA_START = /(?<![,&]\s)(?<=\S\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?,\s[\p{Lu}]\.[^()]{0,160}?\((?:1[89]|20)\d\d[a-z]?\)\.)/u;
+        // "Alberts SC, Altmann J. 2012." is an entry start even where the entry
+        // before lost its last line (no full stop to split after)
+        const VANCOUVER_START = /(?<![,&]\s)(?<=\S\s)(?=(?:[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3},\s)*[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}\.\s(?:1[89]|20)\d\d[a-z]?\.\s)/u;
+        out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).flatMap((x) => x.split(NAMED_START)).flatMap((x) => x.split(APA_START)).flatMap((x) => x.split(VANCOUVER_START)).map((x) => x.trim()).filter(Boolean)));
       }
       // one paragraph per printed line: fold lines that don't start an
       // entry into the entry above (when the list is numbered at all)
       const isStart = (t) => /^\[?\d{1,3}[\].]?\s/.test(t);
+      // an entry that ran on into the next one ("… Jan 10. 3. Canada: …"):
+      // split where the next number in sequence starts
+      if (out.filter(isStart).length >= 3) {
+        const split = [];
+        for (let t of out) {
+          for (;;) {
+            const m = /^\[?(\d{1,3})[\].]?\s/.exec(t);
+            if (!m) break;
+            const next = +m[1] + 1;
+            const at = new RegExp(`(?<=[.)]\\s)\\[?${next}[\\].]\\s+(?=[\\p{Lu}])`, 'u').exec(t);
+            if (!at) break;
+            split.push(t.slice(0, at.index).trim());
+            t = t.slice(at.index);
+          }
+          split.push(t);
+        }
+        out.splice(0, out.length, ...split);
+      }
       if (out.filter(isStart).length >= Math.max(3, out.length * 0.2)) {
         const merged = [];
         // "3Department of …": an affiliation (marker glued to the word) from a side column
