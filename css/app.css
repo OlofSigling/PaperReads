@@ -313,6 +313,9 @@ body.reading main { padding: 0; max-width: none; }
 #r-concerns-panel h3 { margin-top: 0; }
 
 .r-backchip { position: absolute; left: 12px; bottom: calc(env(safe-area-inset-bottom) + 56px); z-index: 6; font: inherit; font-size: .85rem; background: var(--text); color: var(--bg); border: none; border-radius: 999px; padding: 8px 14px; box-shadow: 0 4px 12px rgba(0,0,0,.25); cursor: pointer; }
+.r-findbar { position: absolute; left: 8px; right: 8px; top: 56px; z-index: 6; display: flex; gap: 4px; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 4px 6px 4px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+.r-findbar input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--text); font: inherit; font-size: 1rem; padding: 6px 0; outline: none; }
+.r-findbar .find-count { font-size: .8rem; color: var(--muted); white-space: nowrap; min-width: 2.5em; text-align: right; }
 .r-backchip.r-syncchip { left: auto; right: 12px; max-width: calc(100% - 24px); }
 .ref-pop { margin: 0; font-size: .9rem; line-height: 1.5; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
 

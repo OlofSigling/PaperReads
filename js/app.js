@@ -2766,11 +2766,19 @@
         <span class="r-title">${esc(p.title)}</span>
         <button class="r-btn" id="r-smaller" aria-label="Smaller text">A−</button>
         <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
+        <button class="r-btn" id="r-find" aria-label="Find in paper">🔍</button>
         ${Speech.supported ? '<button class="r-btn" id="r-tts" aria-label="Read aloud">🔊</button>' : ''}
         <button class="r-btn" id="r-ask" aria-label="Ask Claude">💬</button>
         <button class="r-btn" id="r-supp" aria-label="Supplementary material">📎<span class="r-count" id="r-scount"></span></button>
         <button class="r-btn" id="r-concerns" aria-label="Concerns">⚠<span class="r-count" id="r-ccount"></span></button>
         <button class="r-btn" id="r-toc" aria-label="Contents">☰</button>
+      </div>
+      <div class="r-findbar" id="r-findbar" hidden>
+        <input type="search" id="find-q" placeholder="Find in paper" aria-label="Find in paper" enterkeyhint="search" autocomplete="off">
+        <span class="find-count" id="find-count"></span>
+        <button class="r-btn" id="find-prev" aria-label="Previous match">▲</button>
+        <button class="r-btn" id="find-next" aria-label="Next match">▼</button>
+        <button class="r-btn" id="find-close" aria-label="Close search">✕</button>
       </div>
       <div class="r-stage"><div id="r-view"></div>
         <button class="r-zone left" id="r-prev" aria-label="Previous page"></button>
@@ -2966,6 +2974,8 @@
       });
     }
     const onKey = (e) => {
+      if (e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return; // (typing, not turning pages)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') return e.preventDefault(), openFind();
       if (e.key === 'ArrowLeft') prev();
       if (e.key === 'ArrowRight') next();
     };
@@ -3476,6 +3486,155 @@
       );
     });
     $('#r-toc').addEventListener('click', () => showPanel(tocPanel));
+    // ---------- find in the paper (Ctrl+F) ----------
+    // Matches across every section, each kept as a position (CFI) to jump to;
+    // the ones on screen are marked with CSS highlights, so the text and the
+    // positions highlights are saved by stay untouched.
+    const findBar = $('#r-findbar');
+    const findQ = $('#find-q');
+    const find = { q: '', hits: [], i: -1, timer: null, jumped: false };
+    const findRe = (q) => new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi');
+    // the ranges of the query in a document (also across <i>, <sup> and the like)
+    const rangesIn = (doc, q) => {
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let text = '';
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n.parentElement.closest('script, style')) continue;
+        nodes.push([n, text.length]);
+        text += n.data;
+      }
+      const at = (pos, end) => {
+        let lo = 0;
+        let hi = nodes.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          if (nodes[mid][1] < pos || (!end && nodes[mid][1] === pos)) lo = mid;
+          else hi = mid - 1;
+        }
+        const [n, start] = nodes[lo];
+        return [n, Math.min(pos - start, n.data.length)];
+      };
+      const out = [];
+      for (const m of text.matchAll(findRe(q))) {
+        if (!m[0]) continue;
+        const r = doc.createRange();
+        r.setStart(...at(m.index, false));
+        r.setEnd(...at(m.index + m[0].length, true));
+        out.push(r);
+      }
+      return out;
+    };
+    const markFinds = () => {
+      for (const c of rendition.getContents()) {
+        const w = c.window;
+        if (!w.CSS || !w.CSS.highlights || !w.Highlight) continue;
+        w.CSS.highlights.delete('pr-find');
+        w.CSS.highlights.delete('pr-find-cur');
+        if (!find.q || findBar.hidden) continue;
+        if (!c.document.getElementById('pr-find-style')) {
+          const st = c.document.createElement('style');
+          st.id = 'pr-find-style';
+          st.textContent = '::highlight(pr-find){background-color:rgba(255,200,0,.45);}::highlight(pr-find-cur){background-color:#ff9800;color:#000;}';
+          c.document.head.appendChild(st);
+        }
+        const ranges = rangesIn(c.document, find.q);
+        if (!ranges.length) continue;
+        w.CSS.highlights.set('pr-find', new w.Highlight(...ranges));
+        const cur = find.hits[find.i];
+        if (cur && c.sectionIndex === cur.si && ranges[cur.k]) w.CSS.highlights.set('pr-find-cur', new w.Highlight(ranges[cur.k]));
+      }
+    };
+    rendition.on('rendered', () => setTimeout(markFinds, 0));
+    const showCount = () => {
+      $('#find-count').textContent = !find.q ? '' : find.hits.length ? `${find.i + 1}/${find.hits.length}` : '0';
+    };
+    const search = async (q) => {
+      find.q = q.trim();
+      find.hits = [];
+      find.i = -1;
+      if (find.q.length >= 2) {
+        for (const section of book.spine.spineItems) {
+          if (section.linear === false && section.index !== 0) continue;
+          let doc;
+          try {
+            doc = (await section.load(book.load.bind(book))).ownerDocument;
+          } catch {
+            continue;
+          }
+          rangesIn(doc, find.q).forEach((r, k) => {
+            try {
+              find.hits.push({ cfi: section.cfiFromRange(r), si: section.index, k });
+            } catch {}
+          });
+        }
+        if (q.trim() !== findQ.value.trim()) return; // typed on meanwhile
+        // start from the match nearest after where you are
+        const loc = rendition.currentLocation();
+        const here = loc && loc.start && loc.start.cfi;
+        const cmp = new ePub.CFI();
+        find.i = find.hits.length ? Math.max(0, here ? find.hits.findIndex((h) => cmp.compare(h.cfi, here) >= 0) : 0) : -1;
+        if (find.i < 0 && find.hits.length) find.i = 0;
+      }
+      showCount();
+      if (find.i >= 0) await jumpFind();
+      else markFinds();
+    };
+    const jumpFind = async () => {
+      const h = find.hits[find.i];
+      if (!h) return;
+      if (!find.jumped) {
+        rememberSpot();
+        find.jumped = true;
+      }
+      showCount();
+      await go(() => rendition.display(h.cfi));
+      markFinds();
+    };
+    const stepFind = (d) => {
+      if (!find.hits.length) return;
+      find.i = (find.i + d + find.hits.length) % find.hits.length;
+      jumpFind();
+    };
+    function openFind() {
+      for (const x of [tocPanel, concernsPanel, askPanel, suppPanel]) x.hidden = true;
+      findBar.hidden = false;
+      findQ.focus();
+      findQ.select();
+      if (find.q) markFinds();
+    }
+    const closeFind = () => {
+      findBar.hidden = true;
+      findQ.blur();
+      markFinds();
+      if (find.jumped) backBtn.hidden = false; // back to where you were before searching
+      find.jumped = false;
+    };
+    $('#r-find').addEventListener('click', () => (findBar.hidden ? openFind() : closeFind()));
+    findQ.addEventListener('input', () => {
+      clearTimeout(find.timer);
+      find.timer = setTimeout(() => search(findQ.value), 350);
+    });
+    findQ.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(find.timer);
+        if (findQ.value.trim() !== find.q) search(findQ.value);
+        else stepFind(e.shiftKey ? -1 : 1);
+      } else if (e.key === 'Escape') closeFind();
+    });
+    $('#find-next').addEventListener('click', () => stepFind(1));
+    $('#find-prev').addEventListener('click', () => stepFind(-1));
+    $('#find-close').addEventListener('click', closeFind);
+    // Ctrl+F inside the page itself, too
+    rendition.hooks.content.register((contents) => {
+      contents.document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+          e.preventDefault();
+          openFind();
+        }
+      });
+    });
     // Concerns: same list as the paper page, in a side panel
     const CONCERN_STYLE = { fill: CONCERN_COLOR, 'fill-opacity': '0.24', 'mix-blend-mode': 'multiply' };
     const drawConcern = (c) => {
