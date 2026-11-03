@@ -3294,10 +3294,59 @@ const Epubify = (() => {
     return pick;
   }
 
+  // Maths a page drew with MathJax: keep its MathML, drop the drawing. The
+  // drawing is SVG or styled spans (removed as noise, or left as junk), and
+  // the MathML sits beside it: in a script (MathJax 2), a data-mathml
+  // attribute, or a hidden copy for screen readers (MathJax 2 and 3).
+  const MML_NS = 'http://www.w3.org/1998/Math/MathML';
+  function liftMathJax(doc) {
+    const parse = (src) => {
+      const x = new DOMParser().parseFromString(src.replace(/^\s*<math\b(?![^>]*xmlns=)/, `<math xmlns="${MML_NS}"`), 'application/xml');
+      const m = x.documentElement;
+      return m && m.localName === 'math' && !x.querySelector('parsererror') ? doc.importNode(m, true) : null;
+    };
+    const asBlock = (m, block) => {
+      if (m && block) m.setAttribute('display', 'block');
+      return m;
+    };
+    // the hidden copy, or the data-mathml attribute, of a drawing
+    const mathOf = (frame) => {
+      const hidden = frame.querySelector('.MJX_Assistive_MathML math, mjx-assistive-mml math');
+      if (hidden) return doc.importNode(hidden, true);
+      const attr = frame.getAttribute('data-mathml');
+      return attr ? parse(attr) : null;
+    };
+    const DRAWN = '.MathJax_SVG, .MathJax_CHTML, .MathJax, mjx-container';
+    for (const frame of [...doc.querySelectorAll(DRAWN)]) {
+      if (!frame.isConnected || frame.parentElement?.closest(DRAWN)) continue;
+      const block = !!frame.closest('.MathJax_SVG_Display, .MathJax_Display, .MathJax_CHTML_Display') || frame.getAttribute('display') === 'true' || frame.classList.contains('MJXc-display');
+      // MathJax 2 keeps the source in <script id="MathJax-Element-N"> next to "…-Frame"
+      const id = (frame.id || '').replace(/-Frame$/, '');
+      const script = id && id !== frame.id ? doc.getElementById(id) : null;
+      const m = mathOf(frame) || (script && /math\/mml/.test(script.type) ? parse(script.textContent) : null);
+      if (!m) continue;
+      const holder = frame.closest('.MathJax_SVG_Display, .MathJax_Display, .MathJax_CHTML_Display') || frame;
+      holder.replaceWith(asBlock(m, block));
+      if (script) script.remove();
+    }
+    // MathML left only as a script (the page saved before MathJax drew it)
+    for (const sc of [...doc.querySelectorAll('script[type^="math/mml"]')]) {
+      const m = parse(sc.textContent);
+      if (m) sc.replaceWith(asBlock(m, /mode=display/.test(sc.type) || m.getAttribute('display') === 'block'));
+    }
+    doc.querySelectorAll('.MathJax_Preview, .MJX_Assistive_MathML, mjx-assistive-mml').forEach((el) => el.remove());
+    // block maths sits in a paragraph of its own
+    for (const m of doc.getElementsByTagNameNS(MML_NS, 'math')) {
+      const box = m.parentElement;
+      if (m.getAttribute('display') === 'block' && box && ws(box.textContent).length - ws(m.textContent).length < 12) box.classList.add('equation');
+    }
+  }
+
   function fromWebPage(page, log) {
     const doc = new DOMParser().parseFromString(page.html, 'text/html');
     const meta = pageMeta(page);
     const baseUrl = page.url || meta.url || location.href; // where the page actually was: relative image links resolve against it
+    liftMathJax(doc);
     denoise(doc.body);
     doc.querySelectorAll(STRIP).forEach((el) => el.remove());
     const root = articleNode(doc);
