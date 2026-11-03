@@ -818,7 +818,16 @@ const Epubify = (() => {
       // (at least one sign only maths uses: a table row of "12.1 ± 3.4 < 0.05" isn't maths)
       return n >= 2 && strong >= 1 && m >= 2 && m >= n * 0.3 && words <= 3;
     };
-    const numbered = (r) => r.some((z) => NUMBER.test(z.text.trim()));
+    // an equation number: "(8)", the last thing on its line, well clear of the maths
+    // (not the "(1)" of a superscript like v⁽¹⁾)
+    const numberSpan = (r) => {
+      const sp = [...r].sort((a, b) => a.x0 - b.x0);
+      const last = sp.at(-1);
+      if (!last || !NUMBER.test(last.text.trim())) return null;
+      const before = sp.at(-2);
+      return !before || last.x0 - before.x1 > bodySize * 1.5 ? last : null;
+    };
+    const numbered = (r) => !!numberSpan(r);
     const rights = new Counter();
     rows.filter((r) => r.length && textOf(r).length > 40).forEach((r) => rights.add(`${r.col}:${pyRound(Math.max(...r.map((z) => z.x1)))}`));
     const rightOf = (c) => {
@@ -868,7 +877,7 @@ const Epubify = (() => {
       const x0 = Math.min(...all.map((z) => z.x0));
       // (one equation number goes beside the picture as text: cropped with it,
       // the gap to the margin would shrink the maths on a phone)
-      const nums = all.filter((z) => NUMBER.test(z.text.trim()));
+      const nums = reg.map(numberSpan).filter(Boolean);
       const inner = nums.length === 1 ? all.filter((z) => z !== nums[0]) : all;
       const x1 = Math.max(...inner.map((z) => z.x1));
       const left = leftOf(reg[0].col);
@@ -885,7 +894,7 @@ const Epubify = (() => {
       const listing = reg.some((r) => /^\d{1,3}:$/.test([...r].sort((p, q) => p.x0 - q.x0)[0].text.trim()));
       // (a sentence with maths in it, a full line of the text: "where F(s) = … and …")
       const right = rightOf(reg[0].col);
-      const sentence = tally(all).words >= 3 && reg.some((r) => !indented(r) && right !== null && Math.max(...r.map((z) => z.x1)) > right - 10);
+      const sentence = tally(all).words >= 3 && reg.some((r) => !indented(r) && right !== null && Math.max(...r.filter((z) => z !== numberSpan(r)).map((z) => z.x1)) > right - 10);
       if (!setOff || wordy || listing || sentence || txt.replace(/\s/g, '').length < 4) continue;
       let y0 = Math.min(...all.map((z) => z.y - z.size * 0.8));
       let y1 = Math.max(...all.map((z) => z.y + z.size * 0.7));
@@ -938,6 +947,33 @@ const Epubify = (() => {
         ctx.drawImage(canvas, x0 * scale, y0 * scale, w, h, 0, 0, w, h);
       }
       out.push(await new Promise((resolve) => c.toBlob(resolve, 'image/png')));
+    }
+    return out;
+  }
+
+  // Small regions (equations), each drawn on its own: a whole page at high
+  // resolution can be too much for a phone's memory, and a failed drawing
+  // lost every equation on the page. A box that won't draw is tried smaller.
+  async function cropRegions(pg, boxes, scale = 3) {
+    const out = [];
+    for (const box of boxes) {
+      let blob = null;
+      for (const s of [scale, 2, 1.5]) {
+        try {
+          const [x0, y0, x1, y1] = box;
+          const vp = pg.page.getViewport({ scale: s, offsetX: -x0 * s, offsetY: -y0 * s });
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round((x1 - x0) * s));
+          c.height = Math.max(1, Math.round((y1 - y0) * s));
+          await pg.page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+          blob = await new Promise((resolve) => c.toBlob(resolve, 'image/png'));
+          c.width = c.height = 0; // (let the memory go now)
+        } catch {
+          blob = null;
+        }
+        if (blob) break;
+      }
+      out.push(blob);
     }
     return out;
   }
@@ -1312,7 +1348,7 @@ const Epubify = (() => {
       // display equations, as pictures
       const eqs = findEquations(rows, bodySize);
       if (eqs.length) {
-        const blobs = await cropImages(pg, eqs, 3).catch(() => []);
+        const blobs = await cropRegions(pg, eqs);
         eqs.forEach((box, k) => {
           if (!blobs[k]) return;
           images.push(blobs[k]);
@@ -1790,7 +1826,7 @@ const Epubify = (() => {
       {
         const boxes = findEquations(rows, bodySize);
         if (boxes.length) {
-          const blobs = await cropImages(pg, boxes, 3).catch(() => []);
+          const blobs = await cropRegions(pg, boxes);
           boxes.forEach((box, k) => {
             if (!blobs[k]) return;
             images.push(blobs[k]);
