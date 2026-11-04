@@ -1,7 +1,7 @@
 // Service worker: caches the app shell for offline use and receives shares.
 importScripts('js/db.js');
 
-const CACHE = 'paperreads-v70';
+const CACHE = 'paperreads-v71';
 const SHELL = [
   './',
   'index.html',
@@ -35,7 +35,10 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // (straight from the server: the browser's HTTP cache may still hold the
+  // previous version's files for a few minutes, and a new version must not
+  // be put together from old ones)
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -74,7 +77,7 @@ self.addEventListener('fetch', (e) => {
   e.respondWith(
     caches.open(CACHE).then(async (cache) => {
       const cached = await cache.match(e.request, { ignoreSearch: true });
-      const network = fetch(e.request)
+      const network = fetch(e.request.url, { cache: 'no-cache' }) // (asks the server, not a stale HTTP copy)
         .then((res) => {
           if (res.ok) cache.put(e.request, res.clone());
           return res;
