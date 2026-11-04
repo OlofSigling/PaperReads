@@ -1145,14 +1145,46 @@
       r.queueOrder = i + 1;
       await savePaper(r);
     }
-    return () => renest(id, orders);
+    // The papers let out stay together: in the bundle the group was in, or
+    // in a new one named after the paper they were found through.
+    let bundle = '';
+    if (fresh.length >= 2) {
+      const had = from.root.bundle || (from.want.find((w) => w.bundle) || {}).bundle || '';
+      bundle = had || bundleNameFor(p, all);
+      const ids = fresh.map((g) => g.root.id).filter((rid) => (byId.get(rid).bundle || '') !== bundle);
+      await setBundle(ids, bundle);
+      if (!had) {
+        const fp = await DB.get('papers', id);
+        fp.splitBundle = { name: bundle, ids };
+        await savePaper(fp);
+      }
+    }
+    return { bundle, undo: () => renest(id, orders) };
+  }
+  // A bundle name from a paper's title: its first words, not one in use
+  function bundleNameFor(p, all) {
+    const words = String(p.title || 'Papers').replace(/[:.?!].*$/, '').split(/\s+/).filter(Boolean);
+    let name = words.slice(0, 5).join(' ');
+    if (words.length > 5) name += '…';
+    const taken = new Set(all.map((x) => x.bundle).filter(Boolean));
+    let n = name;
+    for (let k = 2; taken.has(n); k++) n = `${name} (${k})`;
+    return n;
   }
   // Nest it again (with the queue order from before, when there is one)
   async function renest(id, orders = null) {
     const p = await DB.get('papers', id);
     if (!p) return;
     delete p.queueSplit;
+    const made = p.splitBundle;
+    delete p.splitBundle;
     await savePaper(p);
+    // and the bundle unnesting made, if its papers are still in it
+    if (made) {
+      const still = [];
+      for (const x of made.ids) if (((await DB.get('papers', x)) || {}).bundle === made.name) still.push(x);
+      await setBundle(still, '');
+    }
     if (!orders) return;
     for (const x of await papers()) {
       if (!orders.has(x.id) || x.queueOrder === orders.get(x.id)) continue;
@@ -1348,8 +1380,8 @@
     };
     $$('[data-unnest]').forEach((b) =>
       b.addEventListener('click', async () => {
-        const undo = await unnestPaper(b.dataset.unnest);
-        toast('Unnested: its papers are listed on their own', undo && { label: 'Undo', run: async () => (await undo(), viewQueue()) });
+        const r = await unnestPaper(b.dataset.unnest);
+        toast(r && r.bundle ? `Unnested into the bundle “${r.bundle}”` : 'Unnested: its papers are listed on their own', r && { label: 'Undo', run: async () => (await r.undo(), viewQueue()) });
         viewQueue();
       })
     );
