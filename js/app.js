@@ -1729,7 +1729,7 @@
     } catch {}
     const cols = (await DB.all('collections')).sort((a, b) => a.name.localeCompare(b.name));
     main.innerHTML = `<section class="card stack">
-        <p class="muted small">Paste a list of papers: links (PubMed, DOI, arXiv, journal pages), DOIs, arXiv IDs or PMIDs, one paper per line. Other text on the lines is fine.</p>
+        <p class="muted small">Paste a list of papers: links (PubMed, DOI, arXiv, journal pages), DOIs, arXiv IDs or PMIDs, one paper per line. Other text on the lines is fine. Or open a file: PubMed’s “Save” as CSV or PMID list, or any spreadsheet (CSV) with a PMID, DOI or link column.</p>
         <textarea id="im-text" rows="8" placeholder="https://pubmed.ncbi.nlm.nih.gov/30864333/&#10;10.1016/j.artmed.2023.102742&#10;arXiv:2510.08350">${esc(text)}</textarea>
         <div class="row wrap">
           <label>Shelf <select id="im-status">${['want', 'none', 'reading', 'read'].map((st) => `<option value="${st}">${STATUS[st]}</option>`).join('')}</select></label>
@@ -1737,7 +1737,7 @@
         </div>
         <label class="check"><input type="checkbox" id="im-pdf" checked> Get the PDFs (arXiv, or a free copy when there is one)</label>
         <label class="check"><input type="checkbox" id="im-epub" checked> Make EPUBs to read</label>
-        <div class="row"><button class="btn primary" id="im-find">Find papers</button></div>
+        <div class="row"><button class="btn primary" id="im-find">Find papers</button><label class="btn">Open a file…<input type="file" id="im-file" accept=".csv,.tsv,.txt,.nbib,text/csv,text/plain" hidden></label></div>
         <p class="muted small" id="im-status-line"></p>
       </section>
       <section class="card" id="im-results" hidden><ul class="list compact" id="im-list"></ul>
@@ -1764,6 +1764,13 @@
       }));
       $$('.im-pick', list).forEach((c) => (c.checked = !found[+c.dataset.i].skip));
     };
+    $('#im-file').addEventListener('change', async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      $('#im-text').value = await f.text();
+      e.target.value = '';
+      $('#im-find').click();
+    });
     $('#im-find').addEventListener('click', async () => {
       const items = Lookup.listItems($('#im-text').value);
       if (!items.length) return (line.textContent = 'No links, DOIs or IDs found in that text.');

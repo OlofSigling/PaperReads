@@ -51,7 +51,58 @@ const Lookup = (() => {
   // bare DOIs, arXiv IDs, PMIDs. One paper per line when the list has lines
   // (a line can give the same paper twice: "PubMed · arXiv version");
   // otherwise one per identifier.
+  // A table of papers (PubMed's "Save → CSV", or any spreadsheet with a PMID,
+  // DOI or link column): one paper per row, named by its Title column.
+  function csvRows(text) {
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+    const t = String(text).replace(/^\uFEFF/, '');
+    const sep = (t.split('\n')[0].match(/\t/g) || []).length > (t.split('\n')[0].match(/,/g) || []).length ? '\t' : ',';
+    for (let i = 0; i < t.length; i++) {
+      const ch = t[i];
+      if (quoted) {
+        if (ch === '"' && t[i + 1] === '"') (cell += '"'), i++;
+        else if (ch === '"') quoted = false;
+        else cell += ch;
+      } else if (ch === '"') quoted = true;
+      else if (ch === sep) row.push(cell), (cell = '');
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && t[i + 1] === '\n') i++;
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = '';
+      } else cell += ch;
+    }
+    if (cell || row.length) row.push(cell), rows.push(row);
+    return rows.filter((r) => r.some((c) => c.trim()));
+  }
+  function tableItems(text) {
+    const rows = csvRows(text);
+    if (rows.length < 2) return null;
+    const head = rows[0].map((h) => h.trim().toLowerCase());
+    const col = (re) => head.findIndex((h) => re.test(h));
+    const [pmid, doi, url, title] = [col(/^pmid$|pubmed\s*id/), col(/^doi$/), col(/^(url|link)$/), col(/^title$/)];
+    if (pmid < 0 && doi < 0 && url < 0) return null;
+    const items = [];
+    for (const r of rows.slice(1)) {
+      const tokens = [];
+      const d = doi >= 0 && /10\.\d{4,9}\/\S+/.exec(r[doi] || '');
+      if (d) tokens.push(d[0]);
+      if (pmid >= 0 && /^\s*\d{4,9}\s*$/.test(r[pmid] || '')) tokens.push(`PMID:${r[pmid].trim()}`);
+      if (url >= 0 && /^https?:\/\//.test((r[url] || '').trim())) tokens.push(r[url].trim());
+      if (tokens.length) items.push({ label: title >= 0 ? (r[title] || '').trim().slice(0, 120) : '', tokens });
+    }
+    return items.length ? items : null;
+  }
+
   function listItems(text) {
+    const table = /^\uFEFF?[^\n]*\b(PMID|DOI)\b[^\n]*[,\t]/i.test(String(text || '')) && tableItems(text);
+    if (table) return table;
+    // PubMed's "Save → PMID" (bare numbers, a line each) and MEDLINE files ("PMID- 123")
+    text = String(text || '').replace(/^\s*(\d{5,9})\s*$/gm, 'PMID:$1').replace(/^PMID-\s*(\d{5,9})/gm, 'PMID:$1');
     const TOKEN = /https?:\/\/[^\s<>()\[\]]+|\b10\.\d{4,9}\/[^\s"<>()\[\]]+|\barXiv:\s*\d{4}\.\d{4,5}(?:v\d+)?|\bPMID:?\s*\d{5,9}/gi;
     const tokensOf = (t) => [...t.matchAll(TOKEN)].map((m) => m[0].replace(/[.,;:]+$/, '')).filter((x) => !/^https?:\/\/(www\.)?(google|bing)\./i.test(x));
     const lines = String(text || '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
