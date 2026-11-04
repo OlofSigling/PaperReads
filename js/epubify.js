@@ -3183,7 +3183,7 @@ const Epubify = (() => {
         const ol = root.appendChild(el('ol'));
         ol.className = 'refs';
         refs.forEach((r) => {
-          const li = ol.appendChild(el('li', ws((r.querySelector('mixed-citation, element-citation, citation') || r).textContent).trim()));
+          const li = ol.appendChild(el('li', refText(r.querySelector('mixed-citation, element-citation, citation') || r)));
           if (r.getAttribute('id')) li.setAttribute('id', r.getAttribute('id'));
         });
       }
@@ -3193,6 +3193,65 @@ const Epubify = (() => {
       h2.append(...h.childNodes);
       h.replaceWith(h2);
     });
+  }
+
+  // A JATS reference as readable text. An <element-citation> is bare fields
+  // (surname, title, source, year, DOI, PMID…) with nothing between them:
+  // run together they read "NamenAMElyEW…Med20011636586410.1164/…" and the
+  // DOI can't be found. Set it out as a citation; elsewhere just keep the
+  // fields apart.
+  function refText(c) {
+    const kids = (n, name) => [...n.children].filter((k) => k.localName === name);
+    const kid = (n, name) => kids(n, name)[0] || null;
+    const txt = (n) => (n ? ws(n.textContent).trim() : '');
+    if (c.localName === 'element-citation' || (c.localName === 'citation' && !/[.,;]\s/.test(c.textContent))) {
+      const people = [];
+      for (const g of [c, ...kids(c, 'person-group')]) {
+        for (const n of kids(g, 'name')) {
+          const sur = txt(kid(n, 'surname'));
+          const given = txt(kid(n, 'given-names'));
+          if (sur) people.push(given ? `${sur} ${given}` : sur);
+        }
+        for (const n of kids(g, 'collab')) people.push(txt(n));
+        if (kid(g, 'etal')) people.push('et al.');
+      }
+      const id = (type) => txt(kids(c, 'pub-id').find((x) => x.getAttribute('pub-id-type') === type));
+      const title = txt(kid(c, 'article-title')) || txt(kid(c, 'chapter-title'));
+      const source = txt(kid(c, 'source'));
+      const [year, vol, issue, fpage, lpage] = ['year', 'volume', 'issue', 'fpage', 'lpage'].map((k) => txt(kid(c, k)));
+      let where = [source, year].filter(Boolean).join('. ');
+      if (vol) where += `;${vol}`;
+      if (issue) where += `(${issue})`;
+      if (fpage) where += `:${fpage}${lpage ? '–' + lpage : ''}`;
+      const doi = id('doi');
+      const pmid = id('pmid');
+      // what else it says, in order (publisher, edition, a comment, a web address)
+      const USED = new Set(['person-group', 'name', 'collab', 'etal', 'pub-id', 'article-title', 'chapter-title', 'source', 'year', 'volume', 'issue', 'fpage', 'lpage', 'label', 'date', 'month', 'day', 'object-id']);
+      const rest = [...c.children].filter((k) => !USED.has(k.localName)).map((k) => (k.localName === 'ext-link' || k.localName === 'uri' ? txt(k) || k.getAttribute('xlink:href') || '' : txt(k))).filter(Boolean);
+      const pubLoc = txt(kid(c, 'publisher-loc'));
+      const pubName = txt(kid(c, 'publisher-name'));
+      const more = rest.filter((x) => x !== pubLoc && x !== pubName);
+      const publisher = pubName ? (pubLoc ? `${pubLoc}: ${pubName}` : pubName) : '';
+      const parts = [people.join(', '), title, publisher && !vol ? [source, publisher, year].filter(Boolean).join('. ') : where, ...more].filter(Boolean).map((x) => x.replace(/[.\s]+$/, ''));
+      let out = parts.map((x) => x + (/[?!]$/.test(x) ? '' : '.')).join(' ');
+      if (doi) out += ` doi:${doi}`;
+      if (pmid) out += ` PMID: ${pmid}`;
+      if (out.replace(/[.\s]/g, '')) return out.trim();
+    }
+    // mixed citations carry their own punctuation; only keep tags apart
+    let out = '';
+    const walk = (n) => {
+      for (const k of n.childNodes) {
+        if (k.nodeType === 3) out += k.data;
+        else if (k.nodeType === 1) {
+          if (out && /[\p{L}\d]$/u.test(out) && !/^(italic|bold|sub|sup|sc|underline|monospace|named-content)$/.test(k.localName)) out += ' ';
+          walk(k);
+          if (k.localName === 'pub-id' || k.localName === 'ext-link') out += ' ';
+        }
+      }
+    };
+    walk(c);
+    return ws(out).replace(/\s+([,.;:)])/g, '$1').trim();
   }
 
   // ================================================================ web pages
