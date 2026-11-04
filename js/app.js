@@ -1064,8 +1064,16 @@
     const t = trailOf(all);
     const want = all.filter((p) => p.status === 'want');
     const groups = new Map();
+    // (a paper you unnested, p.queueSplit, no longer gathers the papers found
+    // through it: each of them heads a group of its own)
+    const qAnc = (p) => {
+      const a = t.ancestors(p);
+      let k = -1;
+      a.forEach((x, i) => x.queueSplit && (k = i));
+      return a.slice(k + 1);
+    };
     for (const p of want) {
-      const root = t.rootOf(p);
+      const root = qAnc(p)[0] || p;
       if (!groups.has(root.id)) groups.set(root.id, { root, want: [] });
       groups.get(root.id).want.push(p);
     }
@@ -1073,7 +1081,7 @@
     // the papers to show under a group: wanted ones and the papers leading to them
     for (const g of groups.values()) {
       g.shown = new Set();
-      for (const p of g.want) for (const x of [p, ...t.ancestors(p)]) g.shown.add(x.id);
+      for (const p of g.want) for (const x of [p, ...qAnc(p)]) g.shown.add(x.id);
       g.order = g.root.queueOrder ?? Math.min(...g.want.map((p) => p.queueOrder ?? Infinity));
       g.kids = (id) => (t.kids.get(id) || []).filter((k) => g.shown.has(k.id)).sort(sibling);
       // the group's wanted papers in reading order: the top paper, then depth first
@@ -1108,6 +1116,51 @@
     return items;
   }
   const queueList = (all) => queueItems(all).flatMap((it) => (it.group ? it.group.flat : it.groups.flatMap((g) => g.flat)));
+
+  // Unnest a paper in the queue: the papers found through it head groups of
+  // their own, in its place and in the order they had under it. (The trail,
+  // p.foundVia, stays as it is; only the queue changes.)
+  async function unnestPaper(id) {
+    const all = await papers();
+    const before = queueGroups(all);
+    const from = before.find((g) => g.shown.has(id));
+    const p = all.find((x) => x.id === id);
+    if (!p || !from) return null;
+    const orders = new Map(all.map((x) => [x.id, x.queueOrder]));
+    p.queueSplit = true;
+    await savePaper(p);
+    const after = queueGroups(await papers());
+    const was = new Set(before.map((g) => g.root.id));
+    const pos = (g) => Math.min(...g.want.map((w) => from.flat.findIndex((f) => f.id === w.id)).filter((i) => i >= 0));
+    const fresh = after.filter((g) => !was.has(g.root.id)).sort((a, b) => pos(a) - pos(b));
+    const seq = [];
+    for (const g of before) {
+      if (after.some((x) => x.root.id === g.root.id)) seq.push(g.root.id);
+      if (g === from) seq.push(...fresh.map((x) => x.root.id));
+    }
+    const byId = new Map((await papers()).map((x) => [x.id, x]));
+    for (const [i, rid] of seq.entries()) {
+      const r = byId.get(rid);
+      if (!r || r.queueOrder === i + 1) continue;
+      r.queueOrder = i + 1;
+      await savePaper(r);
+    }
+    return () => renest(id, orders);
+  }
+  // Nest it again (with the queue order from before, when there is one)
+  async function renest(id, orders = null) {
+    const p = await DB.get('papers', id);
+    if (!p) return;
+    delete p.queueSplit;
+    await savePaper(p);
+    if (!orders) return;
+    for (const x of await papers()) {
+      if (!orders.has(x.id) || x.queueOrder === orders.get(x.id)) continue;
+      if (orders.get(x.id) == null) delete x.queueOrder;
+      else x.queueOrder = orders.get(x.id);
+      await savePaper(x);
+    }
+  }
   const bundleNames = (all) => [...new Set(all.map((p) => p.bundle).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 
   // Put papers in a bundle (or take them out, with name '').
@@ -1173,11 +1226,13 @@
     const meta = (p) => `${p.hasEpub ? EPUB_BADGE + ' ' : ''}${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}`;
     const badge = (p) => (p.status === 'want' ? '' : `<span class="badge s-${p.status}">${STATUS[p.status]}</span>`);
     const start = (p) => (p.status === 'want' ? `<button class="btn small" data-start="${p.id}">Start</button>` : '');
+    // a paper you're done with (read, reading…) still holding papers you haven't read: let them out
+    const unnest = (p, kids) => (p.status !== 'want' && kids.length ? `<button class="btn small" data-unnest="${p.id}" title="List the papers found through it on their own">Unnest</button>` : '');
     const node = (g, p) => {
       const kids = g.kids(p.id);
       return `<li class="q-node" data-id="${p.id}">
         <div class="q-row">${g.kids(p.foundVia).length > 1 ? '<span class="handle" aria-label="Drag to reorder">☰</span>' : '<span class="handle-gap"></span>'}
-          <a href="#/paper/${p.id}" class="paper-link${p.status === 'want' ? '' : ' dim'}"><span class="pr-title">${esc(p.title)}</span><span class="pr-meta">${badge(p)} ${meta(p)}</span></a>${start(p)}</div>
+          <a href="#/paper/${p.id}" class="paper-link${p.status === 'want' ? '' : ' dim'}"><span class="pr-title">${esc(p.title)}</span><span class="pr-meta">${badge(p)} ${meta(p)}</span></a>${start(p)}${unnest(p, kids)}</div>
         ${kids.length ? `<ul class="q-sub" data-parent="${p.id}">${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
     };
@@ -1195,7 +1250,7 @@
         </div>
         <span class="q-actions">
           <button class="btn small icon" data-top="${g.root.id}" aria-label="Move to top" title="Move to top">⤒</button>
-          ${start(g.root)}
+          ${start(g.root)}${unnest(g.root, kids)}
         </span>
         ${kids.length ? `<ul class="q-sub q-sub-top" data-parent="${g.root.id}" ${isOpen ? '' : 'hidden'}>${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
@@ -1291,6 +1346,13 @@
       b.setAttribute('aria-expanded', String(!sub.hidden));
       saveOpen();
     };
+    $$('[data-unnest]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        const undo = await unnestPaper(b.dataset.unnest);
+        toast('Unnested: its papers are listed on their own', undo && { label: 'Undo', run: async () => (await undo(), viewQueue()) });
+        viewQueue();
+      })
+    );
     $$('[data-toggle]').forEach((b) =>
       b.addEventListener('click', () => {
         const sub = b.closest('li').querySelector(':scope > .q-sub');
@@ -1974,6 +2036,7 @@
           <h3>Discovery trail</h3>
           ${trailAnc.length ? `<p class="small">Found via ${trailAnc.map((a) => `<a href="#/paper/${a.id}">${esc(a.title)}</a>`).join(' › ')}</p>` : '<p class="muted small">Not found through another paper.</p>'}
           ${trailKids.length ? `<p class="small muted">Led to ${trailKids.length} paper${trailKids.length > 1 ? 's' : ''}:</p><ul class="trail">${trailKids.map((k) => trailTree(k, trail.kids, id)).join('')}</ul>` : ''}
+          ${p.queueSplit && trailKids.length ? '<p class="small muted">Unnested: in the queue, the papers found through it are listed on their own. <button type="button" class="btn small" id="renest">Nest them under it again</button></p>' : ''}
           <div class="row wrap"><a class="btn small primary" href="#/add?via=${id}">＋ Add a paper found here</a>${trailAnc.length || trailKids.length ? `<a class="btn small" href="#/trail/${trail.rootOf(p).id}">Whole trail</a>` : ''}</div>
           <details><summary>${p.foundVia ? 'Change' : 'Set'} where you found it</summary>
             <form id="via-form" class="stack">
@@ -2272,6 +2335,11 @@
     );
 
     // Discovery trail
+    $('#renest')?.addEventListener('click', async () => {
+      await renest(id);
+      toast('Nested again in the queue');
+      viewPaper(id);
+    });
     const vf = $('#via-form');
     vf.filter.addEventListener('input', () => {
       const t = vf.filter.value.toLowerCase();
