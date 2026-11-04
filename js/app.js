@@ -3168,6 +3168,7 @@
     let pending = null;
     function hideBar() {
       selbar.hidden = true;
+      selbar.classList.remove('at-top');
       pending = null;
     }
     rendition.on('selected', (cfiRange, contents) => {
@@ -3175,10 +3176,40 @@
       if (!text) return;
       pending = { cfiRange, text };
       selbar.hidden = false;
+      placeSelbar();
     });
+    // The bar sits at the bottom, over the text: when the selection ends down
+    // there (or is being dragged there), it moves to the top, out of the way.
+    let placing = 0;
+    function placeSelbar() {
+      if (placing) return;
+      placing = requestAnimationFrame(() => {
+        placing = 0;
+        if (selbar.hidden) return;
+        const c = rendition.getContents()[0];
+        const ifr = $('#r-view iframe');
+        const stage = $('.r-stage');
+        const sel = c && c.window.getSelection();
+        if (!sel || !sel.rangeCount || !ifr || !stage) return;
+        const ir = ifr.getBoundingClientRect();
+        const sb = stage.getBoundingClientRect();
+        // where the selection ends (the end being dragged), on the page in view
+        const end = c.document.createRange();
+        end.setStart(sel.focusNode, sel.focusOffset);
+        let r = end.getClientRects()[0] || end.getBoundingClientRect();
+        if ((!r || !r.height) && sel.getRangeAt(0).getClientRects().length) r = [...sel.getRangeAt(0).getClientRects()].at(sel.focusNode === sel.getRangeAt(0).startContainer && sel.focusOffset === sel.getRangeAt(0).startOffset ? 0 : -1);
+        if (!r) return;
+        const left = r.left + ir.left;
+        if (left < sb.left - 2 || left > sb.right) return;
+        const bottom = r.bottom + ir.top;
+        const barTop = selbar.classList.contains('at-top') ? sb.bottom - (selbar.offsetHeight + 70) : selbar.getBoundingClientRect().top;
+        selbar.classList.toggle('at-top', bottom > barTop - 12);
+      });
+    }
     rendition.hooks.content.register((contents) => {
       contents.document.addEventListener('selectionchange', () => {
         if (!hasSelection()) setTimeout(() => !hasSelection() && hideBar(), 300);
+        else placeSelbar();
       });
       // In-document links: a citation shows its reference in a pop-up instead
       // of jumping away; other links (figures, sections) jump, with a Back button.

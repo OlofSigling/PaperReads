@@ -411,6 +411,8 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .r-ttsbar select { min-width: 0; max-width: 34%; padding: 4px 6px; font-size: .85rem; }
 .r-ttsbar #tts-rate { max-width: 5em; }
 .r-selbar:not([hidden]) ~ .r-ttsbar { display: none; }
+/* the selection reaches the bottom: the bar goes up top, out of its way */
+.r-selbar.at-top { top: 56px; bottom: auto; }
 /* define */
 .dlg.define h3 small { font-weight: 400; margin-left: 4px; }
 .def-pos { margin: .6em 0 .2em; }
