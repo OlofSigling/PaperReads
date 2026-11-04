@@ -262,6 +262,11 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 body.reading { padding-bottom: 0; }
 body.reading .top, body.reading .nav, body.reading .offline { display: none; }
 body.reading main { padding: 0; max-width: none; }
+/* in the reader only the side panels' text (a chat, notes) can be selected:
+   a long drag there mustn't run on into the toolbar and the page behind */
+.reader { -webkit-user-select: none; user-select: none; }
+.reader .r-toc, .reader textarea, .reader input { -webkit-user-select: text; user-select: text; }
+.reader .r-toc button, .reader .r-toc .chip { -webkit-user-select: none; user-select: none; }
 .reader { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--surface); z-index: 30; }
 .r-bar { display: flex; align-items: center; gap: 2px; padding: calc(env(safe-area-inset-top) + 4px) 4px 4px; border-bottom: 1px solid var(--border); }
 .r-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .9rem; color: var(--text-2); padding: 0 6px; }
