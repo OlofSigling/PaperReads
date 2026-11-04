@@ -2823,10 +2823,36 @@
       // wide tables fit the page instead of running under the next text
       // (also in EPUBs made before the converter unboxed LaTeX's resized tables)
       table: { 'max-width': '100% !important', 'font-size': '0.82em' },
+      'table.pr-scroll': { display: 'block', 'overflow-x': 'auto' },
       '.ltx_transformed_outer': { width: 'auto !important', height: 'auto !important', 'vertical-align': 'baseline !important', display: 'block !important' },
       '.ltx_transformed_inner': { transform: 'none !important' },
     });
     rendition.themes.select('pr');
+    // A table that still won't fit the page (long unbreakable words, no-wrap
+    // cells) would run on into the next page: shrink it to fit, down to 60%;
+    // a short one still too wide scrolls sideways in its own box. (A tall one
+    // can't scroll: a scrolling box can't be split across pages.)
+    const fitTables = (c) => {
+      const d = c && c.document;
+      if (!d) return;
+      const pageH = d.documentElement.clientHeight || innerHeight;
+      for (const t of d.querySelectorAll('table')) {
+        t.style.zoom = '';
+        t.classList.remove('pr-scroll');
+        const box = t.parentElement;
+        const avail = box ? box.clientWidth : 0;
+        const w = t.scrollWidth;
+        if (!avail || w <= avail + 2) continue;
+        const z = Math.max(0.6, avail / w);
+        t.style.zoom = String(z);
+        if (t.scrollWidth * z > avail + 2 && t.offsetHeight * z < pageH * 0.85) {
+          t.style.zoom = '';
+          t.classList.add('pr-scroll');
+        }
+      }
+    };
+    rendition.hooks.content.register((c) => setTimeout(() => fitTables(c), 0));
+    const refitTables = () => rendition.getContents().forEach(fitTables);
     let fontSize = await DB.setting('readerFontSize', 100);
     rendition.themes.fontSize(fontSize + '%');
 
@@ -2986,6 +3012,12 @@
     let pinch = false; // two fingers were down during this touch
     rendition.on('touchstart', (e) => {
       if (e.touches.length > 1) pinch = true;
+      // (a swipe across a table that scrolls sideways scrolls it, not the page)
+      const t = e.target && e.target.closest && e.target.closest('table.pr-scroll');
+      if (t && t.scrollWidth > t.clientWidth + 2) {
+        touchX = null;
+        return;
+      }
       if (e.touches.length === 1 && !pinch) {
         touchX = e.changedTouches[0].screenX;
         touchT = Date.now();
@@ -3399,6 +3431,7 @@
     const resize = async (delta) => {
       fontSize = Math.max(70, Math.min(200, fontSize + delta));
       await go(() => rendition.themes.fontSize(fontSize + '%'));
+      refitTables();
       await DB.setSetting('readerFontSize', fontSize);
     };
     $('#r-smaller').addEventListener('click', () => resize(-10));
