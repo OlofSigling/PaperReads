@@ -271,6 +271,11 @@ body.reading main { padding: 0; max-width: none; }
 .r-zone { position: absolute; top: 0; bottom: 0; width: 18%; background: transparent; border: none; z-index: 2; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .r-zone.left { left: 0; }
 .r-zone.right { right: 0; }
+/* touch screens: the zones don't cover the text, so a long press there
+   selects a word; a tap near an edge is caught in the page instead */
+@media not ((hover: hover) and (pointer: fine)) {
+  .r-zone { pointer-events: none; }
+}
 /* mouse and trackpad: the edges only, so pressing on text selects it */
 @media (hover: hover) and (pointer: fine) {
   .r-zone { width: 44px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 1.6rem; opacity: 0; transition: opacity .15s; }

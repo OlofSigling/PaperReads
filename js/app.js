@@ -3106,6 +3106,25 @@
         fn(); // (detail 0: keyboard)
       });
     }
+    // On a touch screen the zones let presses through to the text (so words
+    // at the sides can be selected): a tap in the outer 18% of the page,
+    // caught in the page itself, turns it. (Links and supplementary mentions
+    // handle their own taps first.)
+    rendition.hooks.content.register((contents) => {
+      contents.document.addEventListener('click', (e) => {
+        if (e.defaultPrevented || hasSelection() || zoomed()) return;
+        const z = $('#r-next');
+        if (!z || getComputedStyle(z).pointerEvents !== 'none') return; // (mouse: the zones take clicks)
+        if (e.target.closest && e.target.closest('a[href], button, input, select, textarea, summary')) return;
+        const ifr = $('#r-view iframe');
+        const stage = $('.r-stage');
+        if (!ifr || !stage) return;
+        const sb = stage.getBoundingClientRect();
+        const x = ifr.getBoundingClientRect().left + e.clientX - sb.left;
+        if (x < sb.width * 0.18) prev();
+        else if (x > sb.width * 0.82) next();
+      });
+    });
     const onKey = (e) => {
       if (e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return; // (typing, not turning pages)
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') return e.preventDefault(), openFind();
