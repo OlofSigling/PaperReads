@@ -1663,6 +1663,7 @@ const Epubify = (() => {
     }
     const repeatedKeys = new Set(edgeLines.entries().filter(([, c]) => c >= Math.max(3, Math.floor(pdf.pages.length / 3))).map(([t]) => t));
     // (a footer row can pick up the page number beside it: "… | doi … 7")
+    let inRefs = false; // past the References heading (across pages)
     const repeated = { has: (t) => repeatedKeys.has(edgeKey(t)) || repeatedKeys.has(edgeKey(t.replace(/^\s*[\divxlc]{1,4}\s+|\s+[\divxlc]{1,4}\s*$/gi, ''))) };
     const parts = [];
     let title = null;
@@ -1912,7 +1913,12 @@ const Epubify = (() => {
         };
         // (a bold line a size below the body that reads like words is a subheading, not a label)
         const subhead = row.every((z) => z.bold || !z.text.trim()) && sz >= bodySize - 1.2 && /^\p{Lu}/u.test(txt) && txt.split(/\s+/).length >= 2 && letters > txt.replace(/\s/g, '').length * 0.8;
-        if (!CAPTION.test(txt) && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead) || letters < txt.replace(/\s/g, '').length * 0.4)) continue;
+        const refsTitle = /^\s*(\d+\.?\s+)?(references|bibliography|literature cited|works cited)\s*$/i.test(txt);
+        if (refsTitle) inRefs = true;
+        // (in the reference list a line of numbers is the end of a citation,
+        // "44:1524–1527", "care. JAMA 2018; 319:1317–1318", not a figure label)
+        const refTail = inRefs && sz >= bodySize * 0.6 && /\d/.test(txt) && /[;:]|\d{4}/.test(txt) && txt.length <= 90;
+        if (!CAPTION.test(txt) && !refsTitle && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead && !refTail) || (letters < txt.replace(/\s/g, '').length * 0.4 && !refTail))) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
         const bold = row.every((sp) => sp.bold || !sp.text.trim());
         const fw = new Counter();
@@ -2249,6 +2255,26 @@ const Epubify = (() => {
     }
     flushPara();
     pdf.doc.destroy();
+    // A drop cap (the big first letter of the text) comes out as a heading of
+    // one letter between the lines beside it and the rest: "he adoption …
+    // tradi-" · "T" · "tionally …". Put it back: "The adoption … traditionally …"
+    for (let i = 1; i < parts.length; i++) {
+      const cap = /^<h[1-6][^>]*>([A-Z])<\/h[1-6]>$/.exec(parts[i]);
+      if (!cap) continue;
+      const P = /^<p>(\p{Ll}[\s\S]*)<\/p>$/u;
+      const before = P.exec(parts[i - 1] || '');
+      const after = P.exec(parts[i + 1] || '');
+      if (before) {
+        let text = cap[1] + before[1];
+        let drop = 1;
+        // the lines beside the cap end mid-word or mid-sentence: the rest follows
+        if (after && !/[.!?:]$/.test(before[1].trim())) {
+          text = /-$/.test(text) ? text.replace(/-$/, '') + after[1] : `${text} ${after[1]}`;
+          drop = 2;
+        }
+        parts.splice(i - 1, 1 + drop, `<p>${text}</p>`);
+      } else if (after) parts.splice(i, 2, `<p>${cap[1]}${after[1]}</p>`);
+    }
     // a chapter title on a divider page, printed again atop the next page: one heading
     const H2 = /^<h2>(.*)<\/h2>$/;
     const norm = (h) => h.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -2700,6 +2726,18 @@ const Epubify = (() => {
     let refHead = [...root.querySelectorAll('h1, h2, h3, h4')].find((h) => REF_TITLE.test(h.textContent.trim()));
     // set smaller than body text, "References" can come out as a plain line
     if (!refHead) refHead = [...root.querySelectorAll('p')].find((p) => REF_TITLE.test(p.textContent.trim()) && p.textContent.trim().length < 30);
+    // or run into the list itself: "References 1. Sutton RS, …"
+    if (!refHead) {
+      const p = [...root.querySelectorAll('p')].find((x) => /^(references|bibliography|literature cited|works cited)\s+\[?1[\].]?\s/i.test(x.textContent.trim()));
+      const t = p && p.firstChild && p.firstChild.nodeType === 3 ? p.firstChild : null;
+      const m = t && /^\s*(references|bibliography|literature cited|works cited)\s+/i.exec(t.data);
+      if (m) {
+        t.data = t.data.slice(m[0].length);
+        refHead = doc.createElement('h2');
+        refHead.textContent = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+        p.before(refHead);
+      }
+    }
     // no title at all: a closing run of paragraphs that mostly start "12 Surname AB" / "[12]"
     if (!refHead) {
       const ps = [...root.children].filter((e) => e.localName === 'p');
@@ -2763,10 +2801,26 @@ const Epubify = (() => {
       for (const t of [...container.children].map((e) => e.textContent.trim()).filter(Boolean)) {
         out.push(
           ...t
-            .split(/(?=\[\d{1,3}\]\s)|(?<=\s)(?=\d{1,3}\.?\s+[\p{Lu}][\p{L}'’-]+,?\s+(?:[\p{Lu}]{1,3}[,.\s]|[\p{Lu}]\.))/u)
+            .split(/(?=\[\d{1,3}\]\s)|(?<=\s)(?=\d{1,3}\.?\s+(?:(?:van|von|de|der|den|da|di|du|dos|le|la|del|ten|ter|el|al)\s+)*[\p{Lu}][\p{L}'’-]+(?:\s[\p{Lu}][\p{L}'’-]+)?,?\s+(?:[\p{Lu}]{1,3}[,.\s]|[\p{Lu}]\.))/u)
             .map((x) => x.trim())
             .filter(Boolean)
         );
+      }
+      // Entries that don't start with a person ("13. European Society of …",
+      // "21. R Core Team"): inside entry 12, "13. " followed by a capital
+      // starts entry 13. (The numbering itself says where to split.)
+      for (let i = 0; i < out.length; i++) {
+        const m = /^\[?(\d{1,3})([\].])\s/.exec(out[i]);
+        if (!m) continue;
+        const next = +m[1] + 1;
+        const mark = m[2] === ']' ? `[${next}] ` : `${next}. `;
+        const at = out[i].indexOf(` ${mark}`, m[0].length);
+        const head = out[i].slice(0, at).trim();
+        const rest = out[i].slice(at + 1 + mark.length);
+        // (a lowercase start only after a finished entry: "…47:457–463 16. govinfo: …")
+        if (at > 20 && (/^[\p{Lu}\d"“]/u.test(rest) && /[.)\d]$|\/$/.test(head) || /^\p{Ll}/u.test(rest) && /\d$/.test(head))) {
+          out.splice(i, 1, out[i].slice(0, at).trim(), out[i].slice(at + 1).trim());
+        }
       }
       // Unnumbered lists: entries run together after a full stop, starting
       // "Surname AB, Surname CD" or "Surname AB. 1999"
@@ -2778,7 +2832,7 @@ const Epubify = (() => {
         const APA_START = /(?<![,&]\s)(?<=\S\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?,\s[\p{Lu}]\.[^()]{0,160}?\((?:1[89]|20)\d\d[a-z]?\)\.)/u;
         // "Alberts SC, Altmann J. 2012." is an entry start even where the entry
         // before lost its last line (no full stop to split after)
-        const VANCOUVER_START = /(?<![,&]\s)(?<=\S\s)(?=(?:[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3},\s)*[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}\.\s(?:1[89]|20)\d\d[a-z]?\.\s)/u;
+        const VANCOUVER_START = /(?<![,&]\s)(?<=[.)\]\d]\s)(?=(?:[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3},\s)*[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}\.\s(?:1[89]|20)\d\d[a-z]?\.\s)/u;
         out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).flatMap((x) => x.split(NAMED_START)).flatMap((x) => x.split(APA_START)).flatMap((x) => x.split(VANCOUVER_START)).map((x) => x.trim()).filter(Boolean)));
       }
       // one paragraph per printed line: fold lines that don't start an
@@ -2870,6 +2924,7 @@ const Epubify = (() => {
         out.push(inner.slice(last));
         return out;
       };
+      const numbered = links; // (before the bracket and superscript citations)
       links += replaceInText(root, /\[(\d{1,3}(?:\s*[-–,;]\s*\d{1,3})*)\]/, (m, doc) => {
         const inner = linkNums(m[1], doc);
         return inner && ['[', ...inner, ']'];
@@ -2887,6 +2942,20 @@ const Epubify = (() => {
         if (!inner) continue;
         sup.replaceChildren(...inner);
         links++;
+      }
+      // journals that cite in parentheses, "(2)", "(5, 6)", "(3–5)": only when
+      // the paper doesn't cite in brackets or superscripts, and not after a
+      // word that makes it something else ("Eq. (2)", "Table (1)", "n = (3)")
+      if (links - numbered < 3) {
+        const max = Math.max(...byNumber.keys());
+        links += replaceInText(root, /\((\d{1,3}(?:\s*[-–,]\s*\d{1,3})*)\)/, (m, doc) => {
+          const before = m.input.slice(Math.max(0, m.index - 14), m.index);
+          if (/(?:Eqs?\.?|Equations?|Figs?\.?|Figures?|Tables?|Steps?|Items?|Panels?|Models?)\s*$/i.test(before) || /[=<>±×]\s*$/.test(before) || /\w$/.test(before)) return null;
+          const nums = m[1].match(/\d+/g).map(Number);
+          if (nums.some((n) => n < 1 || n > max)) return null;
+          const inner = linkNums(m[1], doc);
+          return inner && ['(', ...inner, ')'];
+        });
       }
     }
     // ---- author–year citations: (Amodei, 2024; VandeHei & Allen, 2025)
