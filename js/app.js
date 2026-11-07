@@ -1040,12 +1040,20 @@
           ${[['added', 'Recently added'], ['title', 'Title'], ['year', 'Year'], ['rating', 'Rating'], ['finished', 'Recently finished']].map(([v, l]) => `<option value="${v}"${sort === v ? ' selected' : ''}>${l}</option>`).join('')}
         </select>
       </div>
-      <div class="row between"><p class="muted count">${list.length} paper${list.length === 1 ? '' : 's'}</p>${list.length ? '<button class="btn small" id="lib-select">Select</button>' : ''}</div>
+      <div class="row between"><p class="muted count">${list.length} paper${list.length === 1 ? '' : 's'}</p><span class="row">${q.tag && all.some((p) => (p.tags || []).includes(q.tag)) ? `<button class="btn small" id="lib-tagbundle">📦 Bundle all #${esc(q.tag)}</button>` : ''}${list.length ? '<button class="btn small" id="lib-select">Select</button>' : ''}</span></div>
       ${list.length ? `<ul class="list" id="lib-list">${libraryRows(list)}</ul>` : '<p class="empty">No papers match.</p>'}
       <div class="r-selbar q-selbar" id="lib-selbar" hidden><span class="small" id="lib-selcount">0 selected</span>
         <button class="btn small primary" id="lib-bundle">📦 Bundle</button><button class="btn small" id="lib-unbundle">Unbundle</button><button class="r-btn" id="lib-selcancel" aria-label="Done">✕</button></div>
       <p class="muted small trash-link"><a href="#/trash">🗑 Recently deleted</a></p>
     `;
+    $('#lib-tagbundle')?.addEventListener('click', async () => {
+      const ids = all.filter((p) => (p.tags || []).includes(q.tag)).map((p) => p.id);
+      const name = await askBundle(all, `Bundle all ${ids.length} paper${ids.length === 1 ? '' : 's'} tagged #${q.tag}`, q.tag);
+      if (!name) return;
+      await setBundle(ids, name);
+      toast(`${ids.length} paper${ids.length === 1 ? '' : 's'} in the bundle “${name}”`);
+      route();
+    });
     $('#search').addEventListener('submit', (e) => {
       e.preventDefault();
       location.hash = link({ q: e.target.q.value.trim() });
@@ -1733,6 +1741,7 @@
         <textarea id="im-text" rows="8" placeholder="https://pubmed.ncbi.nlm.nih.gov/30864333/&#10;10.1016/j.artmed.2023.102742&#10;arXiv:2510.08350">${esc(text)}</textarea>
         <div class="row wrap">
           <label>Shelf <select id="im-status">${['want', 'none', 'reading', 'read'].map((st) => `<option value="${st}">${STATUS[st]}</option>`).join('')}</select></label>
+          <label>Bundle <input id="im-bundle" list="im-bundles" autocomplete="off" placeholder="None"></label><datalist id="im-bundles">${bundleNames(await papers()).map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
           ${cols.length ? `<label>Collection <select id="im-col"><option value="">None</option>${cols.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></label>` : ''}
         </div>
         <label class="check"><input type="checkbox" id="im-pdf" checked> Get the PDFs (arXiv, or a free copy when there is one)</label>
@@ -1807,6 +1816,7 @@
       addBtn.disabled = true;
       const status = $('#im-status').value;
       const col = $('#im-col') ? $('#im-col').value : '';
+      const bundle = $('#im-bundle').value.trim();
       const wantPdf = $('#im-pdf').checked;
       const wantEpub = $('#im-epub').checked;
       const added = [];
@@ -1832,6 +1842,7 @@
           tags: [],
           collections: col ? [col] : [],
           status: 'none',
+          ...(bundle ? { bundle } : {}),
         };
         await savePaper(p);
         await setStatus(p, status); // in list order, so the queue keeps it
@@ -2429,6 +2440,7 @@
   async function viewEdit(id, q) {
     const existing = id ? await DB.get('papers', id) : null;
     setTitle(existing ? 'Edit paper' : 'Add paper');
+    const bnames = bundleNames(await papers());
     const cols = await DB.all('collections');
     let inbox = null;
     if (q.inbox) inbox = await DB.get('inbox', Number(q.inbox));
@@ -2464,6 +2476,8 @@
         <label>Abstract <textarea name="abstract" rows="4">${esc(p.abstract || '')}</textarea></label>
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
+        <label>Bundle <small class="muted">(optional: a new name or one you have)</small><input name="bundle" list="add-bundles" autocomplete="off" placeholder="None"></label>
+        <datalist id="add-bundles">${bnames.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
         ${!(inbox && inbox.file) ? `<label class="check" id="getpdf-row"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv, a PDF link, or a free copy if there is one)</label>` : ''}
         ${!(inbox && inbox.file && isEpub(inbox.file)) ? `<label class="check"><input type="checkbox" name="getepub" checked> Make an EPUB for reading in the app</label>` : ''}`}
@@ -2791,6 +2805,7 @@
         pdfUrl: pdfLink || null,
         foundVia: viaPaper ? viaPaper.id : null,
       });
+      if (f.bundle && f.bundle.value.trim()) p.bundle = f.bundle.value.trim();
       await savePaper(p);
       // added from a reference in the paper it was found through: that paper cites it
       if (viaPaper && q.cites) await DB.put('links', { fromId: viaPaper.id, toId: p.id, type: 'cites', createdAt: now() });
