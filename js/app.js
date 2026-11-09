@@ -886,15 +886,21 @@
     }
   }
 
+  // A paper's bundle: its own, or that of the paper it was found through
+  function bundleOf(all, p) {
+    if (!p) return '';
+    const t = trailOf(all);
+    return p.bundle || [...t.ancestors(p)].reverse().map((a) => a.bundle).find(Boolean) || '';
+  }
+
   // Papers being read, by bundle: first the ones in none, then each bundle
   // under its name (most recently read first). A paper found through a
   // bundled one counts as in that bundle, as in the queue.
   function readingGroups(all, reading) {
     const t = trailOf(all);
-    const bundleOf = (p) => p.bundle || [...t.ancestors(p)].reverse().map((a) => a.bundle).find(Boolean) || '';
     const groups = new Map([['', []]]);
     for (const p of reading) {
-      const b = bundleOf(p);
+      const b = bundleOf(all, p);
       if (!groups.has(b)) groups.set(b, []);
       groups.get(b).push(p);
     }
@@ -1100,11 +1106,19 @@
     const groups = new Map();
     // (a paper you unnested, p.queueSplit, no longer gathers the papers found
     // through it: each of them heads a group of its own)
+    // (and a paper put in another bundle than the paper it was found through
+    // goes with its bundle: the bundle wins over the nesting)
     const qAnc = (p) => {
-      const a = t.ancestors(p);
-      let k = -1;
-      a.forEach((x, i) => x.queueSplit && (k = i));
-      return a.slice(k + 1);
+      const chain = [...t.ancestors(p), p];
+      let k = -1; // the group starts after chain[k]
+      chain.forEach((x, i) => {
+        if (i < chain.length - 1 && x.queueSplit) k = i;
+        if (i > k + 1 && x.bundle) {
+          const above = chain.slice(k + 1, i).reverse().find((y) => y.bundle);
+          if (above && above.bundle !== x.bundle) k = i - 1;
+        }
+      });
+      return chain.slice(k + 1, -1);
     };
     for (const p of want) {
       const root = qAnc(p)[0] || p;
@@ -2473,7 +2487,8 @@
   async function viewEdit(id, q) {
     const existing = id ? await DB.get('papers', id) : null;
     setTitle(existing ? 'Edit paper' : 'Add paper');
-    const bnames = bundleNames(await papers());
+    const allPapers = await papers();
+    const bnames = bundleNames(allPapers);
     const cols = await DB.all('collections');
     let inbox = null;
     if (q.inbox) inbox = await DB.get('inbox', Number(q.inbox));
@@ -2509,7 +2524,7 @@
         <label>Abstract <textarea name="abstract" rows="4">${esc(p.abstract || '')}</textarea></label>
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
-        <label>Bundle <small class="muted">(optional: a new name or one you have)</small><input name="bundle" list="add-bundles" autocomplete="off" placeholder="None"></label>
+        <label>Bundle <small class="muted">(optional: a new name or one you have)</small><input name="bundle" list="add-bundles" autocomplete="off" placeholder="None" value="${esc(via ? bundleOf(allPapers, allPapers.find((x) => x.id === via.id) || via) : '')}"></label>
         <datalist id="add-bundles">${bnames.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
         ${!(inbox && inbox.file) ? `<label class="check" id="getpdf-row"><input type="checkbox" name="getpdf" checked> Save the PDF for offline reading (from arXiv, a PDF link, or a free copy if there is one)</label>` : ''}
@@ -2563,6 +2578,10 @@
       $('#dupe-via')?.addEventListener('click', async () => {
         const d = await DB.get('papers', dupe.id);
         d.foundVia = viaPaper.id;
+        if (!d.bundle) {
+          const b = bundleOf(await papers(), viaPaper);
+          if (b) d.bundle = b;
+        }
         const ctx = q.cites ? citeContextFor(viaPaper.id) : '';
         if (ctx) d.foundContext = ctx;
         await savePaper(d);
