@@ -2829,10 +2829,10 @@ const Epubify = (() => {
         // social-science style: "Surname, First[, First Surname][ and First Surname]. 1998."
         const NAMED_START = /(?<=\s)(?=[\p{Lu}][\p{L}'’-]+,\s[\p{Lu}][\p{L}'’-]+(?:\s[\p{Lu}]\.)*(?:,\s[\p{Lu}][\p{L}'’.\s-]{1,40}?)*(?:,?\s(?:and|&)\s[\p{Lu}][\p{L}'’.\s-]{1,40}?)?\.\s(?:1[89]|20)\d\d[a-z]?\.)/u;
         // APA: "Grice, H. P. (1975). Logic and …" (not inside an author list: "…, & Hope, K. (2004).")
-        const APA_START = /(?<![,&]\s)(?<=\S\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?,\s[\p{Lu}]\.[^()]{0,160}?\((?:1[89]|20)\d\d[a-z]?\)\.)/u;
+        const APA_START = /(?<![,&]\s|\band\s)(?<=\S\s)(?=[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?,\s[\p{Lu}]\.[^()]{0,160}?\((?:1[89]|20)\d\d[a-z]?\)\.)/u;
         // "Alberts SC, Altmann J. 2012." is an entry start even where the entry
         // before lost its last line (no full stop to split after)
-        const VANCOUVER_START = /(?<![,&]\s)(?<=[.)\]\d]\s)(?=(?:[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3},\s)*[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}\.\s(?:1[89]|20)\d\d[a-z]?\.\s)/u;
+        const VANCOUVER_START = /(?<![,&]\s|\band\s)(?<=[.)\]\d]\s)(?=(?:[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3},\s)*[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?\s[\p{Lu}]{1,3}\.\s(?:1[89]|20)\d\d[a-z]?\.\s)/u;
         out.splice(0, out.length, ...out.flatMap((t) => t.split(AUTHOR_START).flatMap((x) => x.split(NAMED_START)).flatMap((x) => x.split(APA_START)).flatMap((x) => x.split(VANCOUVER_START)).map((x) => x.trim()).filter(Boolean)));
       }
       // one paragraph per printed line: fold lines that don't start an
