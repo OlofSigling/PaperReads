@@ -856,7 +856,7 @@
       </section>
       <section>
         <h2 class="section-h">Currently reading</h2>
-        ${reading.length ? `<ul class="list">${reading.map((p) => paperRow(p, `<span class="q-actions col">${p.hasEpub ? `<a class="btn small primary" href="#/read/${p.id}">Read</a>` : ''}<button class="btn small" data-quick="${p.id}">Update</button></span>`)).join('')}</ul>` : '<p class="empty">Nothing in progress. Pick something from your queue.</p>'}
+        ${reading.length ? readingGroups(all, reading).map(([b, ps]) => `${b ? `<h3 class="bundle-h">📦 ${esc(b)}</h3>` : ''}<ul class="list${b ? ' in-bundle' : ''}">${ps.map((p) => paperRow(p, `<span class="q-actions col">${p.hasEpub ? `<a class="btn small primary" href="#/read/${p.id}">Read</a>` : ''}<button class="btn small" data-quick="${p.id}">Update</button></span>`)).join('')}</ul>`).join('') : '<p class="empty">Nothing in progress. Pick something from your queue.</p>'}
       </section>
       <section>
         <div class="row between"><h2 class="section-h">Next up</h2><a href="#/queue" class="link">Queue →</a></div>
@@ -873,6 +873,32 @@
         route();
       })
     );
+  }
+
+  // The citing sentence remembered when a cited paper was added from the reader
+  function citeContextFor(viaId) {
+    try {
+      const c = JSON.parse(sessionStorage.getItem('paperreads.citeContext') || 'null');
+      sessionStorage.removeItem('paperreads.citeContext');
+      return c && c.via === viaId && c.text ? c.text : '';
+    } catch {
+      return '';
+    }
+  }
+
+  // Papers being read, by bundle: first the ones in none, then each bundle
+  // under its name (most recently read first). A paper found through a
+  // bundled one counts as in that bundle, as in the queue.
+  function readingGroups(all, reading) {
+    const t = trailOf(all);
+    const bundleOf = (p) => p.bundle || [...t.ancestors(p)].reverse().map((a) => a.bundle).find(Boolean) || '';
+    const groups = new Map([['', []]]);
+    for (const p of reading) {
+      const b = bundleOf(p);
+      if (!groups.has(b)) groups.set(b, []);
+      groups.get(b).push(p);
+    }
+    return [...groups.entries()].filter(([, ps]) => ps.length);
   }
 
   async function quickProgress(id) {
@@ -2085,6 +2111,7 @@
         <section class="card" id="trail-card">
           <h3>Discovery trail</h3>
           ${trailAnc.length ? `<p class="small">Found via ${trailAnc.map((a) => `<a href="#/paper/${a.id}">${esc(a.title)}</a>`).join(' › ')}</p>` : '<p class="muted small">Not found through another paper.</p>'}
+          ${p.foundVia ? `<label class="found-ctx small">How it’s cited there <textarea id="found-ctx" rows="3" placeholder="The sentence that cites it (filled in when you add a paper from a citation in the reader)">${esc(p.foundContext || '')}</textarea></label>` : ''}
           ${trailKids.length ? `<p class="small muted">Led to ${trailKids.length} paper${trailKids.length > 1 ? 's' : ''}:</p><ul class="trail">${trailKids.map((k) => trailTree(k, trail.kids, id)).join('')}</ul>` : ''}
           ${p.queueSplit && trailKids.length ? '<p class="small muted">Unnested: in the queue, the papers found through it are listed on their own. <button type="button" class="btn small" id="renest">Nest them under it again</button></p>' : ''}
           <div class="row wrap"><a class="btn small primary" href="#/add?via=${id}">＋ Add a paper found here</a>${trailAnc.length || trailKids.length ? `<a class="btn small" href="#/trail/${trail.rootOf(p).id}">Whole trail</a>` : ''}</div>
@@ -2385,6 +2412,12 @@
     );
 
     // Discovery trail
+    $('#found-ctx')?.addEventListener('change', async (e) => {
+      const fresh = await DB.get('papers', id);
+      fresh.foundContext = e.target.value.trim();
+      await savePaper(fresh);
+      toast('Saved');
+    });
     $('#renest')?.addEventListener('click', async () => {
       await renest(id);
       toast('Nested again in the queue');
@@ -2530,6 +2563,8 @@
       $('#dupe-via')?.addEventListener('click', async () => {
         const d = await DB.get('papers', dupe.id);
         d.foundVia = viaPaper.id;
+        const ctx = q.cites ? citeContextFor(viaPaper.id) : '';
+        if (ctx) d.foundContext = ctx;
         await savePaper(d);
         if (q.cites) await DB.put('links', { fromId: viaPaper.id, toId: d.id, type: 'cites', createdAt: now() });
         toast('Added to the trail');
@@ -2806,6 +2841,8 @@
         foundVia: viaPaper ? viaPaper.id : null,
       });
       if (f.bundle && f.bundle.value.trim()) p.bundle = f.bundle.value.trim();
+      const ctx = viaPaper && q.cites ? citeContextFor(viaPaper.id) : '';
+      if (ctx) p.foundContext = ctx;
       await savePaper(p);
       // added from a reference in the paper it was found through: that paper cites it
       if (viaPaper && q.cites) await DB.put('links', { fromId: viaPaper.id, toId: p.id, type: 'cites', createdAt: now() });
@@ -3246,7 +3283,7 @@
           try {
             cfi = contents.cfiFromNode(target);
           } catch {}
-          if (target.closest('.refs, .ltx_bibliography, .ref-entry, .ltx_bibitem')) showReference(target, cfi);
+          if (target.closest('.refs, .ltx_bibliography, .ref-entry, .ltx_bibitem')) showReference(target, cfi, citingSentence(a));
           else if (cfi) {
             backBtn.hidden = false;
             go(() => rendition.display(cfi));
@@ -3266,7 +3303,35 @@
       if (backTo) go(() => rendition.display(backTo));
       backTo = null;
     });
-    function showReference(target, cfi) {
+    // The sentence a citation sits in (with the one before when it's short):
+    // kept with a paper added from it, to show how the two are related.
+    function citingSentence(a) {
+      const block = a.closest('p, li, td, th, figcaption, blockquote, dd');
+      if (!block) return '';
+      const range = a.ownerDocument.createRange();
+      range.setStart(block, 0);
+      range.setEndBefore(a);
+      const at = range.toString().length;
+      const text = block.textContent;
+      const spans = [];
+      if (typeof Intl !== 'undefined' && Intl.Segmenter) for (const x of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(text)) spans.push([x.index, x.index + x.segment.length]);
+      else spans.push([0, text.length]);
+      // "et al." and "Fig." end in a full stop but not a sentence
+      const merged = [];
+      for (const sp of spans) {
+        const prev = merged.at(-1);
+        if (prev && /\b(et al|e\.g|i\.e|Fig|Figs|Eq|Eqs|Ref|Refs|vs|cf|approx|ca|Dr|no)\.\s*$/i.test(text.slice(prev[0], prev[1]))) prev[1] = sp[1];
+        else merged.push([...sp]);
+      }
+      let k = merged.findIndex(([x, y]) => at >= x && at < y);
+      if (k < 0) k = merged.length - 1;
+      // a citation right at the start of a sentence belongs to the one before it
+      if (k > 0 && !text.slice(merged[k][0], at).trim()) k--;
+      let [x, y] = merged[k];
+      if (y - x < 60 && k > 0) x = merged[k - 1][0];
+      return text.slice(x, y).replace(/\s+/g, ' ').trim().slice(0, 1200);
+    }
+    function showReference(target, cfi, context = '') {
       const dlg = $('#dialog');
       const item = target.closest('li, p, .ltx_bibitem') || target;
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
@@ -3302,6 +3367,11 @@
       });
       dlg.onclose = () => {
         // snowballing: add the cited paper, remembering it was found here
+        if (dlg.returnValue === 'add') {
+          try {
+            sessionStorage.setItem('paperreads.citeContext', JSON.stringify({ via: id, text: context }));
+          } catch {}
+        }
         if (dlg.returnValue === 'add') location.hash = `#/add?via=${id}&cites=1&back=read&text=${encodeURIComponent(item.textContent.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '').replace(/(\p{Ll})- (\p{Ll})/gu, '$1$2'))}`;
         if (dlg.returnValue === 'go' && cfi) {
           backBtn.hidden = false;

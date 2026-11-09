@@ -92,6 +92,10 @@ a { color: var(--accent); }
 main { max-width: 720px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 18px; outline: none; }
 section { display: flex; flex-direction: column; gap: 8px; }
 .section-h { font-size: 1rem; color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; }
+.bundle-h { font-size: .95rem; margin: 14px 0 6px; color: var(--text); }
+.list.in-bundle { margin-left: 10px; padding-left: 8px; border-left: 2px solid var(--border); }
+.found-ctx { display: block; margin: 6px 0; }
+.found-ctx textarea { width: 100%; margin-top: 4px; font-style: italic; }
 
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
