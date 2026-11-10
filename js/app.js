@@ -1286,9 +1286,133 @@
     return true;
   }
 
+  // ---------- the queue as a board ----------
+  // A column per bundle (the papers not in one come first), cards top to
+  // bottom. Priority between bundles is the column order, priority within a
+  // bundle the card order: both are the queue's own order, so the list and
+  // the board always agree.
+  const boardOn = () => localStorage.getItem('paperreads.queue-view') === 'board';
+  async function viewBoard(all) {
+    setTitle('Want to read');
+    const flat = queueList(all);
+    if (!flat.length) {
+      main.innerHTML = '<p class="empty">Your queue is empty. Papers marked “Want to read” show up here in priority order.</p>';
+      return;
+    }
+    const cols = new Map();
+    for (const p of flat) {
+      const b = bundleOf(all, p);
+      if (!cols.has(b)) cols.set(b, []);
+      cols.get(b).push(p);
+    }
+    const card = (p) => `<article class="board-card" draggable="true" data-id="${p.id}">
+        <a href="#/paper/${p.id}">${esc(p.title)}</a>
+        <small class="muted">${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}${p.hasEpub ? ` · ${EPUB_BADGE}` : ''}</small>
+      </article>`;
+    main.innerHTML = `<div class="row between q-head"><p class="muted small">Columns are bundles, left to right in priority; cards top to bottom. Drag a card to move it (or into another bundle), or drag a column by its ☰ to reorder the bundles.</p>
+        <button class="btn small" id="q-view">List</button></div>
+      <div class="board" id="board">${[...cols.entries()].map(([b, ps]) => `<section class="board-col" data-col="${esc(b)}">
+          <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${esc(b)}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span></header>
+          <div class="board-body" data-col="${esc(b)}">${ps.map(card).join('')}</div>
+        </section>`).join('')}</div>`;
+    $('#q-view').addEventListener('click', () => {
+      localStorage.setItem('paperreads.queue-view', 'list');
+      viewQueue();
+    });
+
+    // drag a card to a column (or a place in it); drag a column by its handle
+    let dragCard = null;
+    let dragCol = null;
+    const board = $('#board');
+    board.addEventListener('dragstart', (e) => {
+      const c = e.target.closest('.board-card');
+      const h = e.target.closest('.board-h .handle');
+      if (c) {
+        dragCard = c;
+        c.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', c.dataset.id);
+      } else if (h) {
+        dragCol = h.closest('.board-col');
+        dragCol.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', 'column');
+        e.dataTransfer.setDragImage(dragCol, 20, 20);
+      }
+    });
+    board.addEventListener('dragover', (e) => {
+      if (dragCard) {
+        const body = e.target.closest('.board-body');
+        if (!body) return;
+        e.preventDefault();
+        const after = [...body.querySelectorAll('.board-card:not(.dragging)')].find((x) => e.clientY < x.getBoundingClientRect().top + x.offsetHeight / 2);
+        $$('.board-body', board).forEach((x) => x.classList.toggle('over', x === body));
+        $$('.board-card', board).forEach((x) => x.classList.remove('before'));
+        if (after) after.classList.add('before');
+        body.dataset.before = after ? after.dataset.id : '';
+      } else if (dragCol) {
+        const sec = e.target.closest('.board-col');
+        if (!sec || sec === dragCol) return;
+        e.preventDefault();
+        const r = sec.getBoundingClientRect();
+        sec.parentElement.insertBefore(dragCol, e.clientX < r.left + r.width / 2 ? sec : sec.nextElementSibling);
+      }
+    });
+    board.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      if (dragCard) {
+        const body = e.target.closest('.board-body');
+        if (!body) return;
+        const before = body.dataset.before ? body.querySelector(`.board-card[data-id="${body.dataset.before}"]`) : null;
+        body.insertBefore(dragCard, before || null);
+        dragCard.classList.remove('dragging');
+        dragCard = null;
+        await commitBoard(all);
+      }
+    });
+    board.addEventListener('dragend', async () => {
+      if (dragCol) {
+        dragCol.classList.remove('dragging');
+        dragCol = null;
+        await commitBoard(all);
+      }
+      if (dragCard) {
+        dragCard.classList.remove('dragging');
+        dragCard = null;
+      }
+      $$('.board-body', board).forEach((x) => x.classList.remove('over'));
+      $$('.board-card', board).forEach((x) => x.classList.remove('before'));
+    });
+  }
+
+  // The board as it's now shown becomes the queue: each card's bundle is its
+  // column, and the queue order runs column by column, card by card.
+  async function commitBoard(all) {
+    const cols = $$('#board .board-col');
+    const seq = [];
+    for (const sec of cols) {
+      const key = sec.querySelector('.board-body').dataset.col;
+      for (const c of sec.querySelectorAll('.board-card')) {
+        seq.push({ id: c.dataset.id, key });
+      }
+    }
+    for (const { id, key } of seq) {
+      const p = await DB.get('papers', id);
+      if (p && bundleOf(await papers(), p) !== key) await setBundle([id], key);
+    }
+    for (const [i, { id }] of seq.entries()) {
+      const p = await DB.get('papers', id);
+      if (!p || p.queueOrder === i + 1) continue;
+      p.queueOrder = i + 1;
+      await savePaper(p);
+    }
+    viewBoard(await papers());
+  }
+
   async function viewQueue() {
     setTitle('Want to read');
     const all = await papers();
+    if (boardOn()) return viewBoard(all);
     const items = queueItems(all);
     if (!items.length) {
       main.innerHTML = '<p class="empty">Your queue is empty. Papers marked “Want to read” show up here in priority order.</p>';
@@ -1350,7 +1474,7 @@
       </li>`;
     };
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Drag ☰ to reorder. Swipe a paper right to archive it (it stays as Catalogued), left to delete it (kept 30 days in Recently deleted). Papers found through another one sit under it; <b>Select</b> to bundle papers together.</p>
-        <button class="btn small" id="q-select">Select</button></div>
+        <span class="row"><button class="btn small" id="q-view">Board</button><button class="btn small" id="q-select">Select</button></span></div>
       <ul class="list queue" id="queue">${items.map((it, i) => (it.group ? groupLi(it.group, i + 1) : bundleLi(it, i + 1))).join('')}</ul>
       <div class="r-selbar q-selbar" id="q-selbar" hidden><span class="small" id="q-selcount">0 selected</span>
         <button class="btn small primary" id="q-bundle">📦 Bundle</button><button class="btn small" id="q-unbundle">Unbundle</button><button class="r-btn" id="q-selcancel" aria-label="Done">✕</button></div>`;
@@ -1564,6 +1688,10 @@
       $('#q-selcount').textContent = '0 selected';
     };
     $('#q-select').addEventListener('click', () => setSelecting(!selecting));
+    $('#q-view').addEventListener('click', () => {
+      localStorage.setItem('paperreads.queue-view', 'board');
+      viewQueue();
+    });
     $('#q-selcancel').addEventListener('click', () => setSelecting(false));
     ul.addEventListener('change', (e) => {
       if (e.target.classList.contains('q-sel')) $('#q-selcount').textContent = `${picked().length} selected`;
