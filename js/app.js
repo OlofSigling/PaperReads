@@ -3660,6 +3660,7 @@
       const item = target.closest('li, p, .ltx_bibitem') || target;
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
         <p class="ref-pop">${esc(item.textContent.replace(/\s+/g, ' ').trim())}</p>
+        <p class="ref-have small" id="ref-have" hidden></p>
         <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button type="button" class="btn" id="ref-web">Open on the web ↗</button><button type="button" class="btn" id="ref-pubpeer">PubPeer ↗</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
       // the paper's own page: from a DOI or link in the reference, else a
       // title search; failing that, a Google Scholar search for it
@@ -3708,6 +3709,31 @@
         }
       };
       dlg.showModal();
+      // already here? the same DOI, arXiv ID or title as a paper in the library
+      findInLibrary(item.textContent).then((have) => {
+        const el = $('#ref-have', dlg);
+        if (!have || !el || !dlg.open) return;
+        el.hidden = false;
+        el.innerHTML = `✓ Already in your library: <a href="#/paper/${have.id}">${esc(have.title)}</a> · ${esc(STATUS[have.status] || '')}`;
+      });
+    }
+    // The paper in the library a reference is to, if there is one (or null)
+    async function findInLibrary(raw) {
+      const text = raw.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '');
+      const ids = Lookup.parse(text);
+      let doi = ids.doi;
+      if (ids.pmc) doi = (await Lookup.doiFromPmc(ids.pmc).catch(() => null)) || doi;
+      const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const title = norm(Lookup.refTitle(text));
+      const all = await papers();
+      return (
+        all.find((p) => {
+          if (doi && p.doi && doi.toLowerCase() === p.doi.toLowerCase()) return true;
+          if (ids.arxiv && p.arxiv && p.arxiv === ids.arxiv) return true;
+          const pt = norm(p.title);
+          return title.length >= 20 && pt.length >= 20 && (pt === title || title.startsWith(pt) || pt.startsWith(title));
+        }) || null
+      );
     }
     const drawHighlight = (h) => {
       try {
