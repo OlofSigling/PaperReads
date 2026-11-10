@@ -289,6 +289,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 body.reading { padding-bottom: 0; }
 body.reading .top, body.reading .nav, body.reading .offline { display: none; }
 body.reading main { padding: 0; max-width: none; }
+/* the queue as a board uses the full width of the window */
+main:has(#board) { max-width: none; }
 /* in the reader only the side panels' text (a chat, notes) can be selected:
    a long drag there mustn't run on into the toolbar and the page behind */
 .reader { -webkit-user-select: none; user-select: none; }
