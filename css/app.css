@@ -196,6 +196,13 @@ legend { color: var(--text-2); font-size: .9rem; }
 details summary { cursor: pointer; color: var(--accent); }
 .actions { margin-top: 4px; }
 
+/* a mouse on a wide screen: loose papers on the left, bundles on the right,
+   so a paper is moved across horizontally. Phones and touch keep one column. */
+@media (min-width: 900px) and (hover: hover) and (pointer: fine) {
+  .queue { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 16px; align-items: start; }
+  .queue > li.q-item { grid-column: 1; }
+  .queue > li.q-bundle { grid-column: 2; }
+}
 .queue li.q-bundle.drop-target { box-shadow: 0 0 0 2px var(--accent); border-radius: 10px; }
 .queue .handle { cursor: grab; touch-action: none; user-select: none; font-size: 1.2rem; color: var(--muted); padding: 8px 4px; }
 .q-num { color: var(--muted); font-variant-numeric: tabular-nums; width: 1.5em; text-align: right; }
@@ -443,7 +450,7 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .im-row input[type='checkbox'] { flex: none; width: 20px; height: 20px; margin: 2px 0 0; }
 
 /* bundles */
-.q-head { align-items: flex-start; gap: 10px; }
+.q-head { align-items: flex-start; gap: 10px; position: sticky; z-index: 4; background: var(--bg); padding: 8px 0 6px; }
 .q-head p { margin: 0; flex: 1; }
 .q-sel, .lib-sel { display: none; flex: none; width: 20px; height: 20px; margin: 0 4px 0 0; }
 .selecting .q-sel, .selecting .lib-sel { display: inline-block; }

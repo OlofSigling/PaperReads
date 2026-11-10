@@ -1353,6 +1353,10 @@
       <div class="r-selbar q-selbar" id="q-selbar" hidden><span class="small" id="q-selcount">0 selected</span>
         <button class="btn small primary" id="q-bundle">📦 Bundle</button><button class="btn small" id="q-unbundle">Unbundle</button><button class="r-btn" id="q-selcancel" aria-label="Done">✕</button></div>`;
 
+    // the Select row stays in view under the app's top bar while the list scrolls
+    const head = $('.q-head');
+    const topBar = document.querySelector('.top');
+    if (head && topBar) head.style.top = `${Math.round(topBar.getBoundingClientRect().height)}px`;
     const ul = $('#queue');
     const byId = new Map(all.map((p) => [p.id, p]));
     const renumber = () => $$(':scope > li > .q-num', ul).forEach((el, i) => (el.textContent = i + 1));
