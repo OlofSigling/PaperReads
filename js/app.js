@@ -1286,6 +1286,36 @@
     return true;
   }
 
+  // Sort the queue so papers with an EPUB come first, within each bundle and
+  // among the loose papers. Each section keeps its place in the queue, so a
+  // bundle stays together; the order inside it is what changes.
+  async function sortEpubFirst() {
+    const all = await papers();
+    const flat = queueList(all);
+    const sections = new Map(); // bundle ('' = loose) -> the queue slots it takes
+    flat.forEach((p, i) => {
+      const k = bundleOf(all, p);
+      if (!sections.has(k)) sections.set(k, []);
+      sections.get(k).push(i);
+    });
+    const next = [...flat];
+    let moved = 0;
+    for (const slots of sections.values()) {
+      const ps = slots.map((i) => flat[i]);
+      const sorted = [...ps].sort((a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0));
+      slots.forEach((slot, k) => (next[slot] = sorted[k]));
+    }
+    for (const [i, p] of next.entries()) {
+      if (flat[i].id !== p.id) moved++;
+      if (p.queueOrder === i + 1) continue;
+      const fresh = await DB.get('papers', p.id);
+      fresh.queueOrder = i + 1;
+      await savePaper(fresh);
+    }
+    toast(moved ? `Sorted: EPUBs first in each bundle and among the loose papers` : 'Already sorted: EPUBs first');
+    viewQueue();
+  }
+
   // ---------- the queue as a board ----------
   // A column per bundle (the papers not in one come first), cards top to
   // bottom. Priority between bundles is the column order, priority within a
@@ -1311,7 +1341,7 @@
         <small class="muted">${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}${p.hasEpub ? ` · ${EPUB_BADGE}` : ''}</small>
       </article>`;
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Columns are bundles, left to right in priority; cards top to bottom. Drag a card to move it (or into another bundle), or drag a column by its ☰ to reorder the bundles.</p>
-        <button class="btn small" id="q-view">List</button></div>
+        <span class="row"><button class="btn small" id="q-epub">EPUB first</button><button class="btn small" id="q-view">List</button></span></div>
       <div class="board" id="board">${[...cols.entries()].map(([b, ps]) => `<section class="board-col" data-col="${esc(b)}">
           <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${esc(b)}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span></header>
           <div class="board-body" data-col="${esc(b)}">${ps.map(card).join('')}</div>
@@ -1320,6 +1350,7 @@
       localStorage.setItem('paperreads.queue-view', 'list');
       viewQueue();
     });
+    $('#q-epub').addEventListener('click', sortEpubFirst);
 
     // drag a card to a column (or a place in it); drag a column by its handle
     let dragCard = null;
@@ -1499,7 +1530,7 @@
       </li>`;
     };
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Drag ☰ to reorder. Swipe a paper right to archive it (it stays as Catalogued), left to delete it (kept 30 days in Recently deleted). Papers found through another one sit under it; <b>Select</b> to bundle papers together.</p>
-        <span class="row"><button class="btn small" id="q-view">Board</button><button class="btn small" id="q-select">Select</button></span></div>
+        <span class="row"><button class="btn small" id="q-epub">EPUB first</button><button class="btn small" id="q-view">Board</button><button class="btn small" id="q-select">Select</button></span></div>
       <ul class="list queue" id="queue">${items.map((it, i) => (it.group ? groupLi(it.group, i + 1) : bundleLi(it, i + 1))).join('')}</ul>
       <div class="r-selbar q-selbar" id="q-selbar" hidden><span class="small" id="q-selcount">0 selected</span>
         <button class="btn small primary" id="q-bundle">📦 Bundle</button><button class="btn small" id="q-unbundle">Unbundle</button><button class="r-btn" id="q-selcancel" aria-label="Done">✕</button></div>`;
@@ -1717,6 +1748,7 @@
       localStorage.setItem('paperreads.queue-view', 'board');
       viewQueue();
     });
+    $('#q-epub').addEventListener('click', sortEpubFirst);
     $('#q-selcancel').addEventListener('click', () => setSelecting(false));
     ul.addEventListener('change', (e) => {
       if (e.target.classList.contains('q-sel')) $('#q-selcount').textContent = `${picked().length} selected`;
