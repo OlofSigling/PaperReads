@@ -174,7 +174,26 @@ const Lookup = (() => {
       if (ax) out.arxiv = ax[1];
     }
     if (out.arxiv && !out.doi) out.doi = `10.48550/arXiv.${out.arxiv}`;
+    // A PubMed Central number ("PMC5054598") often runs on from the DOI in a
+    // reference copied from a PDF: the DOI is cut before it, and the PMC
+    // number finds the paper's real DOI (see doiFromPmc)
+    const pmc = /PMC(\d{4,9})/i.exec(text);
+    if (pmc) out.pmc = pmc[1];
+    if (out.doi && pmc) out.doi = cleanDoi(out.doi.split(/PMC\d/i)[0]);
     return out;
+  }
+
+  // The DOI of a PubMed Central article, from Europe PMC (null if none)
+  async function doiFromPmc(pmc) {
+    try {
+      const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=PMCID:PMC${pmc}&format=json&resultType=lite`);
+      if (!res.ok) return null;
+      const json = await res.json();
+      const hit = json.resultList && json.resultList.result && json.resultList.result[0];
+      return (hit && hit.doi) || null;
+    } catch {
+      return null;
+    }
   }
 
   function stripTags(s) {
@@ -433,6 +452,7 @@ const Lookup = (() => {
   // Resolve whatever the user pasted/shared into metadata.
   async function resolve(input) {
     const ids = parse(input);
+    if (ids.pmc) ids.doi = (await doiFromPmc(ids.pmc)) || ids.doi;
     if (!ids.doi && ids.url) ids.doi = await doiFromPubmed(ids.url).catch(() => null);
     if (ids.doi) {
       const meta = await byDoi(ids.doi);
@@ -629,5 +649,5 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
+  return { parse, doiFromPmc, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
 })();

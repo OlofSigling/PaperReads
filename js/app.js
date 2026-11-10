@@ -3664,10 +3664,14 @@
       // the paper's own page: from a DOI or link in the reference, else a
       // title search; failing that, a Google Scholar search for it
       // PubPeer for the cited paper: by its DOI if the reference gives one, else its title
-      $('#ref-pubpeer', dlg).addEventListener('click', () => {
+      $('#ref-pubpeer', dlg).addEventListener('click', async () => {
         const text = item.textContent.replace(/\s+/g, ' ').trim();
+        const win = window.open('about:blank', '_blank'); // now, while it's a tap (a popup opened after the wait is blocked)
         const ids = Lookup.parse(text);
-        window.open(pubpeerUrl({ doi: ids.arxiv ? null : ids.doi, arxiv: ids.arxiv, title: Lookup.refTitle(text) }), '_blank', 'noopener');
+        if (ids.pmc) ids.doi = (await Lookup.doiFromPmc(ids.pmc)) || ids.doi;
+        const url = pubpeerUrl({ doi: ids.arxiv ? null : ids.doi, arxiv: ids.arxiv, title: Lookup.refTitle(text) });
+        if (win && !win.closed) win.location.href = url;
+        else window.open(url, '_blank', 'noopener');
       });
       $('#ref-web', dlg).addEventListener('click', async () => {
         const text = item.textContent.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '').replace(/(\p{Ll})- (\p{Ll})/gu, '$1$2');
@@ -3677,6 +3681,7 @@
         let url = null;
         try {
           const ids = Lookup.parse(text);
+          if (ids.pmc) ids.doi = (await Lookup.doiFromPmc(ids.pmc)) || ids.doi;
           if (ids.arxiv) url = `https://arxiv.org/abs/${ids.arxiv}`;
           else if (ids.doi) url = `https://doi.org/${ids.doi}`;
           else if (ids.url) url = ids.url;
