@@ -1387,6 +1387,7 @@
     // Pointer-based drag (works with touch, no library), within one list:
     // the queue, a bundle, or the papers under one parent.
     let dragging = null;
+    let dropZone; // where a dragged paper is dropped: a bundle's name, '' for the loose papers, undefined: no change
     ul.addEventListener('pointerdown', (e) => {
       const handle = e.target.closest('.handle');
       if (!handle || selecting) return;
@@ -1397,7 +1398,21 @@
     });
     ul.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      const list = dragging.parentElement;
+      // a whole paper (its trail with it) can be dropped on a bundle, or among the loose papers
+      const top = dragging.classList.contains('q-item');
+      let zone;
+      if (top) {
+        const hit = document.elementFromPoint(e.clientX, e.clientY);
+        const bl = hit && hit.closest('li.q-bundle');
+        if (bl && ul.contains(bl)) zone = bl.dataset.bundle;
+        else if (hit && ul.contains(hit)) zone = '';
+      }
+      dropZone = zone;
+      $$('li.q-bundle', ul).forEach((b) => b.classList.toggle('drop-target', !!zone && b.dataset.bundle === zone));
+      let list = dragging.parentElement;
+      if (zone === '') list = ul;
+      else if (zone) list = $(':scope > .q-bundle-list', $$('li.q-bundle', ul).find((b) => b.dataset.bundle === zone) || document.createElement('li'));
+      if (!list || list.hidden) return; // a closed bundle: the highlight says where it goes
       const others = [...list.children].filter((li) => li !== dragging);
       const after = others.find((li) => {
         const r = li.getBoundingClientRect();
@@ -1408,12 +1423,26 @@
       if (e.clientY < 80) window.scrollBy(0, -8);
       if (e.clientY > window.innerHeight - 100) window.scrollBy(0, 8);
     });
-    const end = () => {
+    const end = async () => {
       if (!dragging) return;
       const list = dragging.parentElement;
+      const id = dragging.dataset.id;
+      const zone = dropZone;
       dragging.classList.remove('dragging');
       dragging = null;
-      persist(list);
+      dropZone = undefined;
+      $$('.drop-target', ul).forEach((b) => b.classList.remove('drop-target'));
+      await persist(list);
+      if (zone === undefined) return;
+      const fresh = await DB.get('papers', id);
+      if (!fresh || (fresh.bundle || '') === zone) return;
+      await setBundle([id], zone);
+      if (zone) {
+        open.add('b:' + zone);
+        saveOpen();
+      }
+      toast(zone ? `Moved to “${zone}”` : 'Taken out of its bundle');
+      viewQueue();
     };
     ul.addEventListener('pointerup', end);
     ul.addEventListener('pointercancel', end);
@@ -1495,6 +1524,10 @@
         const link = e.target.closest('a.paper-link');
         if (!link) return;
         e.preventDefault();
+        if (skipTap) {
+          skipTap = false;
+          return;
+        }
         const box = $(':scope > .q-sel', link.closest('.q-item'));
         if (box) {
           box.checked = !box.checked;
@@ -1503,6 +1536,41 @@
       },
       true
     );
+    // Press and hold a paper to select it (no Select button needed): the
+    // selection starts with that paper picked, and taps then add to it.
+    let holdT = null;
+    let holdFrom = null;
+    let skipTap = false;
+    ul.addEventListener('pointerdown', (e) => {
+      skipTap = false;
+      clearTimeout(holdT);
+      if (selecting || e.button > 0 || e.target.closest('.handle, button, input, .q-toggle, .q-btoggle')) return;
+      const link = e.target.closest('a.paper-link');
+      if (!link) return;
+      holdFrom = { x: e.clientX, y: e.clientY };
+      holdT = setTimeout(() => {
+        skipTap = true; // the press's own tap must not toggle it back
+        setSelecting(true);
+        const box = $(':scope > .q-sel', link.closest('li.q-item') || document.createElement('li'));
+        if (box) box.checked = true;
+        $('#q-selcount').textContent = `${picked().length} selected`;
+        if (navigator.vibrate) navigator.vibrate(15);
+      }, 450);
+    });
+    const cancelHold = (e) => {
+      if (holdT && e && holdFrom && Math.hypot(e.clientX - holdFrom.x, e.clientY - holdFrom.y) < 8) return;
+      clearTimeout(holdT);
+      holdT = null;
+    };
+    ul.addEventListener('pointermove', cancelHold);
+    ul.addEventListener('pointerup', () => {
+      clearTimeout(holdT);
+      holdT = null;
+    });
+    ul.addEventListener('pointercancel', () => {
+      clearTimeout(holdT);
+      holdT = null;
+    });
     $('#q-bundle').addEventListener('click', async () => {
       const ids = papersOf(picked());
       if (!ids.length) return toast('Select papers first');

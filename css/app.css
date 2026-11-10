@@ -196,6 +196,7 @@ legend { color: var(--text-2); font-size: .9rem; }
 details summary { cursor: pointer; color: var(--accent); }
 .actions { margin-top: 4px; }
 
+.queue li.q-bundle.drop-target { box-shadow: 0 0 0 2px var(--accent); border-radius: 10px; }
 .queue .handle { cursor: grab; touch-action: none; user-select: none; font-size: 1.2rem; color: var(--muted); padding: 8px 4px; }
 .q-num { color: var(--muted); font-variant-numeric: tabular-nums; width: 1.5em; text-align: right; }
 .q-actions { display: flex; gap: 4px; flex: none; }
