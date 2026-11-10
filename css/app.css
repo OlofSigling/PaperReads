@@ -205,8 +205,8 @@ details summary { cursor: pointer; color: var(--accent); }
   .queue.is-dragging .q-bundle-list { display: none; }
 }
 /* the queue as a board: a column per bundle; columns scroll sideways on a phone */
-.board { display: flex; gap: 12px; overflow-x: auto; align-items: flex-start; padding: 4px 2px 16px; scroll-snap-type: x proximity; }
-.board-col { flex: 0 0 280px; width: 280px; scroll-snap-align: start; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+.board { display: flex; gap: 12px; overflow-x: auto; align-items: flex-start; padding: 4px 2px 16px; }
+.board-col { flex: 0 0 280px; width: 280px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
 .board-col.dragging { opacity: .6; }
 .board-h { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
 .board-h b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

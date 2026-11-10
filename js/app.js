@@ -1292,6 +1292,7 @@
   // bundle the card order: both are the queue's own order, so the list and
   // the board always agree.
   const boardOn = () => localStorage.getItem('paperreads.queue-view') === 'board';
+  let boardLeft = 0; // where the board was scrolled to: kept when it's drawn again after a move
   async function viewBoard(all) {
     setTitle('Want to read');
     const flat = queueList(all);
@@ -1324,9 +1325,18 @@
     let dragCard = null;
     let dragCol = null;
     const board = $('#board');
+    board.scrollLeft = boardLeft;
+    board.addEventListener('scroll', () => (boardLeft = board.scrollLeft), { passive: true });
     board.addEventListener('dragstart', (e) => {
       const c = e.target.closest('.board-card');
       const h = e.target.closest('.board-h .handle');
+      if (!edgeT)
+        edgeT = setInterval(() => {
+          if (edgeX === null) return;
+          const r = board.getBoundingClientRect();
+          if (edgeX > r.right - 90) board.scrollLeft += 14;
+          else if (edgeX < r.left + 90) board.scrollLeft -= 14;
+        }, 30);
       if (c) {
         dragCard = c;
         c.classList.add('dragging');
@@ -1340,7 +1350,20 @@
         e.dataTransfer.setDragImage(dragCol, 20, 20);
       }
     });
+    // near either edge of the board, it scrolls, for as long as the drag lasts
+    // (a held pointer may send no drag events): a card can go from far right to far left
+    let edgeX = null;
+    let edgeT = null;
+    const stopEdge = () => {
+      clearInterval(edgeT);
+      edgeT = null;
+      edgeX = null;
+    };
     board.addEventListener('dragover', (e) => {
+      edgeX = e.clientX;
+      const r = board.getBoundingClientRect();
+      if (e.clientX > r.right - 90) board.scrollLeft += 16;
+      else if (e.clientX < r.left + 90) board.scrollLeft -= 16;
       if (dragCard) {
         const body = e.target.closest('.board-body');
         if (!body) return;
@@ -1360,6 +1383,7 @@
     });
     board.addEventListener('drop', async (e) => {
       e.preventDefault();
+      stopEdge();
       if (dragCard) {
         const body = e.target.closest('.board-body');
         if (!body) return;
@@ -1371,6 +1395,7 @@
       }
     });
     board.addEventListener('dragend', async () => {
+      stopEdge();
       if (dragCol) {
         dragCol.classList.remove('dragging');
         dragCol = null;
