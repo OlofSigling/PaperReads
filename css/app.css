@@ -202,6 +202,7 @@ details summary { cursor: pointer; color: var(--accent); }
   .queue { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 16px; align-items: start; }
   .queue > li.q-item { grid-column: 1; }
   .queue > li.q-bundle { grid-column: 2; }
+  .queue.is-dragging .q-bundle-list { display: none; }
 }
 .queue li.q-bundle.drop-target { box-shadow: 0 0 0 2px var(--accent); border-radius: 10px; }
 .queue .handle { cursor: grab; touch-action: none; user-select: none; font-size: 1.2rem; color: var(--muted); padding: 8px 4px; }

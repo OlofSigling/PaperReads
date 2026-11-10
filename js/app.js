@@ -1308,11 +1308,13 @@
     const start = (p) => (p.status === 'want' ? `<button class="btn small" data-start="${p.id}">Start</button>` : '');
     // a paper you're done with (read, reading…) still holding papers you haven't read: let them out
     const unnest = (p, kids) => (p.status !== 'want' && kids.length ? `<button class="btn small" data-unnest="${p.id}" title="List the papers found through it on their own">Unnest</button>` : '');
+    // every paper in the queue can be deleted from its row (kept in Recently deleted, with undo)
+    const del = (p) => `<button class="btn small icon" data-del="${p.id}" aria-label="Delete" title="Delete">🗑</button>`;
     const node = (g, p) => {
       const kids = g.kids(p.id);
       return `<li class="q-node" data-id="${p.id}">
         <div class="q-row">${g.kids(p.foundVia).length > 1 ? '<span class="handle" aria-label="Drag to reorder">☰</span>' : '<span class="handle-gap"></span>'}
-          <a href="#/paper/${p.id}" class="paper-link${p.status === 'want' ? '' : ' dim'}"><span class="pr-title">${esc(p.title)}</span><span class="pr-meta">${badge(p)} ${meta(p)}</span></a>${start(p)}${unnest(p, kids)}</div>
+          <a href="#/paper/${p.id}" class="paper-link${p.status === 'want' ? '' : ' dim'}"><span class="pr-title">${esc(p.title)}</span><span class="pr-meta">${badge(p)} ${meta(p)}</span></a>${start(p)}${unnest(p, kids)}${del(p)}</div>
         ${kids.length ? `<ul class="q-sub" data-parent="${p.id}">${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
     };
@@ -1330,7 +1332,7 @@
         </div>
         <span class="q-actions">
           <button class="btn small icon" data-top="${g.root.id}" aria-label="Move to top" title="Move to top">⤒</button>
-          ${start(g.root)}${unnest(g.root, kids)}
+          ${start(g.root)}${unnest(g.root, kids)}${del(g.root)}
         </span>
         ${kids.length ? `<ul class="q-sub q-sub-top" data-parent="${g.root.id}" ${isOpen ? '' : 'hidden'}>${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
@@ -1392,11 +1394,34 @@
     // the queue, a bundle, or the papers under one parent.
     let dragging = null;
     let dropZone; // where a dragged paper is dropped: a bundle's name, '' for the loose papers, undefined: no change
+    // While a paper is dragged (wide mouse screens), every bundle is shown
+    // closed in a column pinned to the right, so the list can scroll and the
+    // bundles stay in reach. Undone when the drag ends.
+    const dockBundles = (on) => {
+      const wide = matchMedia('(min-width: 900px) and (hover: hover) and (pointer: fine)').matches;
+      const topBar = document.querySelector('.top');
+      let y = (topBar ? topBar.getBoundingClientRect().height : 0) + 96;
+      $$('li.q-bundle', ul).forEach((b) => {
+        if (!on || !wide) {
+          b.style.position = b.style.top = b.style.right = b.style.width = b.style.zIndex = '';
+          return;
+        }
+        b.style.position = 'fixed';
+        b.style.right = '16px';
+        b.style.width = '240px';
+        b.style.zIndex = '6';
+        b.style.top = `${y}px`;
+        y += b.getBoundingClientRect().height + 8;
+      });
+    };
     ul.addEventListener('pointerdown', (e) => {
       const handle = e.target.closest('.handle');
       if (!handle || selecting) return;
       dragging = handle.closest('li');
       dragging.classList.add('dragging');
+      // a drag shows every bundle, closed, to the right (wide screens): easy to drop on
+      ul.classList.add('is-dragging');
+      dockBundles(true);
       handle.setPointerCapture(e.pointerId);
       e.preventDefault();
     });
@@ -1416,7 +1441,8 @@
       let list = dragging.parentElement;
       if (zone === '') list = ul;
       else if (zone) list = $(':scope > .q-bundle-list', $$('li.q-bundle', ul).find((b) => b.dataset.bundle === zone) || document.createElement('li'));
-      if (!list || list.hidden) return; // a closed bundle: the highlight says where it goes
+      // a paper dropped on another bundle isn't moved in the DOM: the highlight says where it goes
+      if (!list || list.hidden || (zone && zone !== (dragging.closest('li.q-bundle') || {}).dataset?.bundle)) return;
       const others = [...list.children].filter((li) => li !== dragging);
       const after = others.find((li) => {
         const r = li.getBoundingClientRect();
@@ -1433,6 +1459,8 @@
       const id = dragging.dataset.id;
       const zone = dropZone;
       dragging.classList.remove('dragging');
+      ul.classList.remove('is-dragging');
+      dockBundles(false);
       dragging = null;
       dropZone = undefined;
       $$('.drop-target', ul).forEach((b) => b.classList.remove('drop-target'));
@@ -1459,6 +1487,26 @@
       b.setAttribute('aria-expanded', String(!sub.hidden));
       saveOpen();
     };
+    $$('[data-del]').forEach((b) =>
+      b.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = b.dataset.del;
+        const li = b.closest('li.q-item, li.q-node');
+        if (!li) return;
+        li.remove();
+        renumber();
+        pendingDeletes.set(id, setTimeout(() => finishDelete(id), 6500));
+        toast('Deleted (kept in Recently deleted)', {
+          label: 'Undo',
+          run: () => {
+            clearTimeout(pendingDeletes.get(id));
+            pendingDeletes.delete(id);
+            viewQueue();
+          },
+        });
+      })
+    );
     $$('[data-unnest]').forEach((b) =>
       b.addEventListener('click', async () => {
         const r = await unnestPaper(b.dataset.unnest);
@@ -1511,8 +1559,8 @@
       ul.classList.toggle('selecting', on);
       selbar.hidden = !on;
       $('#q-select').textContent = on ? 'Done' : 'Select';
-      if (on) $$('.q-bundle-list', ul).forEach((x) => (x.hidden = false));
-      else $$('.q-sel', ul).forEach((c) => (c.checked = false));
+      // (bundles keep the open or closed state they have: Select doesn't change it)
+      if (!on) $$('.q-sel', ul).forEach((c) => (c.checked = false));
       $('#q-selcount').textContent = '0 selected';
     };
     $('#q-select').addEventListener('click', () => setSelecting(!selecting));
