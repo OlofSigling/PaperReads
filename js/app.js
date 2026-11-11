@@ -2026,11 +2026,13 @@
   function suppUI(root, id, { onChange = () => {} } = {}) {
     let busy = false;
     async function draw(status = '') {
-      const [rec, p] = await Promise.all([DB.get('supps', id), DB.get('papers', id)]);
+      const [rec, p, ep] = await Promise.all([DB.get('supps', id), DB.get('papers', id), DB.get('epubs', id)]);
       const items = (rec && rec.items) || [];
+      const epubHasSupp = !!(ep && ep.plain);
       root.innerHTML = `<h3>Supplementary material${items.length ? ` <span class="muted small">${items.length}</span>` : ''}</h3>
         ${items.length ? `<ul class="list compact supp-list">${items.map((it, i) => `<li class="supp-item"><button type="button" class="supp-open" data-i="${i}"><span class="supp-ico">${Supp.icon(it)}</span><span class="supp-txt"><b>${esc(it.label)}</b>${it.caption ? `<span class="muted small">${esc(it.caption.length > 140 ? it.caption.slice(0, 140) + '…' : it.caption)}</span>` : ''}</span></button><button type="button" class="r-btn" data-del="${i}" aria-label="Remove">✕</button></li>`).join('')}</ul>` : `<p class="muted small">${rec && rec.reason ? esc(rec.reason) + ' ' : ''}Supplementary figures, tables and data files are kept here; mentions like “Fig. S3” in the text link to them.</p>`}
         <div class="row wrap">${p && (p.doi || p.url) ? `<button type="button" class="btn small" id="supp-find"${busy ? ' disabled' : ''}>${busy ? 'Looking…' : items.length ? 'Look again' : 'Find automatically'}</button>` : ''}<label class="btn small">Add files<input type="file" multiple hidden id="supp-add"></label></div>
+        ${p && p.hasEpub && items.length ? `<div class="row wrap"><button type="button" class="btn small" id="supp-epub">${epubHasSupp ? 'Update in the EPUB' : 'Add to the end of the EPUB'}</button>${epubHasSupp ? '<button type="button" class="btn small danger-ghost" id="supp-epub-off">Take out of the EPUB</button>' : ''}</div>` : ''}
         <p class="muted small" id="supp-status">${esc(status)}</p>`;
       $$('.supp-open', root).forEach((b) => b.addEventListener('click', () => openSupp(items[+b.dataset.i])));
       $$('[data-del]', root).forEach((b) =>
@@ -2048,6 +2050,27 @@
         await DB.put('supps', r);
         onChange();
         draw(`Added ${e.target.files.length} file${e.target.files.length > 1 ? 's' : ''}.`);
+      });
+      // the EPUB keeps its original (`plain`), so adding, updating or taking out
+      // always starts from the paper as it was converted
+      $('#supp-epub', root)?.addEventListener('click', async () => {
+        const ep = await DB.get('epubs', id);
+        if (!ep) return;
+        draw('Adding to the EPUB…');
+        try {
+          const plain = ep.plain || ep.blob;
+          const out = await Supp.addToEpub(plain, items, { title: p.title });
+          await DB.put('epubs', { ...ep, plain, blob: out, size: out.size, supp: items.length, suppAt: now() });
+          draw(`Added ${items.length} item${items.length === 1 ? '' : 's'} to the end of the EPUB. Open it to read them.`);
+        } catch (err) {
+          draw(`Couldn’t add them to the EPUB: ${err.message}`);
+        }
+      });
+      $('#supp-epub-off', root)?.addEventListener('click', async () => {
+        const ep = await DB.get('epubs', id);
+        if (!ep || !ep.plain) return;
+        await DB.put('epubs', { ...ep, blob: ep.plain, size: ep.plain.size, plain: undefined, supp: undefined, suppAt: undefined });
+        draw('Taken out: the EPUB is back to the paper alone.');
       });
       $('#supp-find', root)?.addEventListener('click', async () => {
         busy = true;

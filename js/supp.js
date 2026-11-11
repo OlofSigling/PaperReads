@@ -207,5 +207,119 @@ const Supp = (() => {
 
   const icon = (it) => (/^image\//.test(it.type) ? '🖼' : /pdf/.test(it.type) ? '📄' : /csv|excel|spreadsheet|tab-separated/.test(it.type) ? '📊' : /video/.test(it.type) ? '🎞' : /word|text/.test(it.type) ? '📝' : '📎');
 
-  return { find, fromFile, keysOf, MENTION, icon, typeOf, salvage };
+  // ---------- supplementary material at the end of an EPUB ----------
+  // A "Supplementary material" page is added after the paper. Images and
+  // tables are copied in; Word, Excel and PowerPoint become text and tables;
+  // small PDFs are linked; anything else is listed by name (not carried).
+  const XHTML_NS = 'http://www.w3.org/1999/xhtml';
+  const OPF_NS = 'http://www.idpf.org/2007/opf';
+  const SUPP_PAGE = 'supplementary.xhtml';
+  const MAX_EMBED = 15e6;
+  const xesc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const ROW_LIMIT = 300;
+  const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif' };
+
+  async function addToEpub(blob, items, { title = '' } = {}) {
+    const JSZip = await Epubify.jszip();
+    const zip = await JSZip.loadAsync(blob);
+    const container = await zip.file('META-INF/container.xml').async('text');
+    const opfPath = /full-path="([^"]+)"/.exec(container)[1];
+    const dir = opfPath.replace(/[^/]*$/, '');
+    const dom = new DOMParser();
+    const opf = dom.parseFromString(await zip.file(opfPath).async('text'), 'application/xml');
+    const manifest = opf.getElementsByTagNameNS(OPF_NS, 'manifest')[0];
+    const spine = opf.getElementsByTagNameNS(OPF_NS, 'spine')[0];
+    // a section added before goes first
+    for (const it of [...manifest.children]) {
+      const id = it.getAttribute('id') || '';
+      if (id === 'supp-page' || id.startsWith('supp-f')) {
+        zip.remove(dir + it.getAttribute('href'));
+        it.remove();
+      }
+    }
+    for (const ref of [...spine.children]) if (ref.getAttribute('idref') === 'supp-page') ref.remove();
+
+    const add = (href, type, id, data) => {
+      zip.file(dir + href, data);
+      const e = opf.createElementNS(OPF_NS, 'item');
+      e.setAttribute('id', id);
+      e.setAttribute('href', href);
+      e.setAttribute('media-type', type);
+      manifest.appendChild(e);
+    };
+    const parts = [];
+    let n = 0;
+    for (const it of items) {
+      n++;
+      const id = `supp-f${n}`;
+      const head = `<h2>${xesc(it.label || it.name)}</h2>${it.caption ? `<p class="small">${xesc(it.caption)}</p>` : ''}`;
+      const type = it.type || '';
+      try {
+        if (IMAGE_TYPES[type] && it.size <= MAX_EMBED) {
+          const href = `supp/f${n}.${IMAGE_TYPES[type]}`;
+          add(href, type, id, await it.blob.arrayBuffer());
+          parts.push(`<figure>${head}<img src="${href}" alt="${xesc(it.label || '')}"/></figure>`);
+        } else if (/csv|tab-separated/.test(type) && it.size <= MAX_EMBED) {
+          const text = await it.blob.text();
+          const sep = /tab-separated/.test(type) || (text.split('\n')[0] || '').split('\t').length > (text.split('\n')[0] || '').split(',').length ? '\t' : ',';
+          const rows = text.split(/\r?\n/).filter((l) => l.trim()).slice(0, ROW_LIMIT).map((l) => (l.match(new RegExp(`("([^"]|"")*"|[^${sep}]*)(${sep}|$)`, 'g')) || []).filter((x, i, a) => i < a.length - 1 || x).map((c) => c.replace(new RegExp(`${sep}$`), '').replace(/^"|"$/g, '').replace(/""/g, '"')));
+          const table = `<table>${rows.map((r, i) => `<tr>${r.map((c) => (i ? `<td>${xesc(c)}</td>` : `<th>${xesc(c)}</th>`)).join('')}</tr>`).join('')}</table>`;
+          parts.push(`<section>${head}${table}</section>`);
+        } else if (/^text\/plain|^application\/json|^application\/xml|^text\/html/.test(type) && it.size <= MAX_EMBED) {
+          parts.push(`<section>${head}<pre>${xesc((await it.blob.text()).slice(0, 20000))}</pre></section>`);
+        } else if (/wordprocessingml|spreadsheetml|presentationml/.test(type) || /\.(docx|xlsx|pptx)$/i.test(it.name || '')) {
+          const r = await Office.render(it.blob, type, it.name);
+          if (r) {
+            parts.push(`<section>${head}${r.html.replace(/<img[^>]*>/g, '').replace(/<br>/g, '<br/>')}</section>`);
+            r.urls.forEach((u) => URL.revokeObjectURL(u));
+          } else parts.push(`<section>${head}<p>${xesc(it.name)} isn’t in the book (it can’t be read here).</p></section>`);
+        } else {
+          parts.push(`<section>${head}<p>${xesc(it.name)} (${Math.round((it.size || 0) / 1024)} KB) isn’t carried in the book: it stays in PaperReads.</p></section>`);
+        }
+      } catch (err) {
+        parts.push(`<section>${head}<p>${xesc(it.name)} couldn’t be added (${xesc(err.message)}).</p></section>`);
+      }
+    }
+
+    const page = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="${XHTML_NS}" xmlns:epub="http://www.idpf.org/2007/ops" lang="en" xml:lang="en"><head><title>Supplementary material</title><link rel="stylesheet" type="text/css" href="style.css"/></head><body><section epub:type="appendix" id="supplementary"><h1>Supplementary material</h1>${title ? `<p class="small">${xesc(title)}</p>` : ''}${parts.join('\n')}</section></body></html>`;
+    zip.file(dir + SUPP_PAGE, page);
+    const pageItem = opf.createElementNS(OPF_NS, 'item');
+    pageItem.setAttribute('id', 'supp-page');
+    pageItem.setAttribute('href', SUPP_PAGE);
+    pageItem.setAttribute('media-type', 'application/xhtml+xml');
+    manifest.appendChild(pageItem);
+    const ref = opf.createElementNS(OPF_NS, 'itemref');
+    ref.setAttribute('idref', 'supp-page');
+    spine.appendChild(ref);
+    zip.file(opfPath, '<?xml version="1.0" encoding="utf-8"?>\n' + new XMLSerializer().serializeToString(opf.documentElement));
+
+    // the contents page gets an entry for it
+    const navItem = [...manifest.children].find((e) => (e.getAttribute('properties') || '').split(' ').includes('nav'));
+    if (navItem) {
+      const navPath = dir + navItem.getAttribute('href');
+      const nav = dom.parseFromString(await zip.file(navPath).async('text'), 'application/xhtml+xml');
+      const toc = [...nav.getElementsByTagNameNS(XHTML_NS, 'nav')].find((x) => x.getAttributeNS('http://www.idpf.org/2007/ops', 'type') === 'toc') || nav.getElementsByTagNameNS(XHTML_NS, 'nav')[0];
+      const list = toc && toc.getElementsByTagNameNS(XHTML_NS, 'ol')[0];
+      if (list) {
+        for (const a of [...list.getElementsByTagNameNS(XHTML_NS, 'a')]) if (a.getAttribute('href') === SUPP_PAGE) a.closest('li').remove();
+        const li = nav.createElementNS(XHTML_NS, 'li');
+        const a = nav.createElementNS(XHTML_NS, 'a');
+        a.setAttribute('href', SUPP_PAGE);
+        a.textContent = 'Supplementary material';
+        li.appendChild(a);
+        list.appendChild(li);
+        zip.file(navPath, '<?xml version="1.0" encoding="utf-8"?>\n' + new XMLSerializer().serializeToString(nav.documentElement));
+      }
+    }
+
+    // the mimetype stays first and uncompressed, as an EPUB needs
+    const out = new JSZip();
+    out.file('mimetype', await zip.file('mimetype').async('uint8array'), { compression: 'STORE' });
+    for (const name of Object.keys(zip.files)) if (name !== 'mimetype' && !zip.files[name].dir) out.file(name, await zip.files[name].async('uint8array'));
+    return out.generateAsync({ type: 'blob', mimeType: 'application/epub+zip', compression: 'DEFLATE' });
+  }
+
+  return { find, fromFile, keysOf, MENTION, icon, typeOf, salvage, addToEpub, MAX_EMBED };
 })();
