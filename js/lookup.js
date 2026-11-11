@@ -103,7 +103,7 @@ const Lookup = (() => {
     if (table) return table;
     // PubMed's "Save → PMID" (bare numbers, a line each) and MEDLINE files ("PMID- 123")
     text = String(text || '').replace(/^\s*(\d{5,9})\s*$/gm, 'PMID:$1').replace(/^PMID-\s*(\d{5,9})/gm, 'PMID:$1');
-    const TOKEN = /https?:\/\/[^\s<>()\[\]]+|\b10\.\d{4,9}\/[^\s"<>()\[\]]+|\barXiv:\s*\d{4}\.\d{4,5}(?:v\d+)?|\bPMID:?\s*\d{5,9}/gi;
+    const TOKEN = /https?:\/\/[^\s<>()\[\]]+|\b10\.\d{4,9}\/[^\s"<>()\[\]]+|\barXiv:\s*\d{4}\.\d{4,5}(?:v\d+)?|\bPMID:?\s*\d{5,9}|\bPMC\d{4,9}\b/gi;
     const tokensOf = (t) => [...t.matchAll(TOKEN)].map((m) => m[0].replace(/[.,;:]+$/, '')).filter((x) => !/^https?:\/\/(www\.)?(google|bing)\./i.test(x));
     const lines = String(text || '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
     const withIds = lines.filter((l) => tokensOf(l).length);
@@ -122,12 +122,16 @@ const Lookup = (() => {
     let doi = null;
     let arxiv = null;
     let pubmed = null;
+    let pmc = null;
     for (const t of item.tokens) {
       const ids = parse(/^PMID/i.test(t) ? '' : t);
       if (ids.arxiv) arxiv = arxiv || ids.arxiv;
       if (ids.doi && !/^10\.48550\/arxiv/i.test(ids.doi)) doi = doi || ids.doi;
+      if (ids.pmc) pmc = pmc || ids.pmc;
       if (/pubmed|^PMID/i.test(t)) pubmed = pubmed || t;
     }
+    // a PubMed Central link or number (PMC6650473): its DOI from Europe PMC
+    if (pmc) doi = (await doiFromPmc(pmc)) || doi;
     if (!doi && pubmed) doi = await doiFromPubmed(pubmed).catch(() => null);
     let meta = null;
     if (doi) meta = await byDoi(doi).catch(() => null);
