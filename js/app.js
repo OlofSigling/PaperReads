@@ -2916,7 +2916,7 @@
         await savePaper(d);
         if (q.cites) await DB.put('links', { fromId: viaPaper.id, toId: d.id, type: 'cites', createdAt: now() });
         toast('Added to the trail');
-        location.hash = q.back === 'read' ? `#/read/${viaPaper.id}` : `#/paper/${viaPaper.id}`;
+        location.replace(q.back === 'read' ? `#/read/${viaPaper.id}` : `#/paper/${viaPaper.id}`);
       });
       const btn = $('#dupe-attach');
       if (!btn) return;
@@ -3145,7 +3145,7 @@
           }
           return;
         }
-        if (shared && !(inbox && inbox.file) && (await toList([q.url, q.text, inbox && inbox.url, inbox && inbox.text].filter(Boolean).join('\n')))) return;
+        if (shared && !q.cites && !(inbox && inbox.file) && (await toList([q.url, q.text, inbox && inbox.url, inbox && inbox.text].filter(Boolean).join('\n')))) return;
         if (shared) await run();
         // A shared PDF file: if the link (if any) didn't identify it, read the PDF itself.
         if (sharedPdf && !form.doi.value && !form.arxiv.value) {
@@ -3250,11 +3250,11 @@
           .catch(() => {});
       if (viaPaper && q.back === 'read') {
         toast('Added. Back to reading');
-        location.hash = `#/read/${viaPaper.id}`;
+        location.replace(`#/read/${viaPaper.id}`);
         return;
       }
       toast('Added to your library');
-      location.hash = `#/paper/${p.id}`;
+      location.replace(`#/paper/${p.id}`);
     });
   }
 
