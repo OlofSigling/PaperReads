@@ -306,6 +306,16 @@
     return p;
   }
 
+  // Remake the paper's EPUB from its stored PDF (after a PDF is added): the
+  // PDF is the paper as the publisher printed it, so the book follows it.
+  async function remakeEpubFromPdf(id, log = () => {}) {
+    const [p, pdf] = await Promise.all([DB.get('papers', id), DB.get('pdfs', id)]);
+    if (!p || !pdf) return null;
+    const res = await Epubify.make(p, { source: 'pdf', pdf: { blob: pdf.blob, name: pdf.name }, log });
+    await attachEpub(id, res.file, { cover: res.cover, source: 'PDF', missingFigures: res.missingFigures });
+    return res;
+  }
+
   async function attachEpub(id, file, { cover = null, source = 'Imported', missingFigures = 0 } = {}) {
     await DB.put('epubs', { paperId: id, blob: file, name: file.name || 'paper.epub', size: file.size, cover, source, missingFigures, addedAt: now() });
     const p = await DB.get('papers', id);
@@ -2647,8 +2657,16 @@
       pdfFile.addEventListener('change', async () => {
         if (!pdfFile.files[0]) return;
         await attachPdf(id, pdfFile.files[0]);
-        toast('PDF saved on this phone');
+        toast('PDF saved on this phone. Making the EPUB from it…');
         rerender();
+        try {
+          const res = await remakeEpubFromPdf(id);
+          if (res && res.warnings.length) alert(res.warnings.join('\n\n'));
+          toast('EPUB made from the PDF');
+        } catch (err) {
+          toast(`Couldn’t make the EPUB from the PDF: ${err.message}`);
+        }
+        if (location.hash === `#/paper/${id}`) rerender();
       });
     const pdfArxiv = $('#pdf-arxiv');
     if (pdfArxiv)
