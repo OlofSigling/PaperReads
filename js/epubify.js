@@ -3149,6 +3149,10 @@ const Epubify = (() => {
       }
       return into;
     };
+    // Figures, tables and displayed maths sit inside a <p> in NCBI's XML
+    // (<p>text <table-wrap>…</table-wrap> more text</p>): they are blocks of
+    // their own, and the text around them stays text.
+    const BLOCK_IN_P = new Set(['table-wrap', 'table-wrap-group', 'fig', 'fig-group', 'disp-formula', 'disp-quote', 'list', 'boxed-text']);
     const block = (node, depth, into) => {
       for (const c of node.children) {
         const n = c.localName;
@@ -3159,6 +3163,24 @@ const Epubify = (() => {
           block(c, depth + 1, into);
           const h = into.children[before];
           if (h && /^H\d$/.test(h.tagName) && c.getAttribute('id')) h.setAttribute('id', c.getAttribute('id'));
+        }
+        else if (n === 'p' && [...c.children].some((k) => BLOCK_IN_P.has(k.localName))) {
+          let run = [];
+          const flush = () => {
+            if (!run.length) return;
+            const tmp = doc.createElement('div');
+            tmp.append(...run.map((x) => x.cloneNode(true)));
+            const para = inline(tmp, doc.createElement('p'));
+            if (para.textContent.trim()) into.append(para);
+            run = [];
+          };
+          for (const k of c.childNodes) {
+            if (k.nodeType === 1 && BLOCK_IN_P.has(k.localName)) {
+              flush();
+              block({ children: [k] }, depth, into);
+            } else run.push(k);
+          }
+          flush();
         }
         else if (n === 'p') into.append(inline(c, doc.createElement('p')));
         else if (n === 'list') {
@@ -3549,6 +3571,45 @@ const Epubify = (() => {
     return { doc, root, baseUrl, title: meta.title || 'Web page', authors: meta.authors, sourceUrl: meta.url || page.url || '', label: 'Web page' };
   }
 
+  // The pictures of a stored PDF, by figure: { 'figure-3': blob, 'table-1': blob }
+  async function pdfFigureImages(pdf, log) {
+    const pdfSrc = await fromPdf(pdf.blob, pdf.name, log);
+    const byKey = new Map();
+    for (const img of pdfSrc.root.querySelectorAll('img[data-fig]')) {
+      const m = /^pdfimg:(\d+)$/.exec(img.getAttribute('src') || '');
+      if (m && pdfSrc.images[+m[1]]) byKey.set(img.getAttribute('data-fig'), pdfSrc.images[+m[1]]);
+    }
+    return byKey;
+  }
+
+  // A figure in the text with no picture gets the PDF's picture of the same
+  // number, when the PDF has one. (Only pictures move: the text is untouched.)
+  async function fillFiguresFromPdf(src, pdf, log) {
+    const bare = [...src.root.querySelectorAll('figure')].filter((f) => !f.querySelector('img, object[data]'));
+    if (!bare.length) return 0;
+    const byKey = await pdfFigureImages(pdf, log).catch((err) => (log('  ! ' + err.message), new Map()));
+    const doc = src.root.ownerDocument;
+    const old = src.pdfImages || [];
+    const extra = [];
+    for (const f of bare) {
+      const cap = f.querySelector('figcaption') || f;
+      const m = /^\s*(Fig(?:ure)?s?\.?|Table)\s*(\d{1,2})\b/i.exec(cap.textContent);
+      const blob = m && byKey.get(captionKey(m));
+      if (!blob) continue;
+      const img = doc.createElement('img');
+      // numbered after the pictures the text already has
+      img.setAttribute('src', `pdfimg:${old.length + extra.length}`);
+      img.setAttribute('alt', '');
+      extra.push(blob);
+      f.insertBefore(img, f.firstChild);
+    }
+    if (extra.length) {
+      src.pdfImages = [...old, ...extra];
+      log(`  ${extra.length} figure picture(s) taken from the stored PDF; the text is the ${src.label} text`);
+    } else log(`  the stored PDF has no picture for ${bare.length} figure(s): captions only`);
+    return extra.length;
+  }
+
   async function fromPdf(blob, filename, log) {
     log('→ reading PDF');
     const res = await pdfToHtml(blob, filename, log);
@@ -3762,6 +3823,12 @@ ${manifest.join('\n')}
     if (src.label === 'PDF') groupPdfFigures(src.root);
     placeFigures(src.root, log);
     linkify(src.root, log);
+    // Text sources whose figure images are off-limits to apps (PubMed Central,
+    // Europe PMC): the text stays as it is, and the stored PDF supplies the
+    // pictures of the figures it left bare, matched by figure number.
+    if (src.label !== 'PDF' && src.label !== 'arXiv HTML' && pdf && (source === 'auto' || source === 'pdf')) {
+      await fillFiguresFromPdf(src, pdf, log);
+    }
     const wanted = src.root.querySelectorAll('img, object[data]').length;
     const media = await localizeImages(src.root, src.baseUrl, src.pdfImages || [], log);
     let missingFigures = src.root.querySelectorAll('figure').length && src.label !== 'PDF' ? Math.max(0, wanted - media.length) : 0;
@@ -3770,19 +3837,6 @@ ${manifest.join('\n')}
     if (!missingFigures && src.label !== 'PDF' && src.label !== 'arXiv HTML' && !src.root.querySelector('figure, img')) {
       const nums = new Set([...src.root.textContent.matchAll(/\b(?:Fig(?:ure)?s?\.?)\s*(\d{1,2})\b/gi)].map((m) => m[1]));
       missingFigures = nums.size;
-    }
-    // Text sources whose figure images are off-limits to apps (PubMed Central
-    // manuscripts, Europe PMC): the stored PDF has the pictures, so use it
-    // when it actually yields them.
-    if (missingFigures && pdf && source === 'auto' && src.label !== 'arXiv HTML') {
-      log(`→ ${missingFigures} figure image(s) unavailable from ${src.label}; trying the stored PDF`);
-      try {
-        const alt = await make(paper, { source: 'pdf', pdf, log });
-        if (!alt.images) log('  no images found in the PDF either, so keeping the text version');
-        else return { ...alt, source: `PDF (${src.label} had no figure images)` };
-      } catch (err) {
-        log('  ! ' + err.message);
-      }
     }
     if (missingFigures) log(`  ! ${missingFigures} figure(s) will show their caption only`);
     absolutizeLinks(src.root, src.baseUrl);
