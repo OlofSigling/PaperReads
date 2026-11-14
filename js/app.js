@@ -2852,6 +2852,7 @@
         <label>Abstract <textarea name="abstract" rows="4">${esc(p.abstract || '')}</textarea></label>
         ${existing ? '' : `<label>Shelf <select name="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}"${p.status === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tags <small class="muted">(comma separated)</small><input name="tags" value="${esc((p.tags || []).join(', '))}"></label>
+        <label>Notes <small class="muted">(optional: why you're adding it)</small><textarea name="notes" rows="3">${esc(p.notes || '')}</textarea></label>
         <label>Bundle <small class="muted">(optional: a new name or one you have)</small><input name="bundle" list="add-bundles" autocomplete="off" placeholder="None" value="${esc(via ? bundleOf(allPapers, allPapers.find((x) => x.id === via.id) || via) : '')}"></label>
         <datalist id="add-bundles">${bnames.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
         ${cols.length ? `<fieldset><legend>Collections</legend><div class="checks">${cols.map((c) => `<label class="check"><input type="checkbox" name="col" value="${c.id}"> ${esc(c.name)}</label>`).join('')}</div></fieldset>` : ''}
@@ -3180,7 +3181,7 @@
         currentPage: 0,
         percent: 0,
         rating: 0,
-        notes: '',
+        notes: f.notes ? f.notes.value.trim() : '',
         tags: f.tags.value.split(',').map((t) => t.trim().replace(/^#/, '')).filter(Boolean),
         collections: $$('input[name=col]:checked', f).map((c) => c.value),
         status: 'none',
