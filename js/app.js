@@ -838,7 +838,8 @@
     const goal = await DB.setting('goal:' + year, 0);
     const done = all.filter((p) => p.status === 'read' && p.finishedAt && new Date(p.finishedAt).getFullYear() === year).length;
     const reading = all.filter((p) => p.status === 'reading').sort((a, b) => b.updatedAt - a.updatedAt);
-    const queue = queueList(all).slice(0, 3);
+    // the queue's places, as the board shows them (a found paper has its own place)
+    const queue = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9)).slice(0, 3);
     const recent = all.filter((p) => p.status === 'read').sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0)).slice(0, 3);
 
     if (!all.length) {
