@@ -1301,33 +1301,32 @@
   // bundle stays together; the order inside it is what changes.
   async function sortEpubFirst() {
     const all = await papers();
-    // the queue as it's shown: each group is a paper and the papers found through it
-    const groups = queueGroups(all);
-    const sections = new Map(); // bundle ('' = loose) -> its groups, in queue order
-    for (const g of groups) {
-      const k = bundleOf(all, g.root);
+    // every wanted paper in queue order: the board's cards, and the list's places
+    const flat = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9));
+    const epubFirst = (list) => [...list].sort((a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0)); // (stable)
+    const sections = new Map(); // bundle ('' = loose) -> the places it takes
+    flat.forEach((p, i) => {
+      const k = bundleOf(all, p);
       if (!sections.has(k)) sections.set(k, []);
-      sections.get(k).push(g);
+      sections.get(k).push(i);
+    });
+    const next = [...flat];
+    for (const slots of sections.values()) {
+      const sorted = epubFirst(slots.map((i) => flat[i]));
+      slots.forEach((slot, k) => (next[slot] = sorted[k]));
     }
-    // (stable: papers with an EPUB first; a group counts by its own paper)
-    const epubFirst = (list) => [...list].sort((a, b) => ((b.root || b).hasEpub ? 1 : 0) - ((a.root || a).hasEpub ? 1 : 0));
     const changes = new Map(); // id -> { field: value }
     const put = (id, field, value) => changes.set(id, { ...(changes.get(id) || {}), [field]: value });
-    // top level: within each bundle, papers with an EPUB first; the groups keep their slots
-    const next = [...groups];
-    for (const list of sections.values()) {
-      const slots = list.map((g) => groups.indexOf(g));
-      epubFirst(list).forEach((g, k) => (next[slots[k]] = g));
-    }
-    next.forEach((g, i) => put(g.root.id, 'queueOrder', i + 1));
-    // the papers found through each one: the same, among their siblings
+    next.forEach((p, i) => put(p.id, 'queueOrder', i + 1));
+    // the papers found through each one, under it in the list: the same, among their siblings
+    const groups = queueGroups(all);
     const orderKids = (g, p) => {
       const kids = g.kids(p.id);
       if (!kids.length) return;
       epubFirst(kids).forEach((k, i) => put(k.id, 'subOrder', i + 1));
       kids.forEach((k) => orderKids(g, k));
     };
-    next.forEach((g) => orderKids(g, g.root));
+    groups.forEach((g) => orderKids(g, g.root));
     let moved = 0;
     for (const [id, fields] of changes) {
       const p = await DB.get('papers', id);
@@ -1344,7 +1343,7 @@
         await savePaper(p);
       }
     }
-    toast(moved ? 'Sorted: EPUBs first in each bundle, and among the papers found through each one' : 'Already sorted: EPUBs first');
+    toast(moved ? 'Sorted: EPUBs first in each bundle' : 'Already sorted: EPUBs first');
     viewQueue();
   }
 
@@ -1357,7 +1356,7 @@
   let boardLeft = 0; // where the board was scrolled to: kept when it's drawn again after a move
   async function viewBoard(all) {
     setTitle('Want to read');
-    const flat = queueList(all);
+    const flat = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9));
     if (!flat.length) {
       main.innerHTML = '<p class="empty">Your queue is empty. Papers marked “Want to read” show up here in priority order.</p>';
       return;
