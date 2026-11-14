@@ -1291,28 +1291,50 @@
   // bundle stays together; the order inside it is what changes.
   async function sortEpubFirst() {
     const all = await papers();
-    const flat = queueList(all);
-    const sections = new Map(); // bundle ('' = loose) -> the queue slots it takes
-    flat.forEach((p, i) => {
-      const k = bundleOf(all, p);
+    // the queue as it's shown: each group is a paper and the papers found through it
+    const groups = queueGroups(all);
+    const sections = new Map(); // bundle ('' = loose) -> its groups, in queue order
+    for (const g of groups) {
+      const k = bundleOf(all, g.root);
       if (!sections.has(k)) sections.set(k, []);
-      sections.get(k).push(i);
-    });
-    const next = [...flat];
+      sections.get(k).push(g);
+    }
+    // (stable: papers with an EPUB first; a group counts by its own paper)
+    const epubFirst = (list) => [...list].sort((a, b) => ((b.root || b).hasEpub ? 1 : 0) - ((a.root || a).hasEpub ? 1 : 0));
+    const changes = new Map(); // id -> { field: value }
+    const put = (id, field, value) => changes.set(id, { ...(changes.get(id) || {}), [field]: value });
+    // top level: within each bundle, papers with an EPUB first; the groups keep their slots
+    const next = [...groups];
+    for (const list of sections.values()) {
+      const slots = list.map((g) => groups.indexOf(g));
+      epubFirst(list).forEach((g, k) => (next[slots[k]] = g));
+    }
+    next.forEach((g, i) => put(g.root.id, 'queueOrder', i + 1));
+    // the papers found through each one: the same, among their siblings
+    const orderKids = (g, p) => {
+      const kids = g.kids(p.id);
+      if (!kids.length) return;
+      epubFirst(kids).forEach((k, i) => put(k.id, 'subOrder', i + 1));
+      kids.forEach((k) => orderKids(g, k));
+    };
+    next.forEach((g) => orderKids(g, g.root));
     let moved = 0;
-    for (const slots of sections.values()) {
-      const ps = slots.map((i) => flat[i]);
-      const sorted = [...ps].sort((a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0));
-      slots.forEach((slot, k) => (next[slot] = sorted[k]));
+    for (const [id, fields] of changes) {
+      const p = await DB.get('papers', id);
+      if (!p) continue;
+      let dirty = false;
+      for (const [f, v] of Object.entries(fields)) {
+        if (p[f] !== v) {
+          p[f] = v;
+          dirty = true;
+        }
+      }
+      if (dirty) {
+        moved++;
+        await savePaper(p);
+      }
     }
-    for (const [i, p] of next.entries()) {
-      if (flat[i].id !== p.id) moved++;
-      if (p.queueOrder === i + 1) continue;
-      const fresh = await DB.get('papers', p.id);
-      fresh.queueOrder = i + 1;
-      await savePaper(fresh);
-    }
-    toast(moved ? `Sorted: EPUBs first in each bundle and among the loose papers` : 'Already sorted: EPUBs first');
+    toast(moved ? 'Sorted: EPUBs first in each bundle, and among the papers found through each one' : 'Already sorted: EPUBs first');
     viewQueue();
   }
 
