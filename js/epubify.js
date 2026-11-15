@@ -7,7 +7,8 @@
  * Sources, best first (same preference as the script: HTML beats PDF):
  *   1. arXiv's native HTML       arxiv.org/html/<id>  (CORS-open)
  *   2. Europe PMC full text      JATS XML for open-access PubMed Central papers
- *   3. The paper's stored PDF    layout analysis; two-column PDFs may scramble
+ *   3. The paper's stored PDF    layout analysis: the columns are found page by page
+ *                                (two, three, or a mix) and read in order
  * Not ported: ar5iv, publisher pages and the headless-browser renderer. Those
  * sites don't allow cross-origin requests from a web app.
  */
@@ -392,31 +393,43 @@ const Epubify = (() => {
         ];
       }
       let raster = imageBoxes(lib, ops, vp);
+      // A scan's recognised text often comes word by word or in pieces, each
+      // its own "line". Put the pieces of a line back together (never across
+      // a gap as wide as a column's), so lines can be told from table cells.
+      if (raster.some((b) => (b[2] - b[0]) * (b[3] - b[1]) > vp.width * vp.height * 0.7)) joinWordLines(lines);
       const regions = vectorRegions(lib, ops, vp, lines);
       // A scanned page with recognised text over it: the scan isn't a figure.
       // Keep the text, and cut the figures and tables out of the scan.
       const pageScan = raster.find((b) => (b[2] - b[0]) * (b[3] - b[1]) > vp.width * vp.height * 0.7);
+      let scan = null;
       if (pageScan && lines.filter((l) => l.spans.some((sp) => sp.text.trim())).length >= 5) {
         raster = raster.filter((b) => b !== pageScan);
-        regions.push(...scanRegions(lines, vp.width, vp.height, await inkMeter(page, vp)));
+        scan = { ink: await inkMeter(page, vp) }; // (cut up below, once the columns are known)
       }
-      // text drawn inside a figure region is part of the picture: keep it
-      // out of the running text (labels of a flow diagram, table cells)
-      if (regions.length) {
-        const inside = (b) => regions.some((r) => (b[0] + b[2]) / 2 > r[0] && (b[0] + b[2]) / 2 < r[2] && (b[1] + b[3]) / 2 > r[1] && (b[1] + b[3]) / 2 < r[3]);
-        for (const l of lines) l.spans = l.spans.filter((sp) => !inside(sp.bbox));
-        for (let i = lines.length - 1; i >= 0; i--) if (!lines[i].spans.length) lines.splice(i, 1);
-        for (const l of lines) {
-          l.bbox = [
-            Math.min(...l.spans.map((s) => s.bbox[0])),
-            Math.min(...l.spans.map((s) => s.bbox[1])),
-            Math.max(...l.spans.map((s) => s.bbox[2])),
-            Math.max(...l.spans.map((s) => s.bbox[3])),
-          ];
-        }
-      }
+      dropTextInside(lines, regions);
       const images = [...raster.filter((b) => !regions.some((r) => b[0] >= r[0] - 2 && b[1] >= r[1] - 2 && b[2] <= r[2] + 2 && b[3] <= r[3] + 2)), ...regions];
-      pages.push({ page, vp, width: vp.width, height: vp.height, lines, images });
+      pages.push({ page, vp, width: vp.width, height: vp.height, lines, images, scan });
+    }
+    // Scanned pages: the figures and tables are cut out of the scan, each
+    // within its own column (a table in the right column ends where that
+    // column's text goes on, whatever stands beside it).
+    if (pages.some((pg) => pg.scan)) {
+      const sizes = new Counter();
+      for (const pg of pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size), s.text.trim().length);
+      const layouts = docLayout(pages, sizes.mostCommon() ?? 11);
+      pages.forEach((pg, i) => {
+        if (!pg.scan) return;
+        const leaves = layouts[i].leaves.filter((f) => f.items.length >= 3);
+        const regions = [];
+        if (leaves.length <= 1) regions.push(...scanRegions(pg.lines, pg.width, pg.height, pg.scan.ink));
+        else
+          for (const f of leaves) {
+            const own = pg.lines.filter((l) => (l.bbox[0] + l.bbox[2]) / 2 >= f.x0 - 2 && (l.bbox[0] + l.bbox[2]) / 2 <= f.x1 + 2 && (l.bbox[1] + l.bbox[3]) / 2 >= f.y0 - 2 && (l.bbox[1] + l.bbox[3]) / 2 <= f.y1 + 2);
+            regions.push(...scanRegions(own, pg.width, pg.height, pg.scan.ink, [f.x0, f.y0, f.x1, f.y1]));
+          }
+        dropTextInside(pg.lines, regions);
+        pg.images.push(...regions);
+      });
     }
     let meta = { title: '', author: '' };
     try {
@@ -424,6 +437,57 @@ const Epubify = (() => {
       meta = { title: md.info.Title || '', author: md.info.Author || '' };
     } catch {}
     return { doc, pages, meta };
+  }
+
+  // Text drawn inside a figure region is part of the picture: keep it out
+  // of the running text (labels of a flow diagram, table cells)
+  function dropTextInside(lines, regions) {
+    if (!regions.length) return;
+    const inside = (b) => regions.some((r) => (b[0] + b[2]) / 2 > r[0] && (b[0] + b[2]) / 2 < r[2] && (b[1] + b[3]) / 2 > r[1] && (b[1] + b[3]) / 2 < r[3]);
+    for (const l of lines) l.spans = l.spans.filter((sp) => !inside(sp.bbox));
+    for (let i = lines.length - 1; i >= 0; i--) if (!lines[i].spans.length) lines.splice(i, 1);
+    for (const l of lines) {
+      l.bbox = [
+        Math.min(...l.spans.map((s) => s.bbox[0])),
+        Math.min(...l.spans.map((s) => s.bbox[1])),
+        Math.max(...l.spans.map((s) => s.bbox[2])),
+        Math.max(...l.spans.map((s) => s.bbox[3])),
+      ];
+    }
+  }
+
+  // The straight lines of a drawn path, as [x0, y0, x1, y1] in the path's own
+  // coordinates (PDF.js keeps a path as a run of numbers: 0 x y = move to,
+  // 1 x y = line to, 2 … = curve, 3 … = curve, 4 = close)
+  function pathLines(data) {
+    const out = [];
+    if (!data || typeof data.length !== 'number') return out;
+    let cur = null;
+    let start = null;
+    for (let i = 0; i < data.length; ) {
+      const op = data[i++];
+      if (op === 0) {
+        cur = start = [data[i], data[i + 1]];
+        i += 2;
+      } else if (op === 1) {
+        const to = [data[i], data[i + 1]];
+        i += 2;
+        if (cur) out.push([cur[0], cur[1], to[0], to[1]]);
+        cur = to;
+      } else if (op === 2) {
+        cur = [data[i + 4], data[i + 5]];
+        i += 6;
+        out.push(null); // (a curve: not a table's rules)
+      } else if (op === 3) {
+        cur = [data[i + 2], data[i + 3]];
+        i += 4;
+        out.push(null);
+      } else if (op === 4) {
+        if (cur && start && (cur[0] !== start[0] || cur[1] !== start[1])) out.push([cur[0], cur[1], start[0], start[1]]);
+        cur = start;
+      } else break;
+    }
+    return out.includes(null) ? [] : out;
   }
 
   // Figures drawn as vector graphics (charts, flow diagrams, ruled tables)
@@ -457,7 +521,22 @@ const Epubify = (() => {
         if (area > W * H * 0.5) continue; // page background
         if (b[3] < H * 0.07 || b[1] > H * 0.93) continue; // header/footer bars, logos
         if (b[3] - b[1] < 3 && b[2] - b[0] > 40) rules.push(b);
+        else {
+          // all the rules of a table drawn as one path (its box is the whole
+          // table): each straight line across is a rule
+          const segs = pathLines(args[1] && args[1][0]).map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y1]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]));
+          const flat = segs.filter(([p, q]) => Math.abs(p[1] - q[1]) < 1 && Math.abs(p[0] - q[0]) > 40);
+          // (a chart's grid lines are drawn the same way, so the path still counts as drawing)
+          if (flat.length >= 2 && flat.length === segs.length) for (const [p, q] of flat) rules.push([Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.max(p[0], q[0]), Math.max(p[1], q[1])]);
+        }
         if (b[2] - b[0] > W * 0.85 && b[3] - b[1] < 3) continue; // full-width rules
+        // a frame (or clipping box) around a figure together with its caption
+        // holds lines of running text: it isn't part of the drawing, or the
+        // caption would end up inside the picture, too small to read
+        if (area > W * H * 0.05) {
+          const wordy = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01 && (l.bbox[0] + l.bbox[2]) / 2 > b[0] && (l.bbox[0] + l.bbox[2]) / 2 < b[2] && (l.bbox[1] + l.bbox[3]) / 2 > b[1] && (l.bbox[1] + l.bbox[3]) / 2 < b[3] && l.bbox[2] - l.bbox[0] >= 150 && l.spans.map((s) => s.text).join('').trim().split(/\s+/).length >= 8);
+          if (wordy.length >= 3) continue; // (long lines of words: a chart's legend and labels are short)
+        }
         boxes.push({ b, w: 1, rot: 0 });
       }
     }
@@ -543,7 +622,9 @@ const Epubify = (() => {
     for (const cap of caps) {
       const [cx0, , cx1, cy1] = cap.bbox;
       // the top rule: just below the caption (and its title), under it
-      const top = rs.find((r) => r[1] > cy1 - 1 && r[1] - cy1 < 70 && r[0] < cx1 && r[2] > cx0 - 10 && r[0] > cx0 - 40);
+      // (the caption starts at the table's left edge, or is centred over it)
+      const centred = (r) => Math.abs((cx0 + cx1) / 2 - (r[0] + r[2]) / 2) < Math.max(12, (r[2] - r[0]) * 0.08);
+      const top = rs.find((r) => r[1] > cy1 - 1 && r[1] - cy1 < 70 && r[0] < cx1 && r[2] > cx0 - 10 && (r[0] > cx0 - 40 || centred(r)));
       if (!top) continue;
       const nextCap = Math.min(H, ...caps.filter((c) => c !== cap && c.bbox[1] > top[1] && c.bbox[0] < top[2] && c.bbox[2] > top[0]).map((c) => c.bbox[1]));
       const same = rs.filter((r) => r !== top && r[1] > top[1] + 4 && r[1] < nextCap && Math.abs(r[0] - top[0]) < 8 && Math.abs(r[2] - top[2]) < 8);
@@ -556,7 +637,8 @@ const Epubify = (() => {
       let capEnd = cy1;
       const between = flat.filter((l) => l !== cap && l.bbox[1] >= cap.bbox[1] && (l.bbox[1] + l.bbox[3]) / 2 > cy1 && (l.bbox[1] + l.bbox[3]) / 2 < top[1] && l.bbox[0] < top[2] && l.bbox[2] > top[0]).sort((a, c) => a.bbox[1] - c.bbox[1]);
       let i = 0;
-      while (i < between.length && Math.abs(between[i].bbox[0] - cx0) < 3 && Math.abs(between[i].spans[0].size - capSize) < 0.8 && between[i].bbox[1] - capEnd < capSize * 0.8) capEnd = between[i++].bbox[3];
+      const sameAxis = (l) => centred(top) && Math.abs((l.bbox[0] + l.bbox[2]) / 2 - (cx0 + cx1) / 2) < 12 && l.bbox[0] > top[0] + 12;
+      while (i < between.length && (Math.abs(between[i].bbox[0] - cx0) < 3 || sameAxis(between[i])) && Math.abs(between[i].spans[0].size - capSize) < 0.8 && between[i].bbox[1] - capEnd < capSize * 0.8) capEnd = between[i++].bbox[3];
       if (i < between.length) start = Math.max(capEnd + 0.5, Math.min(...between.slice(i).map((l) => l.bbox[1])) - 2);
       const box = [top[0], start, top[2], bottom[3] + 2];
       // cells can stick out past the rules a little
@@ -570,6 +652,38 @@ const Epubify = (() => {
       out.push(r);
     }
     return out;
+  }
+
+  function joinWordLines(lines) {
+    const flat = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01 && l.spans.some((s) => s.text.trim()));
+    if (flat.length < 5) return;
+    flat.sort((a, b) => (a.bbox[1] + a.bbox[3]) / 2 - (b.bbox[1] + b.bbox[3]) / 2 || a.bbox[0] - b.bbox[0]);
+    const rows = [];
+    for (const l of flat) {
+      const h = l.bbox[3] - l.bbox[1];
+      // (the same line when they overlap in height by half the smaller: italics and capitals stand a little off)
+      const r = rows.find((o) => Math.min(o.y1, l.bbox[3]) - Math.max(o.y0, l.bbox[1]) >= Math.min(h, o.y1 - o.y0) * 0.5);
+      if (r) r.items.push(l);
+      else rows.push({ y0: l.bbox[1], y1: l.bbox[3], items: [l] });
+    }
+    const out = [];
+    for (const r of rows) {
+      r.items.sort((a, b) => a.bbox[0] - b.bbox[0]);
+      let cur = null;
+      for (const l of r.items) {
+        const size = l.spans[0].size;
+        if (cur && l.bbox[0] - cur.bbox[2] <= Math.max(4, size * 0.6)) {
+          if (!/\s$/.test(cur.spans.at(-1).text) && !/^\s/.test(l.spans[0].text)) cur.spans.push({ ...l.spans[0], text: ' ', bbox: [cur.bbox[2], l.bbox[1], l.bbox[0], l.bbox[3]] });
+          cur.spans.push(...l.spans);
+          cur.bbox = [cur.bbox[0], Math.min(cur.bbox[1], l.bbox[1]), l.bbox[2], Math.max(cur.bbox[3], l.bbox[3])];
+        } else {
+          cur = { dir: l.dir, spans: [...l.spans], bbox: [...l.bbox] };
+          out.push(cur);
+        }
+      }
+    }
+    const rest = lines.filter((l) => !flat.includes(l));
+    lines.splice(0, lines.length, ...out, ...rest);
   }
 
   // Figures and tables inside a page scan. The text layer marks them out: a
@@ -608,7 +722,7 @@ const Epubify = (() => {
     }
   }
 
-  function scanRegions(lines, W, H, ink) {
+  function scanRegions(lines, W, H, ink, zone = null) {
     const flat = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01 && l.spans.some((sp) => sp.text.trim())).sort((a, c) => a.bbox[1] - c.bbox[1]);
     if (!flat.length) return [];
     const text = (l) => ws(l.spans.map((x) => x.text).join(' ')).trim();
@@ -625,7 +739,8 @@ const Epubify = (() => {
       const sp = l.spans.filter((x) => x.text.trim()).sort((a, c) => a.bbox[0] - c.bbox[0]);
       return sp.some((x, k) => k && x.bbox[0] - sp[k - 1].bbox[2] > (l.bbox[3] - l.bbox[1]) * 2.5);
     };
-    const prose = (l) => l.bbox[2] - l.bbox[0] > bodyW * 0.6 && text(l).split(/\s+/).length >= 7 && !upper(text(l)) && !spread(l);
+    // (a narrow column's lines hold fewer words)
+    const prose = (l) => l.bbox[2] - l.bbox[0] > bodyW * 0.6 && text(l).split(/\s+/).length >= (bodyW < 200 ? 5 : 7) && !upper(text(l)) && !spread(l);
     const header = flat[0].bbox[1] < H * 0.1 && !prose(flat[0]) ? flat[0] : null;
     const size = (l) => l.bbox[3] - l.bbox[1];
     const out = [];
@@ -637,8 +752,17 @@ const Epubify = (() => {
         // caption, then its title lines (APA: in capitals), then the table
         let j = i + 1;
         let last = cap;
-        while (j < flat.length && upper(text(flat[j])) && flat[j].bbox[1] - last.bbox[3] < size(last) * 2) last = flat[j++];
-        const end = flat.slice(j).findIndex(prose);
+        // (or a title run on under the caption on the same axis, centred or
+        // flush left: "Table 2—Comparison of … / Gas Values and … / Extubated*")
+        const axis = (l) => Math.abs((l.bbox[0] + l.bbox[2]) / 2 - (cap.bbox[0] + cap.bbox[2]) / 2) < 15 || Math.abs(l.bbox[0] - cap.bbox[0]) < 3;
+        const runsOn = (l) => text(l).split(/\s+/).length >= 2 && !spread(l) && axis(l) && !/[.*]\s*$/.test(text(last)) && /\p{L}{3}/u.test(text(l)) && !/\d\s*$/.test(text(l));
+        while (j < flat.length && (upper(text(flat[j])) || runsOn(flat[j])) && flat[j].bbox[1] - last.bbox[3] < size(last) * 2) last = flat[j++];
+        // (it ends at running text: two such lines one under the other; a wordy row of the table stands alone)
+        const end = flat.slice(j).findIndex((l, k, rest) => {
+          if (!prose(l)) return false;
+          const next = rest.slice(k + 1).find((o) => o.bbox[1] > l.bbox[1] + 2);
+          return !next || (prose(next) && next.bbox[1] - l.bbox[3] < size(l) * 1.8);
+        });
         const rows = end < 0 ? flat.slice(j) : flat.slice(j, j + end);
         if (!rows.length) continue;
         box[1] = last.bbox[3] + 4;
@@ -646,7 +770,7 @@ const Epubify = (() => {
       } else {
         // the figure is above its caption, below the running text before it
         const above = flat.slice(0, i).reverse().find((l) => prose(l) || l === header);
-        box[1] = above ? above.bbox[3] + 3 : H * 0.06;
+        box[1] = above ? above.bbox[3] + 3 : zone ? zone[1] : H * 0.06;
         box[3] = cap.bbox[1] - 2;
       }
       if (box[3] - box[1] < 30) continue;
@@ -657,7 +781,7 @@ const Epubify = (() => {
     // the recognised text can stray off the page: take the sides from the ink
     const sides = (r) => {
       if (!ink) return r;
-      let [x0, , x1] = [W * 0.03, 0, W * 0.97];
+      let [x0, , x1] = zone ? [Math.max(0, zone[0] - 10), 0, Math.min(W, zone[2] + 10)] : [W * 0.03, 0, W * 0.97];
       while (x1 - x0 > 40 && ink([x0, r[1], x0 + 4, r[3]], []) < 0.001) x0 += 4;
       while (x1 - x0 > 40 && ink([x1 - 4, r[1], x1, r[3]], []) < 0.001) x1 -= 4;
       return Object.assign([Math.max(0, x0 - 8), r[1], Math.min(W, x1 + 8), r[3]], { vector: true });
@@ -665,11 +789,11 @@ const Epubify = (() => {
     // Figures whose caption the recognition missed: a tall stretch without
     // running text where the scan has drawing beyond the recognised words.
     if (ink) {
-      const top = header ? header.bbox[3] + 3 : H * 0.05;
-      const marks = [top, ...flat.filter(prose).flatMap((l) => [l.bbox[1], l.bbox[3]]), H * 0.95].sort((a, c) => a - c);
+      const top = zone ? zone[1] : header ? header.bbox[3] + 3 : H * 0.05;
+      const marks = [top, ...flat.filter(prose).flatMap((l) => [l.bbox[1], l.bbox[3]]), zone ? zone[3] : H * 0.95].sort((a, c) => a - c);
       const textBoxes = flat.map((l) => l.bbox);
       for (let i = 0; i + 1 < marks.length; i++) {
-        const box = [W * 0.03, marks[i] + 3, W * 0.97, marks[i + 1] - 3];
+        const box = [zone ? zone[0] - 6 : W * 0.03, marks[i] + 3, zone ? zone[2] + 6 : W * 0.97, marks[i + 1] - 3];
         if (box[3] - box[1] < 60) continue;
         if (out.some((o) => Math.min(o[3], box[3]) - Math.max(o[1], box[1]) > (box[3] - box[1]) * 0.3)) continue;
         // (ink the recognition didn't cover is content the reader would lose)
@@ -719,7 +843,8 @@ const Epubify = (() => {
   // one, preferring captions below the image (the usual layout).
   // (case-insensitive: small-caps captions extract as "fig 1 |", "table 2 |")
   // "Figure 2." / "fig 1 |" / "Figure 2 (A) …" / "Figure 4 Estimated …", but not "Figure 2 shows" or "Figure 2A shows"
-  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*([A-Z]?\d+)\s*(?:[.:|]|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}|\p{Lu}{3,}\s))/u;
+  // ("Table 3—Hospital Outcome…": a dash after the number; a scan can read the 1 of "Table 1—" as "!", "l" or "I")
+  const CAPTION = /^\s*([Ff][Ii][Gg](?:[Uu][Rr][Ee])?\.?|[Tt][Aa][Bb][Ll][Ee])\s*([A-Z]?\d+|[!lI](?=\s?[—–-]\s?\p{Lu}))\s*(?:[.:|]|[—–-](?=\s?\p{Lu})|$|(?<=\s)(?=\(|\p{Lu}\p{Ll}|\p{Lu}{3,}\s))/u;
   const captionKey = (m) => `${/^t/i.test(m[1]) ? 'table' : 'figure'}-${m[2]}`;
   function captionNumber(box, rows) {
     if (box.caption) {
@@ -978,81 +1103,331 @@ const Epubify = (() => {
     return out;
   }
 
-  // ================================================================ PDF → HTML
-  // Where is the gap between two columns? Not always the page centre: BMJ,
-  // for one, has a wide left margin, so its gutter sits at ~60% of the width.
-  // Scan for the vertical line that body-text lines don't cross.
-  function findGutter(pdf, pageW) {
-    const sizes = new Counter();
-    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size), s.text.trim().length); // (by amount of text: short labels mustn't outvote the body)
-    const body = sizes.mostCommon();
-    const lines = [];
-    for (const pg of pdf.pages)
-      for (const l of pg.lines) if (horizontal(l) && l.spans.map((s) => s.text).join('').trim().length >= 20 && Math.abs(pyRound(l.spans[0].size) - body) <= 1) lines.push(l.bbox);
-    if (lines.length < 40) return null;
-    let best = null;
-    for (let x = pageW * 0.3; x <= pageW * 0.72; x += 2) {
-      let cross = 0;
-      let left = 0;
-      let right = 0;
-      for (const [x0, , x1] of lines) {
-        if (x0 < x - 3 && x1 > x + 3) cross++;
-        else if (x1 <= x + 3) left++;
-        else right++;
+  // ================================================================ page layout
+  // Where a page's columns are, found from its white space: a column gap is a
+  // tall band nothing crosses, with running text on both sides. The page is
+  // then cut along those bands (and across, where a title, a wide table or a
+  // figure interrupts them) into blocks, in the order they are read. Works
+  // page by page, so a paper can change from two columns to three and back.
+  const LAYOUT = {
+    win: 5, // a gap is at least this wide (points)
+    minRun: 2.2, // …and this tall (body sizes) to be looked at
+    strictRun: 6, // a gap found on its own is at least this tall (body sizes), with
+    strictRows: 5, // …this many lines of running text on each side
+    minCol: 0.13, // a column is at least this wide (share of the page)
+  };
+
+  function layoutBoxes(pg) {
+    const boxes = [];
+    for (const l of pg.lines) {
+      if (Math.abs(l.dir[0] - 1) > 0.01) continue;
+      for (const s of l.spans) {
+        if (!s.text.trim()) continue;
+        const [x0, y0, x1, y1] = s.bbox;
+        if (x1 - x0 < 0.5 || y1 - y0 < 0.5) continue;
+        boxes.push({ x0, y0, x1, y1, yc: (y0 + y1) / 2, size: s.size, text: s.text, span: s });
       }
-      if (left < lines.length * 0.2 || right < lines.length * 0.2 || cross > lines.length * 0.12) continue;
-      if (!best || cross < best.cross) best = { x, cross, run: [x] };
-      else if (cross === best.cross && x - best.run.at(-1) <= 2) best.run.push(x); // widen the gap
     }
-    return best ? best.run[best.run.length >> 1] : null;
+    return boxes;
   }
 
-  function pdfIsTwoColumn(pdf, pageW) {
-    const bins = new Array(20).fill(0);
-    let n = 0;
-    for (const pg of pdf.pages) {
-      for (const l of pg.lines) {
-        for (const s of l.spans) {
-          // approximate PyMuPDF "words" by splitting spans proportionally
-          const cw = (s.bbox[2] - s.bbox[0]) / (s.text.length || 1);
-          for (const m of s.text.matchAll(/\S+/g)) {
-            const a = s.bbox[0] + m.index * cw;
-            const b = a + m[0].length * cw;
-            const mid = pageW ? (a + b) / 2 / pageW : 0;
-            if (mid >= 0 && mid < 1) {
-              bins[Math.trunc(mid * 20)]++;
-              n++;
+  // Tall white bands: for every x, the stretches of the page that no text or
+  // picture touches in a window LAYOUT.win points wide. Neighbouring x with
+  // much the same stretch make one band.
+  function whiteBands(boxes, pics, W, H, minRun) {
+    const w = Math.ceil(W);
+    const h = Math.ceil(H);
+    const occ = new Uint8Array(w * h);
+    const fill = (x0, y0, x1, y1) => {
+      const xa = Math.max(0, Math.floor(x0));
+      const xb = Math.min(w, Math.ceil(x1));
+      const ya = Math.max(0, Math.floor(y0));
+      const yb = Math.min(h, Math.ceil(y1));
+      for (let y = ya; y < yb; y++) if (xb > xa) occ.fill(1, y * w + xa, y * w + xb);
+    };
+    for (const b of boxes) fill(b.x0 + 0.75, b.y0, b.x1 - 0.75, b.y1);
+    for (const p of pics) fill(p[0] + 1, p[1], p[2] - 1, p[3]);
+    const win = LAYOUT.win;
+    const top = Math.max(0, Math.floor(Math.min(...boxes.map((b) => b.y0), ...pics.map((p) => p[1]))));
+    const bottom = Math.min(h, Math.ceil(Math.max(...boxes.map((b) => b.y1), ...pics.map((p) => p[3]))));
+    const left = Math.max(0, Math.floor(Math.min(...boxes.map((b) => b.x0), ...pics.map((p) => p[0]))));
+    const right = Math.min(w, Math.ceil(Math.max(...boxes.map((b) => b.x1), ...pics.map((p) => p[2]))));
+    // clear[y*w+x]: nothing in the window that starts at x, on row y
+    const clear = new Uint8Array(w * h);
+    for (let y = top; y < bottom; y++) {
+      let n = 0;
+      for (let x = 0; x < win && x < w; x++) n += occ[y * w + x];
+      for (let x = 0; x + win <= w; x++) {
+        clear[y * w + x] = n === 0 ? 1 : 0;
+        n -= occ[y * w + x];
+        if (x + win < w) n += occ[y * w + x + win];
+      }
+    }
+    const strips = [];
+    let open = [];
+    for (let x = left; x + win <= right; x++) {
+      const next = [];
+      let start = -1;
+      for (let y = top; y <= bottom; y++) {
+        const c = y < bottom && clear[y * w + x];
+        if (c && start < 0) start = y;
+        else if (!c && start >= 0) {
+          if (y - start >= minRun) {
+            const [ya, yb] = [start, y];
+            const s = open.find((o) => !o.used && Math.min(o.y1, yb) - Math.max(o.y0, ya) >= 0.8 * Math.max(o.y1 - o.y0, yb - ya));
+            if (s) {
+              s.used = true;
+              s.x1 = x + win;
+              s.y0 = Math.max(s.y0, ya);
+              s.y1 = Math.min(s.y1, yb);
+              next.push(s);
+            } else {
+              const n = { x0: x, x1: x + win, y0: ya, y1: yb, used: true };
+              strips.push(n);
+              next.push(n);
             }
           }
+          start = -1;
         }
       }
+      next.forEach((s) => (s.used = false));
+      open = next;
     }
-    if (n < 40) return false;
-    const centre = bins[9] + bins[10];
-    const sides = sum(bins.slice(3, 7)) + sum(bins.slice(13, 17));
-    if (centre < sides * 0.15 && sides > n * 0.3) return true;
-    // The gutter test above is fooled by labels inside figures. Second test:
-    // in two-column text, almost no full lines of body text cross the centre.
-    const sizes = new Counter();
-    for (const pg of pdf.pages) for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) sizes.add(pyRound(s.size), s.text.trim().length); // (by amount of text: short labels mustn't outvote the body)
-    const body = sizes.mostCommon();
-    let left = 0;
-    let right = 0;
-    let across = 0;
-    for (const pg of pdf.pages) {
-      for (const l of pg.lines) {
-        const text = l.spans.map((s) => s.text).join('');
-        if (text.trim().length < 25 || Math.abs(pyRound(l.spans[0].size) - body) > 1) continue;
-        const [x0, , x1] = l.bbox;
-        if (x0 < pageW * 0.45 && x1 > pageW * 0.55) across++;
-        else if (x1 <= pageW * 0.55) left++;
-        else right++;
-      }
-    }
-    const total = left + right + across;
-    return total > 40 && across < total * 0.15 && left > total * 0.25 && right > total * 0.25;
+    // can a band run on past its end? Only what reaches its middle stops it
+    // (a word sticking out of its column into the gap doesn't)
+    const blocked = (x, y) => {
+      const xi = Math.round(x);
+      for (let k = -1; k <= 1; k++) if (occ[y * w + Math.min(w - 1, Math.max(0, xi + k))]) return true;
+      return false;
+    };
+    return { strips, top, bottom, blocked };
   }
 
+  // The text on one side of a band, row by row: for each row the run of text
+  // nearest the band (pieces chained across word gaps)
+  function flankRows(boxes, band, side, bodySize) {
+    const near = boxes.filter((b) => b.yc > band.y0 && b.yc < band.y1 && (side < 0 ? b.x1 <= band.x0 + 2 : b.x0 >= band.x1 - 2));
+    near.sort((a, b) => a.yc - b.yc);
+    const rows = [];
+    for (const b of near) {
+      const r = rows.length && Math.abs(rows.at(-1).yc - b.yc) <= Math.max(2, b.size * 0.35) ? rows.at(-1) : null;
+      if (r) r.items.push(b);
+      else rows.push({ yc: b.yc, items: [b] });
+    }
+    const out = [];
+    for (const r of rows) {
+      const its = r.items.sort((a, b) => (side < 0 ? b.x1 - a.x1 : a.x0 - b.x0)); // nearest the band first
+      const chain = [its[0]];
+      for (const b of its.slice(1)) {
+        const last = chain.at(-1);
+        const gap = side < 0 ? last.x0 - b.x1 : b.x0 - last.x1;
+        if (gap > Math.max(bodySize, b.size) * 1.25) break;
+        chain.push(b);
+      }
+      const x0 = Math.min(...chain.map((b) => b.x0));
+      const x1 = Math.max(...chain.map((b) => b.x1));
+      out.push({ yc: r.yc, y0: Math.min(...chain.map((b) => b.y0)), y1: Math.max(...chain.map((b) => b.y1)), x0, x1, text: chain.map((b) => b.text).join(' '), size: chain[0].size });
+    }
+    return out;
+  }
+
+  const layoutMedian = (a) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0);
+
+  // What stands on each side of a band. Running text: rows wide enough to be
+  // lines of a column (a table's cells and a figure's labels aren't), mostly
+  // words, the left side's lines ending at the band and the right side's
+  // starting at it. A wide table can stand on one side for part of the way,
+  // so only the rows that touch the band are judged.
+  function judgeBand(boxes, band, W, bodySize) {
+    const minCol = W * LAYOUT.minCol;
+    const side = (dir) => {
+      const rows = flankRows(boxes, band, dir, bodySize);
+      if (!rows.length) return { n: 0, wide: [], abut: [] };
+      const edge = dir < 0 ? Math.max(...rows.map((r) => r.x1)) : Math.min(...rows.map((r) => r.x0));
+      const dist = (r) => (dir < 0 ? edge - r.x1 : r.x0 - edge);
+      // (a row far from the band, further than it is long, belongs to no column beside it)
+      const touching = rows.filter((r) => dist(r) < Math.max(r.x1 - r.x0, bodySize * 3));
+      let wide = touching.filter((r) => r.x1 - r.x0 >= minCol);
+      // (the lines must reach the band themselves: lines that stop short of it,
+      // with only labels or numbers between, are another gap's column)
+      if (wide.length && Math.abs((dir < 0 ? Math.max(...wide.map((r) => r.x1)) : Math.min(...wide.map((r) => r.x0))) - edge) > Math.max(8, bodySize)) wide = [];
+      const abut = rows.filter((r) => dist(r) <= Math.max(bodySize * 1.5, (r.x1 - r.x0) * 0.3));
+      const t = wide.map((r) => r.text).join('').replace(/\s/g, '');
+      const letters = t.length ? (t.match(/\p{L}/gu) || []).length / t.length : 0;
+      const w = layoutMedian(wide.map((r) => r.x1 - r.x0));
+      let aligned = 0;
+      if (wide.length && dir < 0) aligned = wide.filter((r) => r.x1 >= edge - Math.max(12, w * 0.22)).length / wide.length;
+      else if (wide.length) {
+        // lines of a column start at its edge, or at one indent from it
+        // (a paragraph's first line; the hanging lines of a reference)
+        const bins = new Map();
+        for (const r of wide) bins.set(Math.round(r.x0 / 3), (bins.get(Math.round(r.x0 / 3)) || 0) + 1);
+        const top2 = [...bins.entries()].filter(([k]) => k * 3 <= edge + bodySize * 3.5).sort((a, b) => b[1] - a[1]).slice(0, 2);
+        const near = new Set(top2.flatMap(([k]) => [k - 1, k, k + 1]));
+        aligned = wide.filter((r) => near.has(Math.round(r.x0 / 3))).length / wide.length;
+      }
+      // lines of text follow each other closely (a table's row labels stand apart)
+      const close = (r, o) => o && Math.abs(o.yc - r.yc) <= Math.max(r.size, o.size) * 2;
+      const dense = wide.filter((r, i) => close(r, wide[i - 1]) || close(r, wide[i + 1])).length >= wide.length * 0.6;
+      return { n: touching.length, wide, abut, letters, w, aligned, edge, dense };
+    };
+    const L = side(-1);
+    const R = side(1);
+    const info = { nL: L.n, nR: R.n, wideL: L.wide.length, wideR: R.wide.length, wL: Math.round(L.w || 0), wR: Math.round(R.w || 0), fullL: +(L.aligned || 0).toFixed(2), startR: +(R.aligned || 0).toFixed(2) };
+    const flaw = (s, need) => (s.wide.length < 2 ? (s.n < 2 ? 'few rows' : 'narrow') : s.wide.length < s.n * 0.2 ? 'mostly cells' : s.letters < 0.55 ? 'numbers' : !s.dense ? 'sparse' : s.aligned < need ? 'ragged' : '');
+    const [whyL, whyR] = [flaw(L, 0.45), flaw(R, 0.6)];
+    const why = whyL || whyR;
+    // where text stands against the band, on either side
+    // (from the first such row that has another close below it)
+    const abut = [...L.abut, ...R.abut].sort((a, b) => a.y0 - b.y0);
+    const led = abut.find((r, i) => abut.slice(i + 1).some((o) => o.y0 - r.y1 < Math.max(r.size, o.size) * 2.5 && o.y0 > r.y0 + 1));
+    const a0 = led ? led.y0 : abut.length ? abut[0].y0 : band.y0;
+    const a1 = abut.length ? Math.max(...abut.map((r) => r.y1)) : band.y1;
+    return { ok: !why, why, ...info, rows: Math.min(L.wide.length, R.wide.length), oneSide: Math.max(whyL ? 0 : L.wide.length, whyR ? 0 : R.wide.length), a0, a1 };
+  }
+
+  // Every page's candidate bands, judged
+  function pageBands(pg, bodySize) {
+    const boxes = layoutBoxes(pg);
+    const pics = (pg.images || []).map((b) => [b[0], b[1], b[2], b[3]]).filter((b) => b[2] - b[0] >= 24 && b[3] - b[1] >= 24);
+    if (!boxes.length) return { boxes, pics, bands: [] };
+    const { strips, top, bottom, blocked } = whiteBands(boxes, pics, pg.width, pg.height, bodySize * LAYOUT.minRun);
+    const bands = strips.map((s) => ({ ...s, x: (s.x0 + s.x1) / 2, ...judgeBand(boxes, s, pg.width, bodySize) }));
+    return { boxes, pics, bands, top, bottom, blocked };
+  }
+
+  // The layout of every page of a document. A gap found on its own has to be
+  // tall; one standing where the paper's columns are parted on other pages
+  // (or elsewhere on this one) can be a few lines short: a caption or a
+  // table's notes set in the page's columns.
+  function docLayout(pages, bodySize) {
+    const per = pages.map((pg) => pageBands(pg, bodySize));
+    const strict = (b) => b.ok && b.y1 - b.y0 >= bodySize * LAYOUT.strictRun && b.rows >= LAYOUT.strictRows;
+    const grid = [];
+    for (const p of per) for (const b of p.bands) if (strict(b)) grid.push(b);
+    const out = per.map((p, i) => {
+      const own = p.bands.filter(strict);
+      const at = (list, b) => list.filter((g) => Math.abs(g.x - b.x) <= 6);
+      // short, but where this page's columns are parted; or where another
+      // page's are, and as wide a gap as there
+      // (or two lines short, right where one of this page's gaps ends: two
+      // captions side by side over the columns, set a little narrower)
+      const joins = (b) => own.some((g) => b.x0 <= g.x1 + 3 && b.x1 >= g.x0 - 3 && b.y1 >= g.y0 - bodySize * 2 && b.y0 <= g.y1 + bodySize * 2);
+      const short = (b) => b.ok && ((b.rows >= 3 && (at(own, b).length > 0 || at(grid, b).some((g) => b.x1 - b.x0 >= (g.x1 - g.x0) * 0.6))) || (b.rows >= 2 && joins(b)));
+      // a column of text beside a figure's labels or a table: text on one
+      // side only, where the paper's columns are parted on other pages
+      for (const b of p.bands) {
+        if (strict(b) || short(b) || b.oneSide < LAYOUT.strictRows || b.y1 - b.y0 < bodySize * LAYOUT.strictRun) continue;
+        const known = grid.filter((g) => !p.bands.includes(g) && g.x > b.x0 && g.x < b.x1).map((g) => g.x).sort((x, y) => x - y);
+        if (known.length >= 2) Object.assign(b, { x: known[known.length >> 1], known: true });
+      }
+      return pageCut(pages[i], p, (b) => strict(b) || short(b) || b.known, bodySize);
+    });
+    // the opening page starts with its title, wherever the page puts the
+    // authors (a column of names and addresses to the left of it, say)
+    const first = out[0];
+    if (first && first.leaves.length > 1) {
+      let best = null;
+      first.leaves.forEach((leaf, k) => {
+        for (const it of leaf.items) {
+          const b = it.box;
+          if (!b || b.size < bodySize * 1.4 || b.y0 > pages[0].height * 0.6 || (b.text.match(/\p{L}/gu) || []).length < 3) continue;
+          if (!best || b.size > best.size + 0.5) best = { size: b.size, k };
+        }
+      });
+      if (best && best.k > 0) first.leaves.unshift(...first.leaves.splice(best.k, 1));
+    }
+    return out;
+  }
+
+  function pageCut(pg, p, accept, bodySize) {
+    const { boxes, pics } = p;
+    if (!boxes.length) return { leaves: [], gutters: [], rejected: [], boxes };
+    // the tallest first; a band beside an accepted one at the same height is its ragged edge
+    const bands = [...p.bands].sort((a, b) => b.y1 - b.y0 - (a.y1 - a.y0) || b.x1 - b.x0 - (a.x1 - a.x0));
+    let gutters = [];
+    const rejected = [];
+    for (const s of bands) {
+      if (gutters.some((g) => s.x0 < g.x1 + 30 && s.x1 > g.x0 - 30 && Math.min(g.y1, s.y1) - Math.max(g.y0, s.y0) > 0.5 * (s.y1 - s.y0))) continue;
+      if (accept(s)) gutters.push({ ...s });
+      else rejected.push(s);
+    }
+    // a gap runs on while nothing reaches its middle, then is trimmed to
+    // where text stands against it; pieces of one gap become one
+    for (const g of gutters) {
+      let y0 = g.y0;
+      let y1 = g.y1;
+      while (y0 - 1 >= p.top && !p.blocked(g.x, y0 - 1)) y0--;
+      while (y1 < p.bottom && !p.blocked(g.x, y1)) y1++;
+      const whole = judgeBand(boxes, { ...g, y0, y1 }, pg.width, bodySize);
+      // (a picture standing against the gap is part of its column too)
+      const beside = pics.filter((q) => q[3] > y0 && q[1] < y1 && ((q[2] <= g.x0 + 2 && g.x0 - q[2] <= Math.max(25, (q[2] - q[0]) * 0.3)) || (q[0] >= g.x1 - 2 && q[0] - g.x1 <= Math.max(25, (q[2] - q[0]) * 0.3))));
+      g.y0 = Math.max(y0, Math.min(whole.a0, ...beside.map((q) => q[1])) - 1);
+      g.y1 = Math.min(y1, Math.max(whole.a1, ...beside.map((q) => q[3])) + 1);
+    }
+    gutters.sort((a, b) => a.x - b.x || a.y0 - b.y0);
+    const merged = [];
+    for (const g of gutters) {
+      const m = merged.find((o) => Math.abs(o.x - g.x) <= 6 && g.y0 <= o.y1 + bodySize * 1.5 && g.y1 >= o.y0 - bodySize * 1.5);
+      if (m) {
+        m.y0 = Math.min(m.y0, g.y0);
+        m.y1 = Math.max(m.y1, g.y1);
+        if (g.x1 - g.x0 > m.x1 - m.x0) Object.assign(m, { x0: g.x0, x1: g.x1, x: g.x });
+      } else merged.push(g);
+    }
+    gutters = merged;
+    // cut the page
+    const items = [...boxes.map((b) => ({ x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1, box: b })), ...pics.map((q) => ({ x0: q[0], y0: q[1], x1: q[2], y1: q[3], pic: q }))];
+    const leaves = [];
+    const tol = bodySize * 1.5;
+    const cut = (its, depth, cols) => {
+      if (!its.length) return;
+      const r = { x0: Math.min(...its.map((i) => i.x0)), y0: Math.min(...its.map((i) => i.y0)), x1: Math.max(...its.map((i) => i.x1)), y1: Math.max(...its.map((i) => i.y1)) };
+      const mid = (i) => (i.x0 + i.x1) / 2;
+      const usable = gutters.filter((g) => g.x > r.x0 + 4 && g.x < r.x1 - 4 && Math.min(g.y1, r.y1) - Math.max(g.y0, r.y0) > bodySize * 1.5 && its.some((i) => mid(i) < g.x) && its.some((i) => mid(i) > g.x));
+      // a gap parts the block when it runs its whole height, or when what
+      // stands past its ends is all to one side of it (a heading over one column)
+      const oneSided = (g, past) => {
+        const beyond = its.filter(past);
+        return !beyond.some((i) => i.x0 < g.x0 && i.x1 > g.x1) && (!beyond.some((i) => mid(i) < g.x) || !beyond.some((i) => mid(i) > g.x));
+      };
+      const full = usable
+        .filter((g) => (g.y0 <= r.y0 + tol || oneSided(g, (i) => (i.y0 + i.y1) / 2 < g.y0)) && (g.y1 >= r.y1 - tol || oneSided(g, (i) => (i.y0 + i.y1) / 2 > g.y1)))
+        .sort((a, b) => a.x - b.x);
+      if (full.length && depth < 14) {
+        const xs = full.map((g) => g.x);
+        const parts = xs.map(() => []).concat([[]]);
+        for (const i of its) {
+          let k = 0;
+          while (k < xs.length && mid(i) > xs[k]) k++;
+          parts[k].push(i);
+        }
+        parts.forEach((q) => cut(q, depth + 1, true));
+        return;
+      }
+      // across, at the end of a gap: where it doesn't slice another gap's columns
+      const ys = [];
+      for (const g of usable) {
+        if (g.y0 > r.y0 + tol) ys.push(g.y0);
+        if (g.y1 < r.y1 - tol) ys.push(g.y1);
+      }
+      const sliced = (y) => usable.reduce((n, g) => n + (y > g.y0 + tol && y < g.y1 - tol ? Math.min(y - g.y0, g.y1 - y) : 0), 0);
+      ys.sort((a, b) => sliced(a) - sliced(b) || a - b);
+      for (const y of ys) {
+        const above = its.filter((i) => (i.y0 + i.y1) / 2 < y);
+        const below = its.filter((i) => (i.y0 + i.y1) / 2 >= y);
+        if (!above.length || !below.length || depth >= 14) continue;
+        cut(above, depth + 1, false);
+        cut(below, depth + 1, false);
+        return;
+      }
+      leaves.push({ ...r, col: !!cols, items: its });
+    };
+    cut(items, 0, false);
+    return { leaves, gutters, rejected, boxes };
+  }
+
+  // ================================================================ PDF → HTML
   // Linotype "Mathematical Pi" fonts (APA and other publishers' symbols)
   // name glyphs H<number> and come without a Unicode map, so viewers show
   // "p [ .05" for "p < .05". Their names say which symbol it is.
@@ -1579,18 +1954,10 @@ const Epubify = (() => {
     const styles = learnHeadingStyles(pdf, bodySize);
     // global body-text left edge (per-page voting fails on box-dominated pages)
     const globalBodyLeft = globX0.mostCommon() ?? 0;
-    const gutter = findGutter(pdf, pageW);
-    const twoCol = gutter !== null || pdfIsTwoColumn(pdf, pageW);
-    const mid = gutter ?? pageW / 2;
-    // In two-column mode, text left of the left column (BMJ's affiliations
-    // and notes margin) is a margin column, kept apart from the body text.
-    let leftEdge = -Infinity;
-    if (twoCol) {
-      const c = new Counter();
-      for (const pg of pdf.pages)
-        for (const l of pg.lines) if (horizontal(l) && l.bbox[2] <= mid + 3 && l.spans.map((s) => s.text).join('').trim().length >= 20 && Math.abs(pyRound(l.spans[0].size) - bodySize) <= 1) c.add(pyRound(l.bbox[0] / 5) * 5);
-      leftEdge = c.mostCommon() ?? -Infinity;
-    }
+    // where the columns are, page by page (two, three, or a mix)
+    const layouts = docLayout(pdf.pages, bodySize);
+    const laidOut = layouts.filter((L) => L.leaves.length);
+    const twoCol = layouts.filter((L) => L.gutters.length).length >= Math.max(1, Math.ceil(laidOut.length * 0.25));
     // Hyphenated words as the document writes them mid-line ("meta-analyses"),
     // to tell a real hyphen from a line-break one when rejoining lines.
     hyphenVocab = new Set();
@@ -1611,7 +1978,7 @@ const Epubify = (() => {
       pdf.doc.destroy();
       return { parts, images, title: dropScripts(title) || pdf.meta.title.trim() || stem, author: dropScripts(author) || pdf.meta.author.trim(), twoCol: false };
     }
-    log(twoCol ? '  two-column layout' : '  layout with a side-margin column');
+    log(twoCol ? '  layout in columns' : '  layout with a side-margin column');
 
     // repeated running headers/footers
     const ph = pdf.pages[0].height;
@@ -1705,14 +2072,35 @@ const Epubify = (() => {
     };
     const emit = (html) => (paraBuf.length ? pending.push(html) : parts.push(html));
 
+    // A scan's recognised text gets its type size page by page (the pages are
+    // scanned at slightly different scales), so "body size" is the page's own there.
+    const docBody = bodySize;
+    const pageBody = (pg) => {
+      const c = new Counter();
+      for (const l of pg.lines) for (const s of l.spans) if (s.text.trim()) c.add(pyRound(s.size), s.text.trim().length);
+      const all = sum(c.entries().map(([, n]) => n));
+      const m = c.mostCommon();
+      return m !== undefined && all >= 300 && c.get(m) >= all * 0.5 ? m : null;
+    };
     for (const pg of pdf.pages) {
+      const bodySize = (pg.scan && pageBody(pg)) || docBody;
+      // the page's blocks in reading order, and the block each piece of text is in
+      const leaves = twoCol ? layouts[pdf.pages.indexOf(pg)].leaves : [];
+      const leafOf = new Map();
+      leaves.forEach((leaf, k) => leaf.items.forEach((it) => it.box && leafOf.set(it.box.span, k)));
+      const inLeaf = (s) => {
+        if (leafOf.has(s)) return leafOf.get(s);
+        const [cx, cy] = [(s.bbox[0] + s.bbox[2]) / 2, (s.bbox[1] + s.bbox[3]) / 2];
+        const k = leaves.findIndex((f) => cx >= f.x0 && cx <= f.x1 && cy >= f.y0 && cy <= f.y1);
+        return Math.max(0, k);
+      };
       const spans = [];
       for (const l of pg.lines) {
         if (!horizontal(l)) continue;
         if (pg === pdf.pages[0] && l.bbox[3] < pg.height * 0.075) continue; // masthead on the first page (journal logo, header)
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
-          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l });
+          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l, leaf: twoCol ? inLeaf(s) : 0 });
         }
       }
       if (!spans.length && !pg.images.length) continue;
@@ -1751,6 +2139,23 @@ const Epubify = (() => {
       // (affiliations, notes: stays narrow) or a boxed insert that starts
       // further left but runs into the column. Decide per block of lines.
       const lineKind = new Map();
+      // (text left of the first column, BMJ's margin of addresses and notes,
+      // is kept apart from the body text)
+      const firstCols = leaves.map((f, k) => (f.col ? k : -1)).filter((k) => k >= 0 && leaves[k].x0 <= Math.min(...leaves.filter((f) => f.col).map((f) => f.x0)) + 20);
+      const leafOfLine = (l) => {
+        const sp = spans.find((x) => x.line === l);
+        return sp ? sp.leaf : -1;
+      };
+      let leftEdge = -Infinity;
+      if (twoCol && firstCols.length) {
+        const c = new Counter();
+        for (const l of pg.lines) if (horizontal(l) && firstCols.includes(leafOfLine(l)) && l.spans.map((s) => s.text).join('').trim().length >= 20 && Math.abs(pyRound(l.spans[0].size) - bodySize) <= 1) c.add(pyRound(l.bbox[0] / 5) * 5);
+        // (the leftmost edge many lines start at: in a reference list the
+        // first line of each entry, not the more numerous hanging lines)
+        const total = sum(c.entries().map(([, n]) => n));
+        const edges = c.entries().filter(([, n]) => n >= Math.max(3, total * 0.15)).map(([x]) => x);
+        leftEdge = edges.length ? Math.min(...edges) : c.mostCommon() ?? -Infinity;
+      }
       if (twoCol && leftEdge > -Infinity) {
         // (a paragraph or section number hanging left of the text, "1  This
         // Code covers…", "1.1  To which…", is part of its line, not a margin)
@@ -1764,7 +2169,7 @@ const Epubify = (() => {
           return pg.lines.some((o) => o !== l && atEdge(o.bbox[0]) && Math.abs((o.bbox[1] + o.bbox[3]) / 2 - yc) < (l.bbox[3] - l.bbox[1]));
         };
         const big = (l) => Math.max(...l.spans.map((x) => x.size)) >= bodySize * 1.6; // (a title is never a margin note)
-        const outer = pg.lines.filter((l) => horizontal(l) && l.bbox[0] < leftEdge - 6 && !hanging(l) && !big(l)).sort((a, b) => a.bbox[1] - b.bbox[1]);
+        const outer = pg.lines.filter((l) => horizontal(l) && l.bbox[0] < leftEdge - 6 && firstCols.includes(leafOfLine(l)) && !hanging(l) && !big(l)).sort((a, b) => a.bbox[1] - b.bbox[1]);
         let block = [];
         const close = () => {
           const wide = block.filter((l) => l.bbox[2] > leftEdge + 20).length;
@@ -1777,38 +2182,29 @@ const Epubify = (() => {
         }
         close();
       }
-      // A line running across the gutter without a break is full width,
-      // whatever pieces it comes in (a caption split at a bold "Fig. 6" or
-      // at each special hyphen would otherwise be cut into the two columns)
-      const fullWidth = new Set();
-      if (twoCol)
-        for (const l of pg.lines) {
-          if (!horizontal(l) || !(l.bbox[0] < mid - 12 && l.bbox[2] > mid + 12)) continue;
-          const sp = l.spans.filter((x) => x.text.trim()).sort((a, b) => a.bbox[0] - b.bbox[0]);
-          const gapAtMid = sp.some((x, k) => k && x.bbox[0] - sp[k - 1].bbox[2] > 6 && sp[k - 1].bbox[2] < mid + 20 && x.bbox[0] > mid - 20);
-          if (sp.length && !gapAtMid) fullWidth.add(l);
-        }
       const colOf = (sp) => {
         if (!twoCol) return 0;
         const kind = lineKind.get(sp.line);
         if (kind === 'margin') return -2;
         if (kind === 'box') return -3;
-        if (fullWidth.has(sp.line)) return -1;
-        return sp.x0 < mid - 12 && sp.x1 > mid + 12 ? -1 : (sp.x0 + sp.x1) / 2 < mid ? 0 : 1;
+        return sp.leaf;
       };
       const rows = [];
-      for (const c of [-3, -2, -1, 0, 1]) {
+      for (const c of [-3, -2, ...(twoCol ? leaves.map((_, k) => k) : [0])]) {
         const group = spans.filter((sp) => colOf(sp) === c).sort((a, b) => a.y - b.y || a.x0 - b.x0);
         const own = lineRows(group, bodySize, c);
         rows.push(...own);
       }
-      if (twoCol) {
-        // a full-width span's row also takes same-height spans from the columns
-        for (const r of rows.filter((x) => x.col === -1)) {
-          for (const o of rows.filter((x) => x.col >= 0 && x.length && Math.abs(x[0].y - r[0].y) <= 5)) r.push(...o.splice(0));
-        }
-        for (let i = rows.length - 1; i >= 0; i--) if (!rows[i].length) rows.splice(i, 1);
-      }
+      // a block set mostly in bold (an abstract, say): bold marks no heading there
+      const boldLeaf = new Set();
+      if (twoCol)
+        leaves.forEach((_, k) => {
+          const own = spans.filter((sp) => sp.leaf === k);
+          const all = sum(own.map((sp) => sp.text.length));
+          if (all >= 200 && sum(own.filter((sp) => sp.bold).map((sp) => sp.text.length)) >= all * 0.6) boldLeaf.add(k);
+        });
+      // a block that runs across the columns (on a page that has columns)
+      const wideLeaf = (c) => twoCol && leaves.some((f) => f.col) && leaves[c] && !leaves[c].col;
 
       // "Abstract  Social relationships have…": a run-in label in bigger or
       // bold type at the start of a body line is a heading of its own
@@ -1897,7 +2293,7 @@ const Epubify = (() => {
           [txt, aside, sz] = rowText(row);
           if (!txt) continue;
         }
-        if (repeated.has(txt) || ROMAN_OR_DIGITS.test(txt)) continue;
+        if ((repeated.has(txt) && !CAPTION.test(txt)) || ROMAN_OR_DIGITS.test(txt)) continue;
         txt = fixSmallCaps(txt);
         // Labels inside vector figures ("weight layer", "iter. (1e4)"): short
         // runs of smaller type, or rows that are mostly numbers.
@@ -1918,9 +2314,24 @@ const Epubify = (() => {
         // (in the reference list a line of numbers is the end of a citation,
         // "44:1524–1527", "care. JAMA 2018; 319:1317–1318", not a figure label)
         const refTail = inRefs && sz >= bodySize * 0.6 && /\d/.test(txt) && /[;:]|\d{4}/.test(txt) && txt.length <= 90;
-        if (!CAPTION.test(txt) && !refsTitle && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead && !refTail) || (letters < txt.replace(/\s/g, '').length * 0.4 && !refTail))) continue;
+        // (and in a reference list set in narrow columns, short lines are the rule)
+        const refLine = inRefs && sz >= bodySize * 0.6 && letters >= 3;
+        // (a line of running text can be mostly numbers, "(n = 4 [15%]), and shock (n = 3 [12%]).":
+        // it stands in the text when a wordy line of the same type starts at the same edge right above or below it)
+        const inText = () => {
+          const x0 = Math.min(...row.map((z) => z.x0));
+          return rows.some((o) => {
+            if (!o.length || o.col !== rowCol || Math.abs(o[0].y - row[0].y) > sz * 1.9 || Math.abs(o[0].y - row[0].y) < 1 || Math.abs(o[0].size - row[0].size) > 0.6) return false;
+            if (Math.abs(Math.min(...o.map((z) => z.x0)) - x0) > 4) return false;
+            const ot = o.map((z) => z.text).join(' ').trim();
+            return ot.split(/\s+/).length >= 6 && (ot.match(/\p{L}/gu) || []).length >= ot.replace(/\s/g, '').length * 0.6;
+          });
+        };
+        // (nor is a section's name in capitals, set a little smaller: "DISCUSSION" in small caps)
+        const sectionName = capsHeading(txt) && sz >= bodySize * 0.75;
+        if (!CAPTION.test(txt) && !refsTitle && !sectionName && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead && !refTail && !refLine) || (letters < txt.replace(/\s/g, '').length * 0.4 && !refTail && !inText()))) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
-        const bold = row.every((sp) => sp.bold || !sp.text.trim());
+        const bold = row.every((sp) => sp.bold || !sp.text.trim()) && !boldLeaf.has(rowCol);
         const fw = new Counter();
         row.forEach((sp) => fw.add(sp.font, sp.text.length));
         const font = fw.mostCommon();
@@ -1929,53 +2340,46 @@ const Epubify = (() => {
         ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold, Math.max(...row.map((sp) => sp.x1)), styled, minor]);
         if (aside && aside.length > 3 && !repeated.has(aside)) pageAsides.push([aside, sz]);
       }
-      if (twoCol) {
-        // full-width rows above the columns come first, the rest after
-        // (measured from real column text, not a stray label above it)
-        // where the columns start: the first long line with more of them just below
-        // (a lone label at the top, "Original Research | Critical Care", isn't it)
-        const ysOf = (lines) => lines.map((t) => t[1]).sort((a, b) => a - b);
-        const cluster = (lines) => {
-          const ys = ysOf(lines);
-          return ys.find((y, i) => ys[i + 2] !== undefined && ys[i + 2] - y < bodySize * 5);
-        };
-        const bodyLines = ordered.filter((t) => t[0] >= 0 && t[2].length >= 30 && Math.abs(t[3] - bodySize) <= 1);
-        // (a page all in smaller type, like the reference list: any real column lines will do)
-        const anyLines = ordered.filter((t) => t[0] >= 0 && t[2].length >= 30);
-        let colTop = cluster(bodyLines) ?? cluster(anyLines) ?? ysOf(anyLines)[0] ?? Infinity;
-        // both columns already run above that (a section opening with a lead
-        // paragraph in big type beside a short intro): the columns start there
-        const above = (k) => ordered.filter((t) => t[0] === k && t[1] < colTop - 2 && t[2].length >= 20 && t[3] < bodySize * 1.6); // (not a title)
-        const [a0, a1] = [above(0), above(1)];
-        if (a0.length >= 2 && a1.length >= 2) {
-          const [lo0, hi0, lo1, hi1] = [Math.min(...a0.map((t) => t[1])), Math.max(...a0.map((t) => t[1])), Math.min(...a1.map((t) => t[1])), Math.max(...a1.map((t) => t[1]))];
-          if (lo0 < hi1 && lo1 < hi0) colTop = Math.min(lo0, lo1);
-        }
-        // headings side by side at the top of each column ("Introduction" | "Methods") stay in their columns
-        // (also a little offset, when both are set in a heading style)
-        const sideBySide = (t) => ordered.some((o) => o !== t && o[0] === 1 - t[0] && (Math.abs(o[1] - t[1]) <= 3 || ((t[7] || t[3] >= bodySize + 2) && (o[7] || o[3] >= bodySize + 2) && Math.abs(o[3] - t[3]) < 0.5 && Math.abs(o[1] - t[1]) <= t[3] * 2)) && (t[0] === 0 ? o[4] - t[6] : t[4] - o[6]) > 20);
-        for (const t of ordered) {
-          if (t[0] === -1 && t[1] > colTop) t[0] = 2;
-          else if (t[0] >= 0 && t[0] <= 1 && t[1] < colTop - 2 && !sideBySide(t)) t[0] = -1; // author lines etc. above the columns
-        }
-        // the last line of a full-width paragraph (a caption's "policy
-        // inspection") is short, so it sits in a column: it goes with the
-        // line above it when nothing stands beside it in the other column
-        const byY = [...ordered].sort((a, b) => a[1] - b[1]);
-        for (const t of byY) {
-          if (t[0] < 0 || t[0] > 1) continue;
-          const above = byY.filter((o) => o !== t && (o[0] === -1 || o[0] === 2) && o[1] < t[1] && t[1] - o[1] < t[3] * 1.8 && Math.abs(o[3] - t[3]) < 0.6 && Math.abs(o[4] - t[4]) < 4).pop();
-          if (!above) continue;
-          if (ordered.some((o) => o !== t && o[0] >= 0 && o[0] <= 1 && o[0] !== t[0] && Math.abs(o[1] - t[1]) < t[3])) continue;
-          t[0] = above[0];
-        }
-        // a bare "Table 5" label over a full-width title goes with its title
-        for (const t of ordered) {
-          if (t[0] < 0 || t[0] > 1 || !/^\s*(fig(ure)?\.?|table)\s*[A-Z]?\d+[.:]?\s*$/i.test(t[2])) continue;
-          const below = ordered.filter((o) => o[1] > t[1] && o[1] - t[1] < t[3] * 2.5 && Math.abs(o[4] - t[4]) < 20).sort((a, b) => a[1] - b[1])[0];
-          if (below && (below[0] === -1 || below[0] === 2)) t[0] = below[0];
-        }
-        ordered = ordered.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      // the page's blocks in their reading order, each from its top down
+      if (twoCol) ordered.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      // Bold lines of running text (an abstract set in bold) are no headings:
+      // a long bold line with another right above or below it
+      {
+        const longBold = (t) => t && t[5] && t[2].split(/\s+/).length >= 8;
+        const runs = ordered.map((t, i) => longBold(t) && [ordered[i - 1], ordered[i + 1]].some((o) => longBold(o) && o[0] === t[0] && Math.abs(o[1] - t[1]) < t[3] * 1.8));
+        ordered.forEach((t, i) => {
+          // (and the short last line of such a paragraph)
+          const tail = t[5] && !runs[i] && runs[i - 1] && ordered[i - 1][0] === t[0] && t[1] - ordered[i - 1][1] < t[3] * 1.8 && Math.abs(t[4] - ordered[i - 1][4]) < 4;
+          if (runs[i] || tail) t[5] = false;
+        });
+      }
+      // Notes in small type at the foot of a column (where the authors work,
+      // "*See also p. 2756") stand between a sentence and its next column:
+      // they wait until the page's text is through, like margin notes.
+      if (twoCol && !inRefs) {
+        const first = pg === pdf.pages[0];
+        leaves.forEach((leaf, c) => {
+          if (!leaf.col) return;
+          const own = ordered.filter((t) => t[0] === c);
+          // (small against the text above it and the text the next column
+          // goes on with: a Methods section set small all through isn't notes)
+          const nextCol = leaves.findIndex((f, j) => j > c && f.col);
+          const goesOn = nextCol < 0 ? null : ordered.find((t) => t[0] === nextCol && t[2].length >= 20);
+          if (!goesOn) return;
+          let k = own.length;
+          while (k > 0 && own[k - 1][3] <= goesOn[3] - 0.8 && !own[k - 1][2].startsWith('\uE000')) k--;
+          const foot = own.slice(k);
+          if (!foot.length || k === 0 || own[k - 1][3] < Math.max(...foot.map((t) => t[3])) + 0.8) return;
+          const gaps = own.slice(1, k).map((t, i) => t[1] - own[i][1]).filter((g) => g > 0).sort((a, b) => a - b);
+          const usual = gaps.length ? gaps[gaps.length >> 1] : bodySize * 1.2;
+          if (foot[0][1] - own[k - 1][1] < usual * 1.4) return; // (set off from the text above)
+          if (foot.some((t) => CAPTION.test(t[2]) || /^\s*(references|bibliography)\s*$/i.test(t[2])) || foot[0][5]) return;
+          if (!first && !/^\s*[*†‡§¶‖#]/.test(foot[0][2])) return;
+          for (const t of foot) {
+            ordered.splice(ordered.indexOf(t), 1);
+            marginRows.push({ txt: t[2], y: t[1], x1: t[6], bold: t[5], sz: t[3] });
+          }
+        });
       }
 
       // Join body lines into paragraphs. Indents are measured per column (the
@@ -1993,7 +2397,8 @@ const Epubify = (() => {
         const ends = new Counter();
         lines.forEach((t) => ends.add(pyRound(t[6] / 4) * 4));
         bodyX1.set(c, ends.mostCommon());
-        const gaps = lines.slice(1).map((t, i) => t[1] - lines[i][1]).filter((g) => g > 0).sort((a, b) => a - b);
+        // (from one line to the next: pieces at the same height, a figure's labels, don't count)
+        const gaps = lines.slice(1).map((t, i) => t[1] - lines[i][1]).filter((g) => g > bodySize * 0.7).sort((a, b) => a - b);
         if (gaps.length) lineGap.set(c, gaps[gaps.length >> 1]);
       }
       // the last line of a paragraph still open from the previous page
@@ -2044,7 +2449,13 @@ const Epubify = (() => {
         if (pg === pdf.pages[0] && /^(open access|(research|review|original|brief) (article|research|report|communication)|research|r e s e a r c h.*)$/i.test(txt.trim())) continue;
         if (capBuf) {
           // (a caption's wide first line counts as full width, its next line as a column)
-          let gapBreak = (c !== capBuf.c && c !== -1 && capBuf.c !== -1) || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
+          // (the caption of another figure or table, right under this one, is its own)
+          const [cm, c0] = [CAPTION.exec(txt), CAPTION.exec(capBuf.lines[0])];
+          const another = cm && (!c0 || captionKey(cm) !== captionKey(c0) || endsWithAny(capBuf.lines.at(-1).trimEnd(), '.'));
+          // (the short last line of a caption that runs across the columns
+          // stands in a column: it goes with the unfinished line right above it)
+          const lastLine = c !== capBuf.c && y > capBuf.y && y - capBuf.y < sz * 1.9 && Math.abs(sz - capBuf.sz) < 0.6 && Math.abs(x0 - capBuf.x0) < 4 && !endsWithAny(capBuf.lines.at(-1).trimEnd(), TERMINAL);
+          let gapBreak = (c !== capBuf.c && !lastLine) || another || y - capBuf.y > (lineGap.get(c) || sz * 1.4) * 1.6 || Math.abs(sz - capBuf.sz) >= 1;
           // (in a block of notes, a sentence ending short of the margin ends its note)
           if (capBuf.aside && endsWithAny(capBuf.lines.at(-1).trimEnd(), TERMINAL) && capBuf.lastX1 < capBuf.maxX1 - 20) gapBreak = true;
           if (!gapBreak) {
@@ -2060,14 +2471,14 @@ const Epubify = (() => {
         // caption: the line before it in the same type didn't end a sentence)
         const midSentence = prev && prev.c === c && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.4 && Math.abs(sz - prev.sz) < 0.5 && !endsWithAny(prev.txt.trimEnd(), TERMINAL);
         if (CAPTION.test(txt) && !midSentence) {
-          capBuf = { lines: [txt], c, y, sz };
+          capBuf = { lines: [txt], c, y, sz, x0 };
           continue;
         }
         // full-width lines in small type between the columns (a table's
         // note) are a block of their own: they mustn't take in the column
         // text that follows, which continues the page before
-        if ((c === -1 || c === 2) && sz <= bodySize - 1 && !headingText(txt) && txt.split(/\s+/).length >= 4) {
-          capBuf = { lines: [txt], c, y, sz, aside: true, lastX1: x1, maxX1: x1 };
+        if (wideLeaf(c) && sz <= bodySize - 1 && !headingText(txt) && txt.split(/\s+/).length >= 4) {
+          capBuf = { lines: [txt], c, y, sz, x0, aside: true, lastX1: x1, maxX1: x1 };
           continue;
         }
         // bold, body-sized, short and numbered (or a standard name): a section heading
@@ -2077,7 +2488,9 @@ const Epubify = (() => {
           (bold && sz >= bodySize - 1.2 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
             ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))) ||
           (standalone && sz >= bodySize - 0.5 && sz < bodySize + 3 && headingText(txt) && (styled || capsHeading(txt))) ||
-          (capsHeading(txt) && NUMBERED.test(txt) && sz >= bodySize - 2.5) ||
+          (capsHeading(txt) && sz >= bodySize - 2.5 && (NUMBERED.test(txt) || (standalone && nWords <= 4 && sz < bodySize + 3))) ||
+          // (a section name in the headings' type, whatever came before: keywords without a full stop)
+          (styled && nWords <= 4 && SECTION.test(txt) && headingText(txt) && sz >= bodySize - 0.5 && sz < bodySize + 3) ||
           // "1.1 Vision for a new publication culture": decimal-numbered, short, on its own
           // (some layouts mark headings by colour only)
           (standalone && /^\d{1,2}\.\d{1,2}(?:\.\d{1,2})*\.?\s+\p{Lu}/u.test(txt) && nWords <= 12 && !endsWithAny(txt, '.:;,') && sz >= bodySize - 0.5 && sz < bodySize + 3)
@@ -2161,6 +2574,16 @@ const Epubify = (() => {
         const tail = indented && prev && prev.c === c && prev.indented && Math.abs(x0 - prev.x0) <= 1.5 && Math.abs(sz - prev.sz) < 0.5 && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && !endsWithAny(prev.txt.trimEnd(), TERMINAL);
         if (tail) startsPara = false;
         if (startsWithAny(txt.trimStart(), ['•', '–', '- ', '* '])) startsPara = true;
+        // (a word broken at the end of the line above goes on here, whatever
+        // the indent: the lines beside a big first letter)
+        if (startsPara && prev && prev.c === c && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && Math.abs(sz - prev.sz) < 0.5 && /\p{Ll}-$/u.test(prev.txt.trimEnd()) && /^\p{Ll}/u.test(txt)) startsPara = false;
+        // a short line standing alone atop a column, after a finished
+        // sentence ("Endpoints", then a gap, then its text): not the end of
+        // the paragraph before
+        if (!startsPara && twoCol && prev && prev.c !== c && endsWithAny(prev.txt.trimEnd(), TERMINAL) && /^\p{Lu}/u.test(txt) && txt.split(/\s+/).length <= 6 && !endsWithAny(txt, TERMINAL + ',')) {
+          const below = ordered.find((o) => o[0] === c && o[1] > y + 1);
+          if (below && below[1] - y > (lineGap.get(c) || sz * 1.4) * 1.4) startsPara = true;
+        }
         if (startsPara) {
           flushPara();
           paraQuote = indented && sz < bodySize - 0.4;
@@ -3805,11 +4228,7 @@ ${manifest.join('\n')}
     }
     if (!src && (source === 'auto' || source === 'pdf') && pdf) {
       src = await fromPdf(pdf.blob, pdf.name, log);
-      if (src.twoCol) {
-        const w = 'Two-column PDF: reading order may be scrambled and equations or tables lost. Reading the PDF directly is often better.';
-        warnings.push(w);
-        log('  ! ' + w);
-      }
+      if (src.twoCol) log('  set in columns: the text is put in reading order, tables and figures kept as pictures');
     }
     if (!src) throw new Error(pdf || source !== 'auto' ? 'No usable source found for this paper.' : 'No HTML version found. Attach the PDF first, then convert from it.');
 

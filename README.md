@@ -184,8 +184,12 @@ when you've never backed up (5+ papers) or the last backup is over 30 days old.
 `epubify.py` can also fetch publisher pages, ar5iv and JavaScript-rendered sites through a headless
 browser. A web app on a phone can only read sites that allow it, so for the rest, save the page in
 Chrome and share the saved file in (see *Web pages* above), or run the script on a computer and share
-the `.epub` into the app. As the script itself warns, two-column PDFs can come out with
-scrambled reading order. That's why the HTML sources are tried first.
+the `.epub` into the app.
+
+PDFs set in columns are laid out page by page: the app finds the white gaps between the columns
+(two, three, or a mix within one paper), reads the blocks in order, and keeps tables and figures as
+pictures. A scanned paper works too, as long as it carries recognised text. Odd layouts can still
+come out wrong, which is why the HTML sources are tried first.
 
 ## Develop
 
