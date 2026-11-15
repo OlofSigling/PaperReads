@@ -357,6 +357,11 @@ main:has(#board) { max-width: none; }
 .r-findbar .find-count { font-size: .8rem; color: var(--muted); white-space: nowrap; min-width: 2.5em; text-align: right; }
 .r-backchip.r-syncchip { left: auto; right: 12px; max-width: calc(100% - 24px); }
 .ref-pop { margin: 0; font-size: .9rem; line-height: 1.5; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
+/* the references of a range citation, "(2–4)": a list to pick from */
+.ref-list { display: flex; flex-direction: column; gap: 8px; max-height: 58vh; overflow: auto; }
+.ref-pick { display: block; width: 100%; text-align: left; font: inherit; font-size: .88rem; line-height: 1.45; color: inherit; background: none; border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 9px 11px; cursor: pointer; overflow-wrap: anywhere; }
+.ref-pick:active { background: rgba(127,127,127,.12); }
+.ref-pick .ref-have { display: block; margin-top: 4px; }
 
 /* sync button */
 .sync-btn { background: none; border: 0; color: inherit; cursor: pointer; line-height: 1; }

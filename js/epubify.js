@@ -3415,6 +3415,7 @@ const Epubify = (() => {
         return inner && ['[', ...inner, ']'];
       });
       // superscripts in the title/author block are affiliations, not citations
+      const supLinked = [];
       const bodyStart = [...root.querySelectorAll('h2, h3, h4')].find((h) => !h.closest('header'));
       for (const sup of root.querySelectorAll('sup')) {
         if (sup.closest('a, .refs, h1, h2, h3, h4, math')) continue;
@@ -3426,21 +3427,30 @@ const Epubify = (() => {
         const inner = linkNums(t, doc);
         if (!inner) continue;
         sup.replaceChildren(...inner);
+        supLinked.push(sup);
         links++;
       }
       // journals that cite in parentheses, "(2)", "(5, 6)", "(3–5)": only when
       // the paper doesn't cite in brackets or superscripts, and not after a
       // word that makes it something else ("Eq. (2)", "Table (1)", "n = (3)")
       if (links - numbered < 3) {
+        const inParens = links;
         const max = Math.max(...byNumber.keys());
         links += replaceInText(root, /\((\d{1,3}(?:\s*[-–,]\s*\d{1,3})*)\)/, (m, doc) => {
           const before = m.input.slice(Math.max(0, m.index - 14), m.index);
-          if (/(?:Eqs?\.?|Equations?|Figs?\.?|Figures?|Tables?|Steps?|Items?|Panels?|Models?)\s*$/i.test(before) || /[=<>±×]\s*$/.test(before) || /\w$/.test(before)) return null;
+          // (as a word: "acceptable (2–4)" doesn't end in "Table")
+          if (/\b(?:Eqs?\.?|Equations?|Figs?\.?|Figures?|Tables?|Steps?|Items?|Panels?|Models?)\s*$/i.test(before) || /[=<>±×]\s*$/.test(before) || /\w$/.test(before)) return null;
           const nums = m[1].match(/\d+/g).map(Number);
           if (nums.some((n) => n < 1 || n > max)) return null;
           const inner = linkNums(m[1], doc);
           return inner && ['(', ...inner, ')'];
         });
+        // (the paper cites in parentheses: its one or two superscript numbers
+        // are units, "10,000/mm³", not citations)
+        if (links - inParens >= 5 && supLinked.length <= 2) {
+          for (const sup of supLinked) sup.textContent = sup.textContent;
+          links -= supLinked.length;
+        }
       }
     }
     // ---- author–year citations: (Amodei, 2024; VandeHei & Allen, 2025)

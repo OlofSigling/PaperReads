@@ -363,6 +363,10 @@ const Lookup = (() => {
       if (merged.length && /(^|[\s,])[A-Z]$/.test(merged.at(-1)) && /^[A-Z](?![\p{L}])/u.test(x)) merged[merged.length - 1] += '. ' + x;
       else merged.push(x);
     }
+    // "Ely EW, Baker AM, et al: Effect on the duration of …" (Critical Care
+    // Medicine's style): the title follows the authors after a colon
+    const afterColon = apa ? null : /^[^:]{3,200}?(?:\bet al\.?|\s\p{Lu}{1,3}):\s+(\S.{14,})$/u.exec(merged[0] || '');
+    if (afterColon) return afterColon[1].replace(/[.,;:]+$/, '').slice(0, 300);
     const venueish = (x) => /^(In|Proc(eedings)?|Advances in|arXiv|CoRR|Journal|J\.|pages?|pp\.|vol(ume)?\.?|doi|https?:|Available|Retrieved)\b/i.test(x) || /^\d/.test(x);
     // references start with the authors (APA's were cut off with the year)
     const rest = apa ? merged : merged.slice(1);

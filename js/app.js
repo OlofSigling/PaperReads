@@ -3736,7 +3736,19 @@
           try {
             cfi = contents.cfiFromNode(target);
           } catch {}
-          if (target.closest('.refs, .ltx_bibliography, .ref-entry, .ltx_bibitem')) showReference(target, cfi, citingSentence(a));
+          if (target.closest(REF_SCOPE)) {
+            // a range, "(2–4)": every reference from the one to the other
+            const range = citedRange(a, contents.document);
+            const cfiOf = (el) => {
+              try {
+                return contents.cfiFromNode(el);
+              } catch {
+                return null;
+              }
+            };
+            if (range) showReferenceList(range, cfiOf, citingSentence(a));
+            else showReference(target, cfi, citingSentence(a));
+          }
           else if (cfi) {
             backBtn.hidden = false;
             go(() => rendition.display(cfi));
@@ -3745,6 +3757,7 @@
         true
       );
     });
+    const REF_SCOPE = '.refs, .ltx_bibliography, .ref-entry, .ltx_bibitem';
     const backBtn = $('#r-back');
     let backTo = null;
     const rememberSpot = () => {
@@ -3784,13 +3797,61 @@
       if (y - x < 60 && k > 0) x = merged[k - 1][0];
       return text.slice(x, y).replace(/\s+/g, ' ').trim().slice(0, 1200);
     }
-    function showReference(target, cfi, context = '') {
+    // A citation of a range, "(2–4)" or "[13–20]", is linked at its two ends
+    // with a dash between them. The references it covers: from the one to the
+    // other in the list's own order (the ones between have no link of their own).
+    function citedRange(a, doc) {
+      const entryOf = (link) => {
+        const href = (link && link.getAttribute('href')) || '';
+        const i = href.indexOf('#');
+        const t = i < 0 ? null : doc.getElementById(decodeURIComponent(href.slice(i + 1)));
+        return t && t.closest(REF_SCOPE) ? t.closest('li, p, .ltx_bibitem') || t : null;
+      };
+      const across = (node, dir) => {
+        const dash = dir < 0 ? node.previousSibling : node.nextSibling;
+        if (!dash || dash.nodeType !== 3 || !/^\s*[-–—−]\s*$/.test(dash.data)) return null;
+        const other = dir < 0 ? dash.previousSibling : dash.nextSibling;
+        return other && other.nodeType === 1 && other.localName === 'a' ? other : null;
+      };
+      const [before, after] = [across(a, -1), across(a, 1)];
+      const [from, to] = before ? [entryOf(before), entryOf(a)] : after ? [entryOf(a), entryOf(after)] : [null, null];
+      if (!from || !to || from === to || from.parentElement !== to.parentElement) return null;
+      const all = [...from.parentElement.children];
+      const [i, j] = [all.indexOf(from), all.indexOf(to)];
+      if (j <= i || j - i > 60) return null;
+      return all.slice(i, j + 1).filter((el) => el.textContent.trim());
+    }
+    function showReferenceList(items, cfiOf, context = '') {
+      const dlg = $('#dialog');
+      const clean = (el) => el.textContent.replace(/\s+/g, ' ').trim();
+      dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${items.length} references</h3>
+        <p class="muted small">This citation covers all of them. Tap one to add it, look it up or go to it.</p>
+        <div class="ref-list">${items.map((el, i) => `<button type="button" class="ref-pick" data-i="${i}"><span>${esc(clean(el))}</span><small class="ref-have" hidden></small></button>`).join('')}</div>
+        <div class="row end"><button value="ok" class="btn primary">Close</button></div></form>`;
+      const again = () => showReferenceList(items, cfiOf, context);
+      $$('.ref-pick', dlg).forEach((b) => b.addEventListener('click', () => showReference(items[+b.dataset.i], cfiOf(items[+b.dataset.i]), context, again)));
+      dlg.onclose = null;
+      if (!dlg.open) dlg.showModal();
+      // which of them are already in the library
+      items.forEach((el, i) =>
+        findInLibrary(el.textContent).then((have) => {
+          const mark = dlg.open && $(`.ref-pick[data-i="${i}"] .ref-have`, dlg);
+          if (!have || !mark) return;
+          mark.hidden = false;
+          mark.textContent = `✓ In your library · ${STATUS[have.status] || ''}`;
+        })
+      );
+    }
+    // (toList: back to the list this reference was picked from, when it was)
+    function showReference(target, cfi, context = '', toList = null) {
       const dlg = $('#dialog');
       const item = target.closest('li, p, .ltx_bibitem') || target;
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>Reference</h3>
         <p class="ref-pop">${esc(item.textContent.replace(/\s+/g, ' ').trim())}</p>
         <p class="ref-have small" id="ref-have" hidden></p>
-        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button type="button" class="btn" id="ref-web">Open on the web ↗</button><button type="button" class="btn" id="ref-pubpeer">PubPeer ↗</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div></form>`;
+        <div class="row end wrap"><button value="add" class="btn">＋ Add to library</button><button type="button" class="btn" id="ref-web">Open on the web ↗</button><button type="button" class="btn" id="ref-pubpeer">PubPeer ↗</button><button value="go" class="btn">Go to reference</button><button value="ok" class="btn primary">Close</button></div>
+        ${toList ? '<div class="row"><button type="button" class="btn" id="ref-list">‹ All in this citation</button></div>' : ''}</form>`;
+      if (toList) $('#ref-list', dlg).addEventListener('click', toList);
       // the paper's own page: from a DOI or link in the reference, else a
       // title search; failing that, a Google Scholar search for it
       // PubPeer for the cited paper: by its DOI if the reference gives one, else its title
@@ -3837,7 +3898,7 @@
           go(() => rendition.display(cfi));
         }
       };
-      dlg.showModal();
+      if (!dlg.open) dlg.showModal();
       // already here? the same DOI, arXiv ID or title as a paper in the library
       findInLibrary(item.textContent).then((have) => {
         const el = $('#ref-have', dlg);
