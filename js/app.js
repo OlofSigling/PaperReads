@@ -1298,18 +1298,61 @@
   async function bundleMenu(all, name) {
     const dlg = $('#dialog');
     dlg.innerHTML = `<form method="dialog" class="dlg"><h3>📦 ${esc(name)}</h3>
-      <div class="row wrap end"><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
+      <div class="row wrap end"><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
     const choice = await new Promise((resolve) => {
       dlg.onclose = () => resolve(dlg.returnValue);
       dlg.showModal();
     });
     const members = all.filter((p) => p.bundle === name).map((p) => p.id);
-    if (choice === 'rename') {
+    if (choice === 'sort-cites') await sortWithin(name, 'citations');
+    else if (choice === 'sort-epub') await sortWithin(name, 'epub');
+    else if (choice === 'rename') {
       const to = await askBundle(all, 'Rename bundle', name);
       if (to && to !== name) await setBundle(members, to);
     } else if (choice === 'undo') await setBundle(members, '');
     else return false;
     return true;
+  }
+
+  // Sort one bundle's papers: by citations (most first) or EPUB first. Only
+  // that bundle's places move; the other bundles keep theirs. The papers found
+  // through a paper in the bundle are sorted under it the same way.
+  async function sortWithin(scope, by) {
+    const all = await papers();
+    const cmp = by === 'citations' ? (a, b) => (b.citations ?? -1) - (a.citations ?? -1) : (a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0);
+    const flat = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9));
+    const slots = flat.map((_, i) => i).filter((i) => bundleOf(all, flat[i]) === scope);
+    const sorted = slots.map((i) => flat[i]).sort(cmp);
+    const next = [...flat];
+    slots.forEach((slot, k) => (next[slot] = sorted[k]));
+    const changes = new Map();
+    const put = (id, field, value) => changes.set(id, { ...(changes.get(id) || {}), [field]: value });
+    next.forEach((p, i) => put(p.id, 'queueOrder', i + 1));
+    const orderKids = (g, p) => {
+      const kids = g.kids(p.id);
+      if (!kids.length) return;
+      if (bundleOf(all, g.root) === scope) kids.sort(cmp).forEach((k, i) => put(k.id, 'subOrder', i + 1));
+      kids.forEach((k) => orderKids(g, k));
+    };
+    queueGroups(all).forEach((g) => orderKids(g, g.root));
+    let moved = 0;
+    for (const [id, fields] of changes) {
+      const p = await DB.get('papers', id);
+      if (!p) continue;
+      let dirty = false;
+      for (const [f, v] of Object.entries(fields)) {
+        if (p[f] !== v) {
+          p[f] = v;
+          dirty = true;
+        }
+      }
+      if (dirty) {
+        moved++;
+        await savePaper(p);
+      }
+    }
+    const what = by === 'citations' ? 'most cited first' : 'EPUBs first';
+    toast(moved ? `“${scope}” sorted: ${what}` : `“${scope}” is already sorted: ${what}`);
   }
 
   // Sort the queue so papers with an EPUB come first, within each bundle and
@@ -1390,7 +1433,7 @@
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Columns are bundles, left to right in priority; cards top to bottom. Drag a card to move it (or into another bundle), or drag a column by its ☰ to reorder the bundles.</p>
         <span class="row"><button class="btn small" id="q-epub">EPUB first</button><button class="btn small" id="q-view">List</button></span></div>
       <div class="board" id="board">${[...cols.entries()].map(([b, ps]) => `<section class="board-col" data-col="${esc(b)}">
-          <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${esc(b)}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span></header>
+          <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${esc(b)}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span>${b ? `<button type="button" class="btn small icon" data-colmenu="${esc(b)}" aria-label="Bundle options" title="Sort or rename this bundle">⋯</button>` : ''}</header>
           <div class="board-body" data-col="${esc(b)}">${ps.map(card).join('')}</div>
         </section>`).join('')}</div>`;
     $('#q-view').addEventListener('click', () => {
@@ -1486,6 +1529,11 @@
       $$('.board-body', board).forEach((x) => x.classList.remove('over'));
       $$('.board-card', board).forEach((x) => x.classList.remove('before'));
     });
+    $$('[data-colmenu]', board).forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        if (await bundleMenu(all, btn.dataset.colmenu)) viewBoard(await papers());
+      })
+    );
   }
 
   // The board as it's now shown becomes the queue: each card's bundle is its
