@@ -316,6 +316,21 @@
     return res;
   }
 
+  // The paper's citation count, kept with it (null when it isn't known)
+  async function refreshCitations(id) {
+    const p = await DB.get('papers', id);
+    if (!p || !p.doi) return null;
+    const got = await Lookup.citations(p.doi).catch(() => null);
+    if (!got) return null;
+    const fresh = await DB.get('papers', id);
+    if (!fresh) return null;
+    fresh.citations = got.count;
+    fresh.citationsFrom = got.source;
+    fresh.citationsAt = now();
+    await savePaper(fresh);
+    return got;
+  }
+
   async function attachEpub(id, file, { cover = null, source = 'Imported', missingFigures = 0 } = {}) {
     await DB.put('epubs', { paperId: id, blob: file, name: file.name || 'paper.epub', size: file.size, cover, source, missingFigures, addedAt: now() });
     const p = await DB.get('papers', id);
@@ -2371,6 +2386,7 @@
         <h2 class="p-title">${esc(p.title)}</h2>
         <p class="p-authors">${esc((p.authors || []).join(', ') || 'Unknown authors')}</p>
         <p class="muted">${[p.year, esc(p.venue)].filter(Boolean).join(' · ')}</p>
+        ${p.citations != null ? `<p class="small muted" title="How many papers cite it">Cited by ${p.citations} (${esc(p.citationsFrom || '')}, ${new Date(p.citationsAt || 0).toLocaleDateString()})</p>` : ''}
         <p class="ids">
           ${p.doi ? `<a href="https://doi.org/${esc(p.doi)}" target="_blank" rel="noopener">DOI: ${esc(p.doi)}</a>` : ''}
           ${p.arxiv ? `<a href="https://arxiv.org/abs/${esc(p.arxiv)}" target="_blank" rel="noopener">arXiv: ${esc(p.arxiv)}</a>` : ''}
@@ -3232,6 +3248,7 @@
       const ctx = viaPaper && q.cites ? citeContextFor(viaPaper.id) : '';
       if (ctx) p.foundContext = ctx;
       await savePaper(p);
+      if (p.doi) refreshCitations(p.id); // (in the background)
       // added from a reference in the paper it was found through: that paper cites it
       if (viaPaper && q.cites) await DB.put('links', { fromId: viaPaper.id, toId: p.id, type: 'cites', createdAt: now() });
       await setStatus(p, f.status.value);
@@ -4937,8 +4954,31 @@
         <h3>App version</h3>
         <p class="muted small"><span id="app-ver">…</span>. Updates arrive in the background and apply the next time the app opens.</p>
         <div class="row"><button type="button" class="btn" id="app-update">Check for updates</button></div>
+      </section>
+      <section class="card stack">
+        <h3>Citation counts</h3>
+        <p class="muted small">Each paper with a DOI gets how many papers cite it (from Crossref, or OpenAlex). New papers get theirs when added; this updates the whole library.</p>
+        <div class="row"><button type="button" class="btn" id="cite-refresh">Update citation counts</button></div>
+        <p class="muted small" id="cite-status"></p>
       </section>`;
 
+    $('#cite-refresh').addEventListener('click', async () => {
+      const btn = $('#cite-refresh');
+      const out = $('#cite-status');
+      const all = (await papers()).filter((p) => p.doi);
+      btn.disabled = true;
+      let done = 0;
+      let missing = 0;
+      for (const p of all) {
+        out.textContent = `Updating ${done + 1} of ${all.length}…`;
+        const got = await refreshCitations(p.id);
+        if (!got) missing++;
+        done++;
+        await new Promise((r) => setTimeout(r, 300)); // (politely: a pause between lookups)
+      }
+      btn.disabled = false;
+      out.textContent = `Updated ${done - missing} of ${all.length} papers${missing ? ` (${missing} not known to Crossref or OpenAlex)` : ''}. ${new Date().toLocaleString()}`;
+    });
     const aiStatus = $('#ai-status');
     $('#ai-form').addEventListener('submit', async (e) => {
       e.preventDefault();

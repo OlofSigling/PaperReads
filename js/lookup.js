@@ -653,5 +653,26 @@ const Lookup = (() => {
     }
   }
 
-  return { parse, doiFromPmc, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
+  // How many papers cite this one: Crossref's count, else OpenAlex's (which
+  // counts more citing papers). Null when neither knows the DOI.
+  async function citations(doi) {
+    if (!doi) return null;
+    try {
+      const res = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}?select=is-referenced-by-count`);
+      if (res.ok) {
+        const n = (await res.json()).message?.['is-referenced-by-count'];
+        if (Number.isInteger(n)) return { count: n, source: 'Crossref' };
+      }
+    } catch {}
+    try {
+      const res = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=cited_by_count`);
+      if (res.ok) {
+        const n = (await res.json()).cited_by_count;
+        if (Number.isInteger(n)) return { count: n, source: 'OpenAlex' };
+      }
+    } catch {}
+    return null;
+  }
+
+  return { parse, doiFromPmc, citations, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
 })();
