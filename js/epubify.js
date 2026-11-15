@@ -330,6 +330,7 @@ const Epubify = (() => {
     // (wasmUrl: decoders for JPEG 2000 figures and ICC colours; without them those images render blank)
     const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), fontExtraProperties: true, isEvalSupported: false, wasmUrl: base + 'vendor/wasm/' }).promise;
     const pages = [];
+    let piOneKeys = false; // the symbol font is used by its keys (see PI_ONE_KEYS)
     for (let n = 1; n <= doc.numPages; n++) {
       if (n === 1 || n % 5 === 0) log(`  reading page ${n} of ${doc.numPages}`);
       const page = await doc.getPage(n);
@@ -341,7 +342,8 @@ const Epubify = (() => {
         if (!(id in fonts)) {
           try {
             const f = page.commonObjs.get(id);
-            fonts[id] = { name: f.name || '', bold: !!f.bold, asc: f.ascent || 0.8, desc: f.descent || -0.2, remap: piGlyphs(f.differences) };
+            const remap = piGlyphs(f.differences);
+            fonts[id] = { name: f.name || '', bold: !!f.bold, asc: f.ascent || 0.8, desc: f.descent || -0.2, remap, piKeys: !remap && /Mathematical\s?Pi-?\s?(One|1)\b/i.test(f.name || '') };
           } catch {
             fonts[id] = { name: '', bold: false, asc: 0.8, desc: -0.2 };
           }
@@ -354,6 +356,13 @@ const Epubify = (() => {
         if (cur && cur.spans.length) lines.push(cur);
         cur = null;
       };
+      // (only once a page shows the font used that way: nothing but those
+      // keys, a digit or comma or full stop among them. A copy of the font
+      // that comes with its own Unicode map gives the symbols themselves.)
+      if (!piOneKeys) {
+        const used = tc.items.filter((it) => it.str && fontInfo(it.fontName).piKeys).flatMap((it) => [...it.str]).filter((ch) => ch.trim());
+        if (used.length && used.every((ch) => ch in PI_ONE_KEYS) && used.some((ch) => /[\d,.]/.test(ch))) piOneKeys = true;
+      }
       for (const it of tc.items) {
         if (it.str === '') {
           if (it.hasEOL) close();
@@ -372,7 +381,7 @@ const Epubify = (() => {
         const up = [tx[2] / ulen, tx[3] / ulen];
         const corners = [0, it.width].flatMap((a) => [f.asc, f.desc].map((h) => [x0 + dir[0] * a + up[0] * h * size, yb + dir[1] * a + up[1] * h * size]));
         const span = {
-          text: f.remap ? [...it.str].map((ch) => f.remap[ch.codePointAt(0)] ?? ch).join('') : it.str,
+          text: f.remap ? [...it.str].map((ch) => f.remap[ch.codePointAt(0)] ?? ch).join('') : f.piKeys && piOneKeys ? [...it.str].map((ch) => PI_ONE_KEYS[ch] ?? ch).join('') : it.str,
           bbox: [Math.min(...corners.map((c) => c[0])), Math.min(...corners.map((c) => c[1])), Math.max(...corners.map((c) => c[0])), Math.max(...corners.map((c) => c[1]))],
           size,
           font: f.name,
@@ -518,17 +527,17 @@ const Epubify = (() => {
         const pts = [[mm[0], mm[1]], [mm[2], mm[1]], [mm[0], mm[3]], [mm[2], mm[3]]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
         const b = [Math.min(...pts.map((p) => p[0])), Math.min(...pts.map((p) => p[1])), Math.max(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[1]))];
         const area = (b[2] - b[0]) * (b[3] - b[1]);
-        if (area > W * H * 0.5) continue; // page background
-        if (b[3] < H * 0.07 || b[1] > H * 0.93) continue; // header/footer bars, logos
-        if (b[3] - b[1] < 3 && b[2] - b[0] > 40) rules.push(b);
-        else {
+        if (b[3] - b[1] >= 3 && !(b[3] < H * 0.07 || b[1] > H * 0.93)) {
           // all the rules of a table drawn as one path (its box is the whole
-          // table): each straight line across is a rule
+          // table, which can fill the page): each straight line across is a rule
           const segs = pathLines(args[1] && args[1][0]).map(([x0, y0, x1, y1]) => [[x0, y0], [x1, y1]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]));
           const flat = segs.filter(([p, q]) => Math.abs(p[1] - q[1]) < 1 && Math.abs(p[0] - q[0]) > 40);
           // (a chart's grid lines are drawn the same way, so the path still counts as drawing)
           if (flat.length >= 2 && flat.length === segs.length) for (const [p, q] of flat) rules.push([Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.max(p[0], q[0]), Math.max(p[1], q[1])]);
         }
+        if (area > W * H * 0.5) continue; // page background
+        if (b[3] < H * 0.07 || b[1] > H * 0.93) continue; // header/footer bars, logos
+        if (b[3] - b[1] < 3 && b[2] - b[0] > 40) rules.push(b);
         if (b[2] - b[0] > W * 0.85 && b[3] - b[1] < 3) continue; // full-width rules
         // a frame (or clipping box) around a figure together with its caption
         // holds lines of running text: it isn't part of the drawing, or the
@@ -1431,7 +1440,14 @@ const Epubify = (() => {
   // Linotype "Mathematical Pi" fonts (APA and other publishers' symbols)
   // name glyphs H<number> and come without a Unicode map, so viewers show
   // "p [ .05" for "p < .05". Their names say which symbol it is.
-  const PI_GLYPHS = { 11001: '+', 11002: '−', 11003: '×', 11004: '÷', 11005: '=', 11021: '<', 11022: '>', 11569: '*' };
+  // (H11006 ±, H11349 ≤ and H11350 ≥ read off a CHEST paper: "mean ± SE", "hemoglobin (≤ 10 g/dL)", "age (≥ 65 years)")
+  // (H20851 [ and H20852 ] off a Critical Care Medicine paper: "5.0 [2.0–13.0]")
+  const PI_GLYPHS = { 9004: 'Δ', 11001: '+', 11002: '−', 11003: '×', 11004: '÷', 11005: '=', 11006: '±', 11011: '∼', 11021: '<', 11022: '>', 11349: '≤', 11350: '≥', 11569: '*', 20851: '[', 20852: ']' };
+  // The same font without glyph names (older PDFs): the text holds the keys
+  // the symbols sit on, so "p , 0.05", "n 5 136" and "38.58 C" mean
+  // "p < 0.05", "n = 136" and "38.5° C". (Read off an AJRCCM paper; the keys
+  // 1 to 6 are the last digit of H11001 to H11006.)
+  const PI_ONE_KEYS = { 1: '+', 2: '−', 3: '×', 4: '÷', 5: '=', 6: '±', ',': '<', '.': '>', '<': '≤', '>': '≥', 8: '°' };
   function piGlyphs(differences) {
     if (!Array.isArray(differences)) return null;
     let map = null;
@@ -2353,28 +2369,73 @@ const Epubify = (() => {
           if (runs[i] || tail) t[5] = false;
         });
       }
-      // Notes in small type at the foot of a column (where the authors work,
-      // "*See also p. 2756") stand between a sentence and its next column:
-      // they wait until the page's text is through, like margin notes.
+      // Notes at the foot of a column (where the authors work, "*See also
+      // p. 2756") stand between a sentence and its next column: they wait
+      // until the page's text is through, like margin notes. They are told
+      // two ways: by their small type, or, where the text itself is set as
+      // small (a Methods section), by the sentence they interrupt.
       if (twoCol && !inRefs) {
         const first = pg === pdf.pages[0];
+        const MARK = /^\s*[*†‡§¶‖#]/;
         leaves.forEach((leaf, c) => {
           if (!leaf.col) return;
           const own = ordered.filter((t) => t[0] === c);
-          // (small against the text above it and the text the next column
-          // goes on with: a Methods section set small all through isn't notes)
           const nextCol = leaves.findIndex((f, j) => j > c && f.col);
-          const goesOn = nextCol < 0 ? null : ordered.find((t) => t[0] === nextCol && t[2].length >= 20);
-          if (!goesOn) return;
-          let k = own.length;
-          while (k > 0 && own[k - 1][3] <= goesOn[3] - 0.8 && !own[k - 1][2].startsWith('\uE000')) k--;
+          if (nextCol < 0 || own.length < 3) return;
+          const lineGaps = (rows) => rows.slice(1).map((t, i) => t[1] - rows[i][1]).filter((g) => g > 0).sort((a, b) => a - b);
+          const setOff = (k, usual) => own[k][1] - own[k - 1][1] >= usual * 1.4;
+          let k = 0;
+          // (1) small against the text above it and the text the next column
+          // goes on with: a Methods section set small all through isn't notes
+          const goesOn = ordered.find((t) => t[0] === nextCol && t[2].length >= 20);
+          if (goesOn) {
+            let j = own.length;
+            while (j > 0 && own[j - 1][3] <= goesOn[3] - 0.8 && !own[j - 1][2].startsWith('')) j--;
+            const g = lineGaps(own.slice(0, j));
+            if (j > 0 && j < own.length && own[j - 1][3] >= Math.max(...own.slice(j).map((t) => t[3])) + 0.8 && setOff(j, g.length ? g[g.length >> 1] : bodySize * 1.2) && (first || MARK.test(own[j][2]))) k = j;
+          }
+          // (2) set off from a sentence left unfinished, which the next
+          // column takes up (it starts in lower case), and marked as a note
+          const takesUp = ordered.find((t) => t[0] === nextCol && !t[2].startsWith(''));
+          if (!k && takesUp && /^\p{Ll}/u.test(takesUp[2].trimStart())) {
+            const g = lineGaps(own);
+            const usual = g.length ? g[g.length >> 1] : bodySize * 1.2;
+            // (at the foot of the column, under a full line of the same text the next column goes on with)
+            for (let j = Math.max(1, Math.ceil(own.length * 0.6)); j < own.length && !k; j++) {
+              const above = own[j - 1];
+              if (!setOff(j, usual) || endsWithAny(above[2].trimEnd(), TERMINAL) || above[2].length < 30 || above[5] || CAPTION.test(above[2]) || Math.abs(above[3] - takesUp[3]) > 0.6) continue;
+              if (MARK.test(own[j][2]) || (first && own[j][3] <= above[3] - 0.4)) k = j;
+            }
+          }
+          // (3) a line or two in bold, set off above and below, in the middle
+          // of a sentence that goes on under it ("For editorial comment see
+          // page 1061" in a box): a notice, not part of the sentence
+          {
+            const g = lineGaps(own);
+            const usual = g.length ? g[g.length >> 1] : bodySize * 1.2;
+            for (let j = 1; j < own.length - 1; j++) {
+              const above = own[j - 1];
+              if (!own[j][5] || above[5] || above[2].length < 30 || !setOff(j, usual) || endsWithAny(above[2].trimEnd(), TERMINAL)) continue;
+              const m = own[j + 1][5] && j + 2 < own.length && !setOff(j + 1, usual) ? j + 1 : j;
+              const after = own[m + 1];
+              // (plain text of one size above and below, the notice no bigger)
+              if (after[5] || Math.abs(after[3] - above[3]) > 0.6 || own[j][3] > above[3] + 1.5) continue;
+              if (after[1] - own[m][1] < usual * 1.4 || !/^\p{Ll}/u.test(after[2].trimStart())) continue;
+              const notice = own.slice(j, m + 1);
+              if (notice.map((t) => t[2]).join(' ').split(/\s+/).length < 3 || notice.some((t) => t[2].startsWith('\uE000') || CAPTION.test(t[2]))) continue;
+              for (const t of notice) {
+                ordered.splice(ordered.indexOf(t), 1);
+                marginRows.push({ txt: t[2], y: t[1], x1: t[6], bold: false, sz: t[3] });
+              }
+              after[9] = true; // (the sentence goes straight on, across the space the notice left)
+              own.splice(j, notice.length);
+              if (k > j) k -= notice.length;
+              break;
+            }
+          }
+          if (!k) return;
           const foot = own.slice(k);
-          if (!foot.length || k === 0 || own[k - 1][3] < Math.max(...foot.map((t) => t[3])) + 0.8) return;
-          const gaps = own.slice(1, k).map((t, i) => t[1] - own[i][1]).filter((g) => g > 0).sort((a, b) => a - b);
-          const usual = gaps.length ? gaps[gaps.length >> 1] : bodySize * 1.2;
-          if (foot[0][1] - own[k - 1][1] < usual * 1.4) return; // (set off from the text above)
           if (foot.some((t) => CAPTION.test(t[2]) || /^\s*(references|bibliography)\s*$/i.test(t[2])) || foot[0][5]) return;
-          if (!first && !/^\s*[*†‡§¶‖#]/.test(foot[0][2])) return;
           for (const t of foot) {
             ordered.splice(ordered.indexOf(t), 1);
             marginRows.push({ txt: t[2], y: t[1], x1: t[6], bold: t[5], sz: t[3] });
@@ -2437,7 +2498,7 @@ const Epubify = (() => {
         const tocish = rest.filter((t) => /\s\d{1,3}$/.test(t[2].trim()) || /^\d{1,2}(\.\d{1,2})*\.?\s+\S/.test(t[2].trim()));
         if (rest.length && tocish.length >= rest.length * 0.6) ordered = [];
       }
-      for (let [c, y, txt, sz, x0, bold, x1, styled, minor] of ordered) {
+      for (let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn] of ordered) {
         if (txt.startsWith('\uE000')) {
           const [n, alt, no, em] = txt.slice(1).split('\uE001');
           flushPara();
@@ -2584,6 +2645,7 @@ const Epubify = (() => {
           const below = ordered.find((o) => o[0] === c && o[1] > y + 1);
           if (below && below[1] - y > (lineGap.get(c) || sz * 1.4) * 1.4) startsPara = true;
         }
+        if (runsOn && paraBuf.length) startsPara = false;
         if (startsPara) {
           flushPara();
           paraQuote = indented && sz < bodySize - 0.4;
