@@ -1290,6 +1290,12 @@
         ${names.length ? `<div class="chips">${names.map((n) => `<button type="button" class="chip" data-pick="${esc(n)}">📦 ${esc(n)}</button>`).join('')}</div>` : ''}
         <div class="row end"><button value="cancel" class="btn" formnovalidate>Cancel</button><button value="ok" class="btn primary">OK</button></div></form>`;
       $$('[data-pick]', dlg).forEach((b) => b.addEventListener('click', () => ($('[name=b]', dlg).value = b.dataset.pick)));
+      // Enter in the name field means OK (the form's first button is Cancel)
+      $('[name=b]', dlg).addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.isComposing) return;
+        e.preventDefault();
+        if ($('[name=b]', dlg).value.trim()) dlg.close('ok');
+      });
       dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('[name=b]', dlg).value.trim() : null);
       dlg.showModal();
     });
@@ -1439,15 +1445,18 @@
       cols.get(b).push(p);
     }
     const card = (p) => `<article class="board-card" draggable="true" data-id="${p.id}">
+        <input type="checkbox" class="q-sel board-sel" data-id="${p.id}" aria-label="Select">
         <a href="#/paper/${p.id}">${esc(p.title)}</a>
         <small class="muted">${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}${p.hasEpub ? ` · ${EPUB_BADGE}` : ''}</small>
       </article>`;
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Columns are bundles, left to right in priority; cards top to bottom. Drag a card to move it (or into another bundle), or drag a column by its ☰ to reorder the bundles.</p>
-        <span class="row"><button class="btn small" id="q-epub">EPUB first</button><button class="btn small" id="q-view">List</button></span></div>
+        <span class="row"><button class="btn small" id="q-epub">EPUB first</button><button class="btn small" id="q-view">List</button><button class="btn small" id="q-select">Select</button></span></div>
       <div class="board" id="board">${[...cols.entries()].map(([b, ps]) => `<section class="board-col" data-col="${esc(b)}">
           <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${esc(b)}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span>${b ? `<button type="button" class="btn small icon" data-colmenu="${esc(b)}" aria-label="Bundle options" title="Sort or rename this bundle">⋯</button>` : ''}</header>
           <div class="board-body" data-col="${esc(b)}">${ps.map(card).join('')}</div>
-        </section>`).join('')}</div>`;
+        </section>`).join('')}</div>
+      <div class="r-selbar q-selbar" id="q-selbar" hidden><span class="small" id="q-selcount">0 selected</span>
+        <button class="btn small primary" id="q-bundle">📦 Bundle</button><button class="btn small" id="q-unbundle">Unbundle</button><button class="r-btn" id="q-selcancel" aria-label="Done">✕</button></div>`;
     $('#q-view').addEventListener('click', () => {
       localStorage.setItem('paperreads.queue-view', 'list');
       viewQueue();
@@ -1546,6 +1555,83 @@
         if (await bundleMenu(all, btn.dataset.colmenu)) viewBoard(await papers());
       })
     );
+
+    // Select cards to bundle them (or take them out of their bundle): the
+    // Select button, a press and hold on a card, or Ctrl/⌘-click on a computer
+    let selecting = false;
+    const selbar = $('#q-selbar');
+    const picked = () => $$('.board-sel:checked', board).map((c) => c.dataset.id);
+    const showCount = () => {
+      $('#q-selcount').textContent = `${picked().length} selected`;
+      $$('.board-card', board).forEach((c) => c.classList.toggle('picked', !!$('.board-sel', c).checked));
+    };
+    const setSelecting = (on) => {
+      selecting = on;
+      board.classList.toggle('selecting', on);
+      selbar.hidden = !on;
+      $('#q-select').textContent = on ? 'Done' : 'Select';
+      if (!on) $$('.board-sel', board).forEach((c) => (c.checked = false));
+      showCount();
+    };
+    const toggle = (c) => {
+      const box = $('.board-sel', c);
+      box.checked = !box.checked;
+      showCount();
+    };
+    $('#q-select').addEventListener('click', () => setSelecting(!selecting));
+    $('#q-selcancel').addEventListener('click', () => setSelecting(false));
+    board.addEventListener('change', (e) => e.target.classList.contains('board-sel') && showCount());
+    let skipTap = false;
+    board.addEventListener(
+      'click',
+      (e) => {
+        const c = e.target.closest('.board-card');
+        if (!c || e.target.closest('.board-sel')) return;
+        if (!selecting && !(e.ctrlKey || e.metaKey)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (skipTap) return void (skipTap = false);
+        if (!selecting) setSelecting(true);
+        toggle(c);
+      },
+      true
+    );
+    let holdT = null;
+    let holdFrom = null;
+    board.addEventListener('pointerdown', (e) => {
+      skipTap = false;
+      clearTimeout(holdT);
+      const c = e.target.closest('.board-card');
+      if (selecting || !c || e.button > 0 || e.target.closest('.board-sel, button')) return;
+      holdFrom = { x: e.clientX, y: e.clientY };
+      holdT = setTimeout(() => {
+        skipTap = true; // (the press's own tap mustn't untick it again)
+        setSelecting(true);
+        toggle(c);
+        if (navigator.vibrate) navigator.vibrate(15);
+      }, 450);
+    });
+    const cancelHold = (e) => {
+      if (holdT && e && holdFrom && e.type === 'pointermove' && Math.hypot(e.clientX - holdFrom.x, e.clientY - holdFrom.y) < 8) return;
+      clearTimeout(holdT);
+      holdT = null;
+    };
+    ['pointermove', 'pointerup', 'pointercancel', 'dragstart'].forEach((t) => board.addEventListener(t, cancelHold));
+    $('#q-bundle').addEventListener('click', async () => {
+      const ids = picked();
+      if (!ids.length) return toast('Select papers first');
+      const name = await askBundle(all, `Bundle ${ids.length} paper${ids.length === 1 ? '' : 's'}`);
+      if (!name) return;
+      await setBundle(ids, name);
+      toast(`Bundled in “${name}”`);
+      viewBoard(await papers());
+    });
+    $('#q-unbundle').addEventListener('click', async () => {
+      const ids = picked();
+      if (!ids.length) return toast('Select papers first');
+      await setBundle(ids, '');
+      viewBoard(await papers());
+    });
   }
 
   // The board as it's now shown becomes the queue: each card's bundle is its

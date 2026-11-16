@@ -217,6 +217,9 @@ details summary { cursor: pointer; color: var(--accent); }
 .board-card.dragging { opacity: .5; }
 .board-card.before { box-shadow: 0 -3px 0 var(--accent); }
 .board-card a { color: var(--text); text-decoration: none; font-weight: 600; display: block; }
+.board.selecting .board-card { position: relative; padding-left: 34px; cursor: pointer; }
+.board.selecting .board-sel { position: absolute; left: 10px; top: 10px; }
+.board-card.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 .board-card small { display: block; margin-top: 2px; }
 .queue li.q-bundle.drop-target { box-shadow: 0 0 0 2px var(--accent); border-radius: 10px; }
 .queue .handle { cursor: grab; touch-action: none; user-select: none; font-size: 1.2rem; color: var(--muted); padding: 8px 4px; }
