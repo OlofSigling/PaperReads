@@ -1276,8 +1276,10 @@ const Epubify = (() => {
         aligned = wide.filter((r) => near.has(Math.round(r.x0 / 3))).length / wide.length;
       }
       // lines of text follow each other closely (a table's row labels stand apart)
-      const close = (r, o) => o && Math.abs(o.yc - r.yc) <= Math.max(r.size, o.size) * 2;
-      const dense = wide.filter((r, i) => close(r, wide[i - 1]) || close(r, wide[i + 1])).length >= wide.length * 0.6;
+      // (a long line has a neighbour close above or below, whatever the short
+      // lines between them: a ragged side column's long lines are apart)
+      const close = (r, o) => o !== r && Math.abs(o.yc - r.yc) <= Math.max(r.size, o.size) * 2;
+      const dense = wide.filter((r) => rows.some((o) => close(r, o))).length >= wide.length * 0.6;
       return { n: touching.length, wide, abut, letters, w, aligned, edge, dense };
     };
     const L = side(-1);
@@ -1352,14 +1354,15 @@ const Epubify = (() => {
   function pageCut(pg, p, accept, bodySize) {
     const { boxes, pics } = p;
     if (!boxes.length) return { leaves: [], gutters: [], rejected: [], boxes };
-    // the tallest first; a band beside an accepted one at the same height is its ragged edge
-    const bands = [...p.bands].sort((a, b) => b.y1 - b.y0 - (a.y1 - a.y0) || b.x1 - b.x0 - (a.x1 - a.x0));
+    // judge every band first; where accepted bands stand over one another
+    // (a gap and a ragged edge beside it), the one with more lines beside it wins
+    const bands = [...p.bands];
+    const rejected = bands.filter((s) => !accept(s));
+    const cands = bands.filter((s) => accept(s)).sort((a, b) => (b.rows ?? 0) - (a.rows ?? 0) || b.y1 - b.y0 - (a.y1 - a.y0) || b.x1 - b.x0 - (a.x1 - a.x0));
     let gutters = [];
-    const rejected = [];
-    for (const s of bands) {
+    for (const s of cands) {
       if (gutters.some((g) => s.x0 < g.x1 + 30 && s.x1 > g.x0 - 30 && Math.min(g.y1, s.y1) - Math.max(g.y0, s.y0) > 0.5 * (s.y1 - s.y0))) continue;
-      if (accept(s)) gutters.push({ ...s });
-      else rejected.push(s);
+      gutters.push({ ...s });
     }
     // a gap runs on while nothing reaches its middle, then is trimmed to
     // where text stands against it; pieces of one gap become one
@@ -2070,6 +2073,9 @@ const Epubify = (() => {
     // A paragraph can run on across a column or page break; anything the page
     // adds at its end (margin notes, boxes, images) waits until it closes.
     const TERMINAL = '.!?:;\u201d"\')]';
+    // a sentence can end in a full stop and citation numbers ("outcome.6", "al.12")
+    const CITED_END = /[\p{L})\]][.!?]\d{1,3}(?:[,\u2013-]\d{1,3})*$/u;
+    const endsSentence = (s) => endsWithAny(s, TERMINAL) || CITED_END.test(dropScripts(s).trimEnd());
     const paraBuf = [];
     let pending = [];
     let paraQuote = false; // the open paragraph is an indented block quote
@@ -2198,11 +2204,18 @@ const Epubify = (() => {
         }
         close();
       }
+      // a narrow column of words beside the body: its own kind of note
+      const sideNote = leaves.map((f) => {
+        if (!f.col || f.x1 - f.x0 >= pg.width * 0.2 || leaves.length < 2) return false;
+        const letters = f.items.reduce((n, it) => n + (it.box ? (it.box.text.match(/\p{L}/gu) || []).length : 0), 0);
+        return letters >= 60;
+      });
       const colOf = (sp) => {
         if (!twoCol) return 0;
         const kind = lineKind.get(sp.line);
         if (kind === 'margin') return -2;
         if (kind === 'box') return -3;
+        if (sideNote[sp.leaf]) return -2;
         return sp.leaf;
       };
       const rows = [];
@@ -2655,7 +2668,7 @@ const Epubify = (() => {
       }
       endCaption();
       // keep an unfinished paragraph open across the page break
-      if (paraBuf.length && endsWithAny(paraBuf.at(-1).trimEnd(), TERMINAL)) flushPara();
+      if (paraBuf.length && endsSentence(paraBuf.at(-1))) flushPara();
       carryLine = prev;
 
       // deferred table rows / boxed prose
