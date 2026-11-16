@@ -1298,13 +1298,14 @@
   async function bundleMenu(all, name) {
     const dlg = $('#dialog');
     dlg.innerHTML = `<form method="dialog" class="dlg"><h3>📦 ${esc(name)}</h3>
-      <div class="row wrap end"><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
+      <div class="row wrap end"><button value="sort-recent" class="btn">Sort by recency</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
     const choice = await new Promise((resolve) => {
       dlg.onclose = () => resolve(dlg.returnValue);
       dlg.showModal();
     });
     const members = all.filter((p) => p.bundle === name).map((p) => p.id);
     if (choice === 'sort-cites') await sortWithin(name, 'citations');
+    else if (choice === 'sort-recent') await sortWithin(name, 'recent');
     else if (choice === 'sort-epub') await sortWithin(name, 'epub');
     else if (choice === 'rename') {
       const to = await askBundle(all, 'Rename bundle', name);
@@ -1314,12 +1315,18 @@
     return true;
   }
 
-  // Sort one bundle's papers: by citations (most first) or EPUB first. Only
+  // Sort one bundle's papers: by recency (newest first), citations (most
+  // first) or EPUB first. Only
   // that bundle's places move; the other bundles keep theirs. The papers found
   // through a paper in the bundle are sorted under it the same way.
   async function sortWithin(scope, by) {
     const all = await papers();
-    const cmp = by === 'citations' ? (a, b) => (b.citations ?? -1) - (a.citations ?? -1) : (a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0);
+    const cmp =
+      by === 'citations'
+        ? (a, b) => (b.citations ?? -1) - (a.citations ?? -1)
+        : by === 'recent'
+          ? (a, b) => (b.year ?? -1) - (a.year ?? -1) // (no year: last)
+          : (a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0);
     const flat = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9));
     const slots = flat.map((_, i) => i).filter((i) => bundleOf(all, flat[i]) === scope);
     const sorted = slots.map((i) => flat[i]).sort(cmp);
@@ -1351,7 +1358,7 @@
         await savePaper(p);
       }
     }
-    const what = by === 'citations' ? 'most cited first' : 'EPUBs first';
+    const what = by === 'citations' ? 'most cited first' : by === 'recent' ? 'newest first' : 'EPUBs first';
     toast(moved ? `“${scope}” sorted: ${what}` : `“${scope}” is already sorted: ${what}`);
   }
 
