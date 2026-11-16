@@ -514,6 +514,7 @@ const Epubify = (() => {
     const stack = [];
     const boxes = [];
     const rules = []; // thin horizontal lines: the rules of a ruled table
+    const frames = []; // big rectangles: a figure's or a table's frame
     for (let i = 0; i < ops.fnArray.length; i++) {
       const fn = ops.fnArray[i];
       const args = ops.argsArray[i];
@@ -531,6 +532,7 @@ const Epubify = (() => {
         const pts = [[mm[0], mm[1]], [mm[2], mm[1]], [mm[0], mm[3]], [mm[2], mm[3]]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
         const b = [Math.min(...pts.map((p) => p[0])), Math.min(...pts.map((p) => p[1])), Math.max(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[1]))];
         const area = (b[2] - b[0]) * (b[3] - b[1]);
+        if (b[2] - b[0] > W * 0.25 && b[3] - b[1] > H * 0.08 && !(b[2] - b[0] > W * 0.97 && b[3] - b[1] > H * 0.97)) frames.push(b);
         if (b[3] - b[1] >= 3 && !(b[3] < H * 0.07 || b[1] > H * 0.93)) {
           // all the rules of a table drawn as one path (its box is the whole
           // table, which can fill the page): each straight line across is a rule
@@ -611,8 +613,70 @@ const Epubify = (() => {
       out.splice(0, out.length, ...out.filter((r) => r.rotate !== rot), box);
     }
     out.push(...ruled);
+    const framed = captionFrames(frames, lines, W, H);
+    if (framed.length) {
+      // a region centred in a frame gives way to it, unless it is the bigger
+      // and holds only a figure's labels outside it (it may hold more of the figure)
+      const prose = (r, f) => lines.some((l) => {
+        const cx = (l.bbox[0] + l.bbox[2]) / 2;
+        const cy = (l.bbox[1] + l.bbox[3]) / 2;
+        const inR = cx > r[0] && cx < r[2] && cy > r[1] && cy < r[3];
+        const inF = cx > f[0] && cx < f[2] && cy > f[1] && cy < f[3];
+        // (the caption under the frame doesn't count)
+        return inR && !inF && cy < f[3] + 4 && l.spans.map((sp) => sp.text).join(' ').trim().split(/\s+/).length >= 6;
+      });
+      const within = (r) => framed.some((f) => (r[0] + r[2]) / 2 > f[0] && (r[0] + r[2]) / 2 < f[2] && (r[1] + r[3]) / 2 > f[1] && (r[1] + r[3]) / 2 < f[3] && (r[2] - r[0] <= (f[2] - f[0]) * 1.1 || prose(r, f)));
+      // A region much taller than the frame (several figures stacked over one
+      // caption) stays, without the caption at its foot; the frame goes
+      for (let i = framed.length - 1; i >= 0; i--) {
+        const f = framed[i];
+        const tall = out.find((r) => (r[0] + r[2]) / 2 > f[0] && (r[0] + r[2]) / 2 < f[2] && r[3] - r[1] > (f[3] - f[1]) * 1.3 && r[1] < f[1] - 10 && r[3] > f[1] && !prose(r, f));
+        if (!tall) continue;
+        if (f.frame && tall[3] > f[3]) tall[3] = Math.max(tall[1] + 20, f[3]);
+        framed.splice(i, 1);
+      }
+      // (and a frame inside a bigger figure region that holds no running text is only part of it)
+      for (let i = framed.length - 1; i >= 0; i--) {
+        const f = framed[i];
+        if (out.some((r) => r[0] <= f[0] + 2 && r[1] <= f[1] + 2 && r[2] >= f[2] - 2 && r[3] >= f[3] - 2 && (r[2] - r[0]) > (f[2] - f[0]) * 1.1 && !prose(r, f))) framed.splice(i, 1);
+      }
+      out.splice(0, out.length, ...framed, ...out.filter((r) => !within(r)));
+    }
     // a region inside another is part of it
     return out.filter((r, i) => !out.some((o, j) => j !== i && o[0] <= r[0] && o[1] <= r[1] && o[2] >= r[2] && o[3] >= r[3] && (o[2] - o[0]) * (o[3] - o[1]) > (r[2] - r[0]) * (r[3] - r[1])));
+  }
+
+  function captionFrames(frames, lines, W, H) {
+    const flat = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01);
+    const text = (l) => ws(l.spans.map((x) => x.text).join('')).trim();
+    const caps = flat.filter((l) => CAPTION.test(text(l)));
+    const out = [];
+    // the biggest frames first (frames nested over one caption: the outer one
+    // holds all of the figure, its labels too)
+    for (const f of [...frames].sort((a, b) => (b[2] - b[0]) * (b[3] - b[1]) - (a[2] - a[0]) * (a[3] - a[1]))) {
+      if (out.some((o) => Math.abs(o.frame[0] - f[0]) < 3 && Math.abs(o.frame[2] - f[2]) < 3 && Math.abs(o.frame[1] - f[1]) < 3)) continue;
+      if (f[0] < -2 || f[2] > W + 2 || f[1] < -2 || f[3] > H + 2) continue; // (a fill running off the page is a chart's, not a frame)
+      // (the caption starts at the frame's left edge, and is no wider than it)
+      const across = (l) => Math.abs(l.bbox[0] - f[0]) < 12 && l.bbox[2] < f[2] + 10;
+      const foot = caps.find((l) => across(l) && l.bbox[1] > f[1] + (f[3] - f[1]) * 0.5 && l.bbox[1] < f[3] + 14);
+      const head = !foot && caps.find((l) => across(l) && l.bbox[1] >= f[1] - 2 && l.bbox[3] < f[1] + (f[3] - f[1]) * 0.25);
+      if (!foot && !head) continue;
+      // (a caption at the head can run on over a few lines)
+      let headEnd = head ? head.bbox[3] : 0;
+      if (head)
+        for (const l of [...flat].sort((a, b) => a.bbox[1] - b.bbox[1])) {
+          if (l.bbox[1] <= head.bbox[1] || Math.abs(l.bbox[0] - head.bbox[0]) > 3 || l.bbox[1] - headEnd > (head.bbox[3] - head.bbox[1]) * 0.8) continue;
+          if (Math.abs((l.spans[0] || {}).size - (head.spans[0] || {}).size) > 0.6) break;
+          headEnd = l.bbox[3];
+        }
+      const box = foot ? [f[0], f[1], f[2], Math.min(f[3], foot.bbox[1] - 2)] : [f[0], headEnd + 2, f[2], f[3]];
+      if (box[3] - box[1] < 40) continue;
+      // (a frame holding a caption and running text beside the figure is a page panel, not the figure)
+      if (out.some((o) => box[0] < o[2] && o[0] < box[2] && box[1] < o[3] && o[1] < box[3])) continue;
+      const r = Object.assign([Math.max(0, box[0]), Math.max(0, box[1]), Math.min(W, box[2]), Math.min(H, box[3])], { vector: true, frame: f });
+      out.push(r);
+    }
+    return out;
   }
 
   // A table set as text between horizontal rules (APA, booktabs) has too
@@ -2326,8 +2390,10 @@ const Epubify = (() => {
       const colOf = (sp) => {
         if (!twoCol) return 0;
         const kind = lineKind.get(sp.line);
-        if (kind === 'margin') return -2;
-        if (kind === 'box') return -3;
+        // (only the part of the line left of the first column: a line can
+        // run on to the next column's text at the same height)
+        if (kind === 'margin' && sp.x1 <= leftEdge + 6) return -2;
+        if (kind === 'box' && sp.x0 < leftEdge - 6) return -3;
         if (sideNote[sp.leaf]) return -2;
         return sp.leaf;
       };
@@ -2852,7 +2918,7 @@ const Epubify = (() => {
           buf = [];
         };
         boxRows.forEach((r, i) => {
-          if (r.bold && r.txt.split(/\s+/).length <= 10) {
+          if (r.bold && r.txt.split(/\s+/).length <= 10 && !CAPTION.test(r.txt)) {
             out();
             emit(`<h4>${escRich(headingCase(r.txt))}</h4>`);
             return;
