@@ -417,7 +417,7 @@ const Epubify = (() => {
       }
       dropTextInside(lines, regions);
       const images = [...raster.filter((b) => !regions.some((r) => b[0] >= r[0] - 2 && b[1] >= r[1] - 2 && b[2] <= r[2] + 2 && b[3] <= r[3] + 2)), ...regions];
-      pages.push({ page, vp, width: vp.width, height: vp.height, lines, images, scan });
+      pages.push({ page, vp, width: vp.width, height: vp.height, lines, images, scan, shades: shadeBoxes(lib, ops, vp) });
     }
     // Scanned pages: the figures and tables are cut out of the scan, each
     // within its own column (a table in the right column ends where that
@@ -439,6 +439,10 @@ const Epubify = (() => {
         dropTextInside(pg.lines, regions);
         pg.images.push(...regions);
       });
+    }
+    if (pages.length > 1) {
+      const cover = pages[0].lines.map((l) => l.spans.map((sp) => sp.text).join('')).join(' ');
+      if (/Disclaimer\s*\/\s*Complaints regulations/i.test(cover) && /Download date/i.test(cover)) pages.shift();
     }
     let meta = { title: '', author: '' };
     try {
@@ -846,6 +850,39 @@ const Epubify = (() => {
       }
     }
     return boxes;
+  }
+
+  // Filled rectangles drawn across much of the page (a shaded box, a panel):
+  // their boxes in page coordinates. A page's background is not one.
+  function shadeBoxes(lib, ops, vp) {
+    const O = lib.OPS;
+    const W = vp.width;
+    const H = vp.height;
+    let ctm = [1, 0, 0, 1, 0, 0];
+    const stack = [];
+    const out = [];
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      const fn = ops.fnArray[i];
+      const args = ops.argsArray[i];
+      if (fn === O.save) stack.push(ctm);
+      else if (fn === O.restore) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      else if (fn === O.transform) ctm = lib.Util.transform(ctm, args);
+      else if (fn === O.paintFormXObjectBegin) {
+        stack.push(ctm);
+        if (args && Array.isArray(args[0]) && args[0].length === 6) ctm = lib.Util.transform(ctm, args[0]);
+      } else if (fn === O.paintFormXObjectEnd) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      else if (fn === O.constructPath && args) {
+        const mm = args[args.length - 1];
+        if (!mm || mm.length !== 4 || !isFinite(mm[0])) continue;
+        const m = lib.Util.transform(vp.transform, ctm);
+        const pts = [[mm[0], mm[1]], [mm[2], mm[3]]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+        const b = [Math.min(pts[0][0], pts[1][0]), Math.min(pts[0][1], pts[1][1]), Math.max(pts[0][0], pts[1][0]), Math.max(pts[0][1], pts[1][1])];
+        const w = b[2] - b[0];
+        const h = b[3] - b[1];
+        if (w > W * 0.4 && h > H * 0.03 && w * h < W * H * 0.5) out.push(b);
+      }
+    }
+    return out;
   }
 
   // Which "Figure N" caption on this page belongs to an image? The nearest
@@ -1311,8 +1348,65 @@ const Epubify = (() => {
   // tall; one standing where the paper's columns are parted on other pages
   // (or elsewhere on this one) can be a few lines short: a caption or a
   // table's notes set in the page's columns.
+  // A shaded box above (or below) all the page's other text, with columns of
+  // its own: its text is laid out apart, and set before (or after) the page.
+  function splitShades(pg, bodySize) {
+    if (!pg.shades || !pg.shades.length || pg.lines.length < 5) return { page: pg, sub: null };
+    for (const s of pg.shades) {
+      const inside = pg.lines.filter((l) => {
+        const cx = (l.bbox[0] + l.bbox[2]) / 2;
+        const cy = (l.bbox[1] + l.bbox[3]) / 2;
+        return cx > s[0] && cx < s[2] && cy > s[1] && cy < s[3];
+      });
+      if (inside.length < 4) continue;
+      // a figure's caption lies within the figure's frame: that is not a box
+      if (inside.some((l) => /^\s*(fig(ure)?s?\.?|table)\s*[A-Z]?\d+/i.test(l.spans.map((sp) => sp.text).join('')))) continue;
+      // running text, not a chart's labels: most of its lines are sentences
+      const words = inside.map((l) => l.spans.map((sp) => sp.text).join(' ').trim().split(/\s+/).length);
+      if (words.filter((n) => n >= 6).length < 8 || words.reduce((x, y) => x + y, 0) / words.length < 5) continue;
+      const rest = pg.lines.filter((l) => !inside.includes(l));
+      if (!rest.length) continue;
+      // a column of text beside the box (not the box's own width): the box is a sidebar, not a band
+      // (runs of words on one line, as wide as a column's lines are)
+      const beside = rest.flatMap((l) => l.spans.map((sp) => sp.bbox)).filter((b) => (b[2] <= s[0] || b[0] >= s[2]) && b[3] > s[1] && b[1] < s[3]).sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+      const runs = [];
+      for (const b of beside) {
+        const last = runs.at(-1);
+        if (last && Math.abs((last[1] + last[3]) / 2 - (b[1] + b[3]) / 2) < 2 && b[0] - last[2] <= 6) {
+          last[2] = Math.max(last[2], b[2]);
+          last[1] = Math.min(last[1], b[1]);
+          last[3] = Math.max(last[3], b[3]);
+        } else runs.push([...b]);
+      }
+      if (runs.filter((r) => r[2] - r[0] > pg.width * 0.2).length >= 3) continue;
+      // (the text it stands over or under: what lies beside it, a margin, doesn't
+      // count; nor does the running head or foot. Text across the box's own
+      // height means it isn't a box above or below the text)
+      // (by pieces of text: a line can run from the running head to the foot)
+      const across = rest.flatMap((l) => l.spans.map((sp) => sp.bbox)).filter((b) => b[2] > s[0] && b[0] < s[2]);
+      const tol = bodySize;
+      const crossing = across.some((b) => b[3] > s[1] + tol && b[1] < s[3] - tol);
+      const bodyAbove = across.some((b) => b[3] <= s[1] + tol && b[1] > pg.height * 0.1);
+      const bodyBelow = across.some((b) => b[1] >= s[3] - tol && b[3] < pg.height * 0.9);
+      if (crossing) continue;
+      const above = bodyBelow && !bodyAbove;
+      const below = bodyAbove && !bodyBelow;
+      if (!above && !below) continue;
+      const subPage = { width: pg.width, height: pg.height, lines: inside, images: [] };
+      const L = pageCut(subPage, pageBands(subPage, bodySize), (b) => b.ok && b.rows >= 3, bodySize);
+      if (!L.gutters.length) continue;
+      return {
+        page: { ...pg, lines: rest },
+        sub: { leaves: L.leaves.map((f) => ({ ...f, shade: above })), gutters: L.gutters, rejected: L.rejected, above },
+      };
+    }
+    return { page: pg, sub: null };
+  }
+
   function docLayout(pages, bodySize) {
-    const per = pages.map((pg) => pageBands(pg, bodySize));
+    const splits = pages.map((pg) => splitShades(pg, bodySize));
+    const bodyPages = splits.map((x) => x.page);
+    const per = bodyPages.map((pg) => pageBands(pg, bodySize));
     const strict = (b) => b.ok && b.y1 - b.y0 >= bodySize * LAYOUT.strictRun && b.rows >= LAYOUT.strictRows;
     const grid = [];
     for (const p of per) for (const b of p.bands) if (strict(b)) grid.push(b);
@@ -1332,7 +1426,25 @@ const Epubify = (() => {
         const known = grid.filter((g) => !p.bands.includes(g) && g.x > b.x0 && g.x < b.x1).map((g) => g.x).sort((x, y) => x - y);
         if (known.length >= 2) Object.assign(b, { x: known[known.length >> 1], known: true });
       }
-      return pageCut(pages[i], p, (b) => strict(b) || short(b) || b.known, bodySize);
+      return pageCut(bodyPages[i], p, (b) => strict(b) || short(b) || b.known, bodySize);
+    });
+    return out.map((L, i) => {
+      const sub = splits[i].sub;
+      let leaves = sub ? (sub.above ? [...sub.leaves, ...L.leaves] : [...L.leaves, ...sub.leaves]) : L.leaves;
+      // a full-width block at the top of the page (a title, above the columns) is read first
+      const cols = leaves.filter((f) => f.col);
+      if (cols.length) {
+        const top = Math.min(...cols.map((f) => f.y0));
+        const head = leaves.filter((f) => !f.col && f.y0 <= top + 2 && f.y0 > pages[i].height * 0.06).sort((a, b) => a.y0 - b.y0);
+        leaves = [...head, ...leaves.filter((f) => !head.includes(f))];
+      }
+      if (!sub) return leaves === L.leaves ? L : { ...L, leaves };
+      return {
+        ...L,
+        leaves,
+        gutters: [...L.gutters, ...sub.gutters],
+        rejected: [...L.rejected, ...sub.rejected],
+      };
     });
     // the opening page starts with its title, wherever the page puts the
     // authors (a column of names and addresses to the left of it, say)
@@ -1596,6 +1708,7 @@ const Epubify = (() => {
       if (a && b && hyphenVocab.has(`${a}-${b}`.toLowerCase())) out += ln;
       else if (out.endsWith('-') && out.length > 1 && /\p{L}/u.test(out.at(-2)) && /^\p{Ll}/u.test(ln)) out = out.slice(0, -1) + ln;
       else if (out.endsWith('-') && /\d/.test(out.at(-2) || '') && /^\p{L}/u.test(ln)) out += ln; // "152-" + "layer"
+      else if (out.endsWith('-') && /\p{L}$/u.test(out.slice(0, -1)) && /^\p{Lu}/u.test(ln)) out += ln; // "Paris-" + "Sud": a compound
       else out = out ? out + ' ' + ln : ln;
     }
     return ws(out).trim();
@@ -2051,7 +2164,7 @@ const Epubify = (() => {
     // (a footer row can pick up the page number beside it: "… | doi … 7")
     let inRefs = false; // past the References heading (across pages)
     const repeated = { has: (t) => repeatedKeys.has(edgeKey(t)) || repeatedKeys.has(edgeKey(t.replace(/^\s*[\divxlc]{1,4}\s+|\s+[\divxlc]{1,4}\s*$/gi, ''))) };
-    const parts = [];
+    let parts = [];
     let title = null;
 
     const rowText = (row) => {
@@ -2511,7 +2624,8 @@ const Epubify = (() => {
         const tocish = rest.filter((t) => /\s\d{1,3}$/.test(t[2].trim()) || /^\d{1,2}(\.\d{1,2})*\.?\s+\S/.test(t[2].trim()));
         if (rest.length && tocish.length >= rest.length * 0.6) ordered = [];
       }
-      for (let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn] of ordered) {
+      const emitRows = (list) => {
+      for (let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn] of list) {
         if (txt.startsWith('\uE000')) {
           const [n, alt, no, em] = txt.slice(1).split('\uE001');
           flushPara();
@@ -2666,6 +2780,32 @@ const Epubify = (() => {
         paraBuf.push(txt);
         prev = { c, y, sz, x1, txt, x0, indented, indent: x0 - (x ?? x0) };
       }
+      };
+      // A shaded box at the top of the page, with a paragraph still open from the
+      // page before: the paragraph goes on under the box, so the box is set aside
+      // and comes once that paragraph has closed (as margin notes do).
+      const boxIdx = new Set(leaves.map((f, k) => (f.shade ? k : -1)).filter((k) => k >= 0));
+      if (boxIdx.size && paraBuf.length && ordered.some((t) => boxIdx.has(t[0]))) {
+        const carried = paraBuf.splice(0);
+        const carriedQuote = paraQuote;
+        const carriedPrev = prev;
+        const realParts = parts;
+        const realPending = pending;
+        parts = [];
+        pending = [];
+        prev = null;
+        emitRows(ordered.filter((t) => boxIdx.has(t[0])));
+        endCaption();
+        flushPara();
+        const boxHtml = parts;
+        parts = realParts;
+        pending = realPending;
+        pending.push(...boxHtml);
+        paraBuf.push(...carried);
+        paraQuote = carriedQuote;
+        prev = carriedPrev;
+        emitRows(ordered.filter((t) => !boxIdx.has(t[0])));
+      } else emitRows(ordered);
       endCaption();
       // keep an unfinished paragraph open across the page break
       if (paraBuf.length && endsSentence(paraBuf.at(-1))) flushPara();
@@ -2732,7 +2872,7 @@ const Epubify = (() => {
           buf = [];
         };
         for (const r of marginRows) {
-          if (lastY !== null && r.y - lastY > r.sz * 2) out();
+          if (lastY !== null && r.y - lastY > r.sz * 1.6) out();
           buf.push(r.txt);
           lastY = r.y;
         }
