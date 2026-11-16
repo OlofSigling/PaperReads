@@ -1298,7 +1298,7 @@
   async function bundleMenu(all, name) {
     const dlg = $('#dialog');
     dlg.innerHTML = `<form method="dialog" class="dlg"><h3>📦 ${esc(name)}</h3>
-      <div class="row wrap end"><button value="sort-recent" class="btn">Sort by recency</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
+      <div class="row wrap end"><button value="sort-recent" class="btn">Sort by recency</button><button value="sort-perYear" class="btn">Sort by citations per year</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
     const choice = await new Promise((resolve) => {
       dlg.onclose = () => resolve(dlg.returnValue);
       dlg.showModal();
@@ -1306,6 +1306,7 @@
     const members = all.filter((p) => p.bundle === name).map((p) => p.id);
     if (choice === 'sort-cites') await sortWithin(name, 'citations');
     else if (choice === 'sort-recent') await sortWithin(name, 'recent');
+    else if (choice === 'sort-perYear') await sortWithin(name, 'perYear');
     else if (choice === 'sort-epub') await sortWithin(name, 'epub');
     else if (choice === 'rename') {
       const to = await askBundle(all, 'Rename bundle', name);
@@ -1316,15 +1317,19 @@
   }
 
   // Sort one bundle's papers: by recency (newest first), citations (most
-  // first) or EPUB first. Only
+  // first), citations per year or EPUB first. Only
   // that bundle's places move; the other bundles keep theirs. The papers found
   // through a paper in the bundle are sorted under it the same way.
   async function sortWithin(scope, by) {
     const all = await papers();
+    // citations per year: citations ÷ (years since publication + 1)
+    const perYear = (p) => (p.citations == null || p.year == null ? -1 : p.citations / (Math.max(0, new Date().getFullYear() - p.year) + 1));
     const cmp =
       by === 'citations'
         ? (a, b) => (b.citations ?? -1) - (a.citations ?? -1)
-        : by === 'recent'
+        : by === 'perYear'
+          ? (a, b) => perYear(b) - perYear(a)
+          : by === 'recent'
           ? (a, b) => (b.year ?? -1) - (a.year ?? -1) // (no year: last)
           : (a, b) => (b.hasEpub ? 1 : 0) - (a.hasEpub ? 1 : 0);
     const flat = all.filter((p) => p.status === 'want').sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9));
@@ -1358,7 +1363,7 @@
         await savePaper(p);
       }
     }
-    const what = by === 'citations' ? 'most cited first' : by === 'recent' ? 'newest first' : 'EPUBs first';
+    const what = by === 'citations' ? 'most cited first' : by === 'perYear' ? 'most cited per year first' : by === 'recent' ? 'newest first' : 'EPUBs first';
     toast(moved ? `“${scope}” sorted: ${what}` : `“${scope}” is already sorted: ${what}`);
   }
 
