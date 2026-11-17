@@ -1642,6 +1642,8 @@ const Epubify = (() => {
   }
 
   function fixGlyphs(text, font) {
+    // (a lone "d", "l" or "n" in a Math Pi or Dingbats font is its bullet: AJRCCM's lists)
+    if (font && /MPi\d|MathPi|Dingbat|ZapfD/i.test(font) && /^\s*[dln]\s*$/.test(text)) return text.replace(/[dln]/, '•');
     if (font && font.includes('CMEX') && text.trim() === 'c') return '';
     let out = '';
     for (const ch of text) {
@@ -2822,12 +2824,15 @@ const Epubify = (() => {
           (moved ? Math.abs(x0 - x - prev.indent) <= 1.5 : Math.abs(x0 - prev.x0) <= 1.5 && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6);
         // (prose only: indented table rows stay one per line)
         const prose = (txt.match(/\p{L}{2,}/gu) || []).length >= 4 && (txt.match(/\d/g) || []).length < txt.length * 0.15;
-        if (indented && sameIndent && prose) startsPara = false;
+        // (but a bulleted item ends at a finished sentence followed by extra space)
+        const itemEnds = paraBuf.length && /^\s*•/.test(paraBuf[0]) && prev && endsWithAny(prev.txt.trimEnd(), TERMINAL) && y - prev.y > (lineGap.get(c) || sz * 1.4) * 1.15;
+        if (indented && sameIndent && prose && !itemEnds) startsPara = false;
         // the short last line of an indented paragraph ("like him.") continues
         // the line above when that one didn't end a sentence
         const tail = indented && prev && prev.c === c && prev.indented && Math.abs(x0 - prev.x0) <= 1.5 && Math.abs(sz - prev.sz) < 0.5 && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && !endsWithAny(prev.txt.trimEnd(), TERMINAL);
         if (tail) startsPara = false;
         if (startsWithAny(txt.trimStart(), ['•', '–', '- ', '* '])) startsPara = true;
+        else if (startsPara && paraBuf.length && /^\s*•/.test(paraBuf[0]) && prev && prev.c === c && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && Math.abs(sz - prev.sz) < 0.5 && x !== undefined && x0 > x + 3 && !(endsWithAny(prev.txt.trimEnd(), TERMINAL) && y - prev.y > (lineGap.get(c) || sz * 1.4) * 1.15)) startsPara = false;
         // (a word broken at the end of the line above goes on here, whatever
         // the indent: the lines beside a big first letter)
         if (startsPara && prev && prev.c === c && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && Math.abs(sz - prev.sz) < 0.5 && /\p{Ll}-$/u.test(prev.txt.trimEnd()) && /^\p{Ll}/u.test(txt)) startsPara = false;
@@ -3635,7 +3640,8 @@ const Epubify = (() => {
       });
       // superscripts in the title/author block are affiliations, not citations
       const supLinked = [];
-      const bodyStart = [...root.querySelectorAll('h2, h3, h4')].find((h) => !h.closest('header'));
+      const heads = [...root.querySelectorAll('h2, h3, h4')].filter((h) => !h.closest('header'));
+      const bodyStart = heads.find((h) => /^\s*(\d+\.?\s*)?(abstract|summary|introduction|background|methods?|rationale|objectives?)\b/i.test(h.textContent)) || heads[0];
       for (const sup of root.querySelectorAll('sup')) {
         if (sup.closest('a, .refs, h1, h2, h3, h4, math')) continue;
         if (bodyStart && sup.compareDocumentPosition(bodyStart) & Node.DOCUMENT_POSITION_FOLLOWING) continue;
