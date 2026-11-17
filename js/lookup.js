@@ -234,11 +234,25 @@ const Lookup = (() => {
     };
   }
 
+  // Crossref (behind doi.org) turns away bursts of requests ("429 Too Many
+  // Requests"), which isn't "no such DOI": wait and ask again, then ask
+  // OpenAlex, which knows the same papers.
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
   async function byDoi(doi) {
-    const res = await fetch(`https://doi.org/${encodeURIComponent(doi).replace(/%2F/g, '/')}`, {
-      headers: { Accept: 'application/vnd.citationstyles.csl+json' },
-    });
-    if (!res.ok) throw new Error(`DOI lookup failed (${res.status})`);
+    const url = `https://doi.org/${encodeURIComponent(doi).replace(/%2F/g, '/')}`;
+    let res = null;
+    for (let i = 0; i < 3; i++) {
+      res = await fetch(url, { headers: { Accept: 'application/vnd.citationstyles.csl+json' } }).catch(() => null);
+      if (res && res.ok) break;
+      if (res && res.status !== 429 && res.status < 500) break; // (a real answer: no such DOI)
+      const wait = res && Number(res.headers.get('Retry-After'));
+      await pause(wait > 0 && wait < 10 ? wait * 1000 : 1200 * (i + 1));
+    }
+    if (!res || !res.ok) {
+      const alt = await openAlexByDoi(doi).catch(() => null);
+      if (alt) return alt;
+      throw new Error(`DOI lookup failed (${res ? res.status : 'offline'})`);
+    }
     const csl = await res.json();
     // A DOI for part of a paper (abstract, figure): use the paper's DOI instead.
     const parent = doi.replace(/\.[^./]+$/, '');
@@ -248,6 +262,34 @@ const Lookup = (() => {
       } catch {}
     }
     return fromCsl(csl);
+  }
+
+  // A DOI's paper from OpenAlex (when Crossref is busy, or doesn't know it)
+  async function openAlexByDoi(doi) {
+    const res = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=doi,title,publication_year,authorships,primary_location,abstract_inverted_index,biblio`);
+    if (!res.ok) return null;
+    const w = await res.json();
+    if (!w || !w.title) return null;
+    const words = (a) => {
+      if (!a) return '';
+      const out = [];
+      for (const [t, ps] of Object.entries(a)) for (const i of ps) out[i] = t;
+      return out.filter(Boolean).join(' ');
+    };
+    const loc = w.primary_location || {};
+    const bib = w.biblio || {};
+    const first = parseInt(bib.first_page, 10);
+    const last = parseInt(bib.last_page, 10);
+    return {
+      title: stripTags(w.title),
+      authors: (w.authorships || []).map((x) => x.author && x.author.display_name).filter(Boolean),
+      year: w.publication_year || null,
+      venue: (loc.source && loc.source.display_name) || '',
+      abstract: words(w.abstract_inverted_index),
+      doi,
+      url: loc.landing_page_url || `https://doi.org/${doi}`,
+      totalPages: first && last && last >= first ? last - first + 1 : null,
+    };
   }
 
   // OpenAlex by title: it also lists papers Crossref doesn't have, such as
