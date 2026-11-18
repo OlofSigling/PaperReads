@@ -3989,7 +3989,7 @@
         const text = item.textContent.replace(/\s+/g, ' ').trim();
         const win = window.open('about:blank', '_blank'); // now, while it's a tap (a popup opened after the wait is blocked)
         const ids = Lookup.parse(text);
-        if (ids.pmc) ids.doi = (await Lookup.doiFromPmc(ids.pmc)) || ids.doi;
+        if (ids.pmc && !ids.doi) ids.doi = await Lookup.doiFromPmc(ids.pmc);
         const url = pubpeerUrl({ doi: ids.arxiv ? null : ids.doi, arxiv: ids.arxiv, title: Lookup.refTitle(text) });
         if (win && !win.closed) win.location.href = url;
         else window.open(url, '_blank', 'noopener');
@@ -4002,7 +4002,7 @@
         let url = null;
         try {
           const ids = Lookup.parse(text);
-          if (ids.pmc) ids.doi = (await Lookup.doiFromPmc(ids.pmc)) || ids.doi;
+          if (ids.pmc && !ids.doi) ids.doi = await Lookup.doiFromPmc(ids.pmc);
           if (ids.arxiv) url = `https://arxiv.org/abs/${ids.arxiv}`;
           else if (ids.doi) url = `https://doi.org/${ids.doi}`;
           else if (ids.url) url = ids.url;
@@ -4042,7 +4042,7 @@
       const text = raw.replace(/\s+/g, ' ').trim().replace(/^\[?\d+[\].]?\s*/, '');
       const ids = Lookup.parse(text);
       let doi = ids.doi;
-      if (ids.pmc) doi = (await Lookup.doiFromPmc(ids.pmc).catch(() => null)) || doi;
+      if (ids.pmc && !doi) doi = await Lookup.doiFromPmc(ids.pmc).catch(() => null);
       const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const title = norm(Lookup.refTitle(text));
       const all = await papers();

@@ -130,11 +130,19 @@ const Lookup = (() => {
       if (ids.pmc) pmc = pmc || ids.pmc;
       if (/pubmed|^PMID/i.test(t)) pubmed = pubmed || t;
     }
-    // a PubMed Central link or number (PMC6650473): its DOI from Europe PMC
-    if (pmc) doi = (await doiFromPmc(pmc)) || doi;
+    // a PubMed Central link or number (PMC6650473) without a DOI: its DOI from Europe PMC
+    if (pmc && !doi) doi = await doiFromPmc(pmc);
     if (!doi && pubmed) doi = await doiFromPubmed(pubmed).catch(() => null);
     let meta = null;
     if (doi) meta = await byDoi(doi).catch(() => null);
+    // (the DOI as written didn't resolve: the PMC record's DOI, if it differs)
+    if (!meta && pmc) {
+      const alt = await doiFromPmc(pmc);
+      if (alt && alt !== doi) {
+        doi = alt;
+        meta = await byDoi(doi).catch(() => null);
+      }
+    }
     if (!meta && pubmed) meta = await pubmedMeta(pubmed).catch(() => null);
     if (!meta && arxiv) meta = await byDoi(`10.48550/arXiv.${arxiv}`).catch(() => null);
     if (!meta || !meta.title) return null;
@@ -188,9 +196,10 @@ const Lookup = (() => {
   }
 
   // The DOI of a PubMed Central article, from Europe PMC (null if none)
+  // (Europe PMC can take most of a minute to answer: give up after 8 s)
   async function doiFromPmc(pmc) {
     try {
-      const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=PMCID:PMC${pmc}&format=json&resultType=lite`);
+      const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=PMCID:PMC${pmc}&format=json&resultType=lite`, { signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined });
       if (!res.ok) return null;
       const json = await res.json();
       const hit = json.resultList && json.resultList.result && json.resultList.result[0];
@@ -502,10 +511,19 @@ const Lookup = (() => {
   // Resolve whatever the user pasted/shared into metadata.
   async function resolve(input) {
     const ids = parse(input);
-    if (ids.pmc) ids.doi = (await doiFromPmc(ids.pmc)) || ids.doi;
+    // (a DOI in the text is used as it is: Europe PMC only for a PMC number without one, or a DOI that doesn't resolve)
+    if (ids.pmc && !ids.doi) ids.doi = await doiFromPmc(ids.pmc);
     if (!ids.doi && ids.url) ids.doi = await doiFromPubmed(ids.url).catch(() => null);
     if (ids.doi) {
-      const meta = await byDoi(ids.doi);
+      let meta;
+      try {
+        meta = await byDoi(ids.doi);
+      } catch (err) {
+        const alt = ids.pmc ? await doiFromPmc(ids.pmc) : null;
+        if (!alt || alt === ids.doi) throw err;
+        ids.doi = alt;
+        meta = await byDoi(alt);
+      }
       if (ids.arxiv) {
         meta.arxiv = ids.arxiv;
         meta.url = `https://arxiv.org/abs/${ids.arxiv}`;
