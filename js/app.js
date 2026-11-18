@@ -4714,7 +4714,23 @@
       const hls = (await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi);
       const order = (h) => (locationsReady ? book.locations.percentageFromCfi(h.cfi) : h.createdAt);
       hls.sort((a, b) => order(a) - order(b));
+      // the article itself: its DOI and links, to copy, share or open
+      const art = await DB.get('papers', id);
+      const doiUrl = art.doi ? `https://doi.org/${art.doi}` : '';
+      const arxivUrl = art.arxiv ? `https://arxiv.org/abs/${art.arxiv}` : '';
+      const pageUrl = art.url && art.url !== doiUrl && art.url !== arxivUrl ? art.url : '';
+      const best = doiUrl || arxivUrl || pageUrl;
+      const meta = [authorsShort(art.authors), art.year, art.venue].filter(Boolean).map(esc).join(' · ');
+      const info =
+        `<div class="r-article"><b>${esc(art.title)}</b>${meta ? `<small class="muted">${meta}</small>` : ''}` +
+        (art.doi ? `<div class="r-art-row"><span class="muted small">DOI</span> <a href="${esc(doiUrl)}" target="_blank" rel="noopener" class="r-art-link">${esc(art.doi)}</a> <button type="button" class="btn small" data-copy="${esc(art.doi)}">Copy</button></div>` : '') +
+        (art.arxiv ? `<div class="r-art-row"><span class="muted small">arXiv</span> <a href="${esc(arxivUrl)}" target="_blank" rel="noopener" class="r-art-link">${esc(art.arxiv)}</a> <button type="button" class="btn small" data-copy="${esc(art.arxiv)}">Copy</button></div>` : '') +
+        (pageUrl ? `<div class="r-art-row"><span class="muted small">Link</span> <a href="${esc(pageUrl)}" target="_blank" rel="noopener" class="r-art-link">${esc(pageUrl.replace(/^https?:\/\/(www\.)?/, '').slice(0, 48))}</a></div>` : '') +
+        (best ? `<div class="row wrap"><button type="button" class="btn small" data-copy="${esc(best)}">Copy link</button>${navigator.share ? '<button type="button" class="btn small" id="r-art-share">Share</button>' : ''}<a class="btn small" href="#/paper/${id}">Paper page</a></div>` : `<p class="muted small">No DOI or link stored. <a href="#/paper/${id}">Add one on the paper page</a>.</p>`) +
+        '</div>';
       tocPanel.innerHTML =
+        '<h4>Article</h4>' +
+        info +
         '<h4>Contents</h4>' +
         (tocHtml || '<p class="muted small">No contents</p>') +
         `<h4>Highlights (${hls.length})</h4>` +
@@ -4727,6 +4743,17 @@
           go(() => rendition.display(a.dataset.href));
         })
       );
+      $$('[data-copy]', tocPanel).forEach((b) =>
+        b.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(b.dataset.copy);
+            toast('Copied');
+          } catch {
+            prompt('Copy:', b.dataset.copy);
+          }
+        })
+      );
+      $('#r-art-share', tocPanel)?.addEventListener('click', () => navigator.share({ title: art.title, url: best }).catch(() => {}));
     }
     book.loaded.navigation.then((nav) => {
       const items = (list, depth) =>
