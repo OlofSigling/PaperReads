@@ -2518,7 +2518,27 @@ const Epubify = (() => {
           });
         };
         // (a bold line a size below the body that reads like words is a subheading, not a label)
-        const subhead = row.every((z) => z.bold || !z.text.trim()) && sz >= bodySize - 1.2 && /^\p{Lu}/u.test(txt) && txt.split(/\s+/).length >= 2 && letters > txt.replace(/\s/g, '').length * 0.8;
+        const allBold = row.every((z) => z.bold || !z.text.trim());
+        const wordy = /^\p{Lu}/u.test(txt) && letters > txt.replace(/\s/g, '').length * 0.8;
+        // (and a short bold line, even one word or in smaller type, right above a
+        // paragraph that starts at its left edge heads that paragraph: "Patients",
+        // "Funding" over the back matter's small print)
+        // (words of one line of text, not cells of a table row: no wide gaps)
+        const solid = (r) => {
+          const xs = r.filter((z) => z.text.trim()).sort((a, b) => a.x0 - b.x0);
+          return xs.every((z, i) => !i || z.x0 - xs[i - 1].x1 < z.size * 1.5);
+        };
+        const headsText = () => {
+          const x0 = Math.min(...row.map((z) => z.x0));
+          if (!solid(row)) return false;
+          return rows.some((o) => {
+            if (!o.length || o === row || o.col !== rowCol || !(o[0].y > row[0].y) || o[0].y - row[0].y > Math.max(sz, o[0].size) * 2.2) return false;
+            if (Math.max(...o.map((z) => z.size)) < row[0].size - 0.3 || o.every((z) => z.bold || !z.text.trim()) || Math.abs(Math.min(...o.map((z) => z.x0)) - x0) > 3) return false;
+            const ot = o.map((z) => z.text).join(' ').trim();
+            return ot.split(/\s+/).length >= 6 && (ot.match(/\p{L}/gu) || []).length >= ot.replace(/\s/g, '').length * 0.7 && solid(o);
+          });
+        };
+        const subhead = allBold && wordy && ((sz >= bodySize - 1.2 && txt.split(/\s+/).length >= 2) || (sz >= bodySize * 0.7 && !/[.,;:]$/.test(txt) && headsText()));
         const refsTitle = /^\s*(\d+\.?\s+)?(references|bibliography|literature cited|works cited)\s*$/i.test(txt);
         if (refsTitle) inRefs = true;
         // (in the reference list a line of numbers is the end of a citation,
@@ -2633,6 +2653,28 @@ const Epubify = (() => {
           for (const t of foot) {
             ordered.splice(ordered.indexOf(t), 1);
             marginRows.push({ txt: t[2], y: t[1], x1: t[6], bold: t[5], sz: t[3] });
+          }
+        });
+        // A box at the head of a column ("Take-home message", in smaller type)
+        // that a sentence from the column before runs past: the sentence goes on
+        // under it in lower case. The box waits until the page's text is through.
+        leaves.forEach((leaf, c) => {
+          if (!leaf.col) return;
+          const prevCol = leaves.findLastIndex((f, j) => j < c && f.col);
+          const before = prevCol >= 0 && ordered.filter((t) => t[0] === prevCol).at(-1);
+          if (!before || before[5] || before[2].length < 20 || endsWithAny(before[2].trimEnd(), TERMINAL)) return;
+          const own = ordered.filter((t) => t[0] === c);
+          const j = own.findIndex((t) => Math.abs(t[3] - before[3]) < 0.6 && !t[5]);
+          if (j < 2 || !/^\p{Ll}/u.test(own[j][2].trimStart())) return;
+          const box = own.slice(0, j);
+          // (a box has a title, in bold: not a caption's last lines or a table's notes)
+          if (!box[0][5]) return;
+          // (all of it smaller than the text, or bold headings; set off from the text under it)
+          if (box.some((t) => (!t[5] && t[3] > before[3] - 0.8) || t[2].startsWith('\uE000') || CAPTION.test(t[2]))) return;
+          if (own[j][1] - box.at(-1)[1] < before[3] * 1.6 || box.map((t) => t[2]).join(' ').split(/\s+/).length < 8) return;
+          for (const t of box) {
+            ordered.splice(ordered.indexOf(t), 1);
+            boxRows.push({ txt: t[2], y: t[1], x1: t[6], bold: t[5], sz: t[3] });
           }
         });
       }
