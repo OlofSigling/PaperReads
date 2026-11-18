@@ -554,6 +554,33 @@
         : `<div class="turn a">${md(t.text)}${t.notice ? `<p class="muted small">${esc(t.notice)}</p>` : ''}
             <div class="turn-actions"><button type="button" class="link small" data-tonote="${i}">→ Notes</button>${addConcern ? `<button type="button" class="link small" data-toconcern="${i}">→ Concern</button>` : ''}<span class="muted small" title="${esc(Ask.MODELS[t.model]?.label || t.model || '')}, from the paper’s ${esc(t.source || 'text')}">${money(t.cost || 0)}</span></div></div>`;
     const costOf = (chat) => chat.reduce((sum, t) => sum + (t.cost || 0), 0);
+    // The reader's highlights (with their notes) and concerns on a thread's
+    // passage: those that share words with it. Newer than `since` only, so a
+    // later question sends just what was added since the one before.
+    const words = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const overlaps = (a, b) => {
+      const [x, y] = [words(a), words(b)];
+      if (!x || !y) return false;
+      if (x.includes(y) || y.includes(x)) return true;
+      // a run of six words in common
+      const ws = x.split(' ');
+      for (let i = 0; i + 6 <= ws.length; i++) if (y.includes(ws.slice(i, i + 6).join(' '))) return true;
+      return false;
+    };
+    async function notesOnPassage(p, th, since = 0) {
+      if (!th || !th.quote) return '';
+      const lines = [];
+      for (const h of await DB.byIndex('highlights', 'paperId', paperId)) {
+        if ((h.createdAt || 0) <= since && (h.updatedAt || 0) <= since) continue;
+        if (!overlaps(h.quote, th.quote)) continue;
+        lines.push(`- Highlighted as “${HL_KINDS[hlKind(h)].label}”: "${short(h.quote, 400)}"${h.note ? `. My note: ${h.note}` : ''}`);
+      }
+      for (const c of p.concerns || []) {
+        if ((c.createdAt || 0) <= since || !c.quote || !overlaps(c.quote, th.quote)) continue;
+        lines.push(`- My concern${c.done ? ' (since resolved)' : ''}: ${c.text || '(no text)'} (on: "${short(c.quote, 300)}")`);
+      }
+      return lines.join('\n');
+    }
     // save one chat back where it belongs
     async function saveChat(mutate) {
       const fresh = await DB.get('papers', paperId);
@@ -704,8 +731,13 @@
         const p = await DB.get('papers', paperId);
         const history = Ask.sendable(chatOf(p));
         const th = threadOf(p);
+        // what the reader wrote on the passage: all of it with the first
+        // question, then what was added since the last one
+        const lastAsked = Math.max(0, ...chatOf(p).filter((t) => t.role === 'user').map((t) => t.ts || 0));
+        const passageNotes = th ? await notesOnPassage(p, th, lastAsked).catch(() => '') : '';
         // a thread's passage goes with its first question; later turns build on it
         const turns = await Ask.ask(p, history, question, {
+          passageNotes,
           quote: th && !history.length ? th.quote : '',
           // a passage thread sends its excerpt unless switched to the whole paper
           context: th && th.context !== 'paper' ? 'passage' : 'paper',
@@ -4583,22 +4615,46 @@
     });
     setCount(p);
     $('#r-concerns').addEventListener('click', () => showPanel(concernsPanel));
-    // passages with a chat thread: a dashed underline that reopens it
-    const THREAD_STYLE = { stroke: '#6b7280', 'stroke-opacity': '0.85', 'stroke-dasharray': '3 2', 'stroke-width': '1.5' };
+    // Passages with a chat thread: only their last word is marked, with a
+    // soft grey tint (an underline under the whole passage got in the way of
+    // reading). Tapping it reopens the thread.
+    const THREAD_STYLE = { fill: '#64748b', 'fill-opacity': '0.22', 'mix-blend-mode': 'multiply' };
+    const lastWordCfi = new Map(); // thread cfi -> the cfi of its last word
+    const markOf = async (cfi) => {
+      if (lastWordCfi.has(cfi)) return lastWordCfi.get(cfi);
+      let mark = cfi;
+      try {
+        await book.ready;
+        const range = await book.getRange(cfi);
+        const node = range.endContainer;
+        if (node.nodeType === 3) {
+          const m = /(\S+)\s*$/.exec(node.data.slice(0, range.endOffset));
+          if (m) {
+            const r = node.ownerDocument.createRange();
+            r.setStart(node, m.index);
+            r.setEnd(node, m.index + m[1].length);
+            mark = new ePub.CFI(r, book.spine.get(cfi).cfiBase).toString();
+          }
+        }
+        lastWordCfi.set(cfi, mark);
+      } catch {} // (not ready yet: the whole passage for now, and try again next time)
+      return mark;
+    };
     let threadMarks = [];
     const drawThreads = async () => {
-      for (const cfi of threadMarks) try { rendition.annotations.remove(cfi, 'underline'); } catch {}
+      for (const cfi of threadMarks) try { rendition.annotations.remove(cfi, 'highlight'); } catch {}
       threadMarks = [];
       const fresh = await DB.get('papers', id);
       for (const t of (fresh && fresh.threads) || []) {
         if (!t.cfi) continue;
+        const mark = await markOf(t.cfi);
         try {
-          rendition.annotations.underline(t.cfi, { thread: t.id }, () => {
+          rendition.annotations.highlight(mark, { thread: t.id }, () => {
             tocPanel.hidden = concernsPanel.hidden = true;
             askPanel.hidden = false;
             ask.openThread(t.id);
           }, 'pr-thread', THREAD_STYLE);
-          threadMarks.push(t.cfi);
+          threadMarks.push(mark);
         } catch {}
       }
     };
@@ -5098,7 +5154,7 @@
           <label>Google client ID <input name="cid" autocomplete="off" placeholder="…apps.googleusercontent.com" value="${esc(cidValue)}"></label>
           <label>Client secret <small class="muted">(lets this device stay signed in instead of asking every hour)</small><input type="password" name="secret" autocomplete="off" placeholder="GOCSPX-…" value="${esc(secretValue)}"></label>
           <label class="check"><input type="checkbox" name="files" ${syncFiles ? 'checked' : ''}> Also sync PDFs and EPUBs (uses more data)</label>
-          <div class="row wrap"><button class="btn primary" id="sy-go">${clientId ? 'Sync now' : 'Connect and sync'}</button>${clientId && clientSecret ? '<button type="button" class="btn" id="sy-invite">Invite someone</button>' : ''}${clientId ? '<button type="button" class="btn danger-ghost" id="sy-off">Disconnect</button>' : ''}</div>
+          <div class="row wrap"><button class="btn primary" id="sy-go">${clientId ? 'Sync now' : 'Connect and sync'}</button>${clientId && clientSecret ? '<button type="button" class="btn" id="sy-invite" title="A link that fills in the client ID and secret: open it on your other phone or computer (after a reset, too), or send it to someone">Link another device</button>' : ''}${clientId ? '<button type="button" class="btn danger-ghost" id="sy-off">Disconnect</button>' : ''}</div>
         </form>
         ${clientId && clientSecret ? '<p class="muted small">Invite someone: sends a link that sets up sync for them in one tap. They sign in with their own Google account and get their own private library. The link contains your client secret, so send it privately.</p>' : ''}
         <details class="small"><summary>Get a client ID (once, about 10 minutes)</summary>
@@ -5243,9 +5299,9 @@
       }
       try {
         await navigator.clipboard.writeText(url);
-        toast('Invite link copied');
+        toast('Link copied: open it on the other device');
       } catch {
-        prompt('Copy this invite link:', url);
+        prompt('Copy this link and open it on the other device:', url);
       }
     });
     $('#sy-form').addEventListener('submit', async (e) => {

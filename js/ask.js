@@ -116,11 +116,13 @@ Keep answers short unless asked for depth: lead with the answer, then the suppor
     return { kind: 'excerpt', block: { type: 'text', text } };
   }
 
-  async function ask(p, history, question, { quote = '', excerpt = '', context = 'paper', onText = () => {}, signal } = {}) {
+  async function ask(p, history, question, { quote = '', excerpt = '', context = 'paper', passageNotes = '', onText = () => {}, signal } = {}) {
     const { Anthropic, api } = await client();
     const m = await model();
     const first = !history.length;
-    const prompt = `${quote ? `About this passage:\n"${quote}"\n\n` : ''}${question}${first ? userNotes(p) : ''}`;
+    // (the reader's highlights, notes and concerns on the passage go with the question)
+    const notesOn = passageNotes ? `\n\n<my_notes_on_this_passage>\n${passageNotes}\n</my_notes_on_this_passage>` : '';
+    const prompt = `${quote ? `About this passage:\n"${quote}"\n\n` : ''}${question}${notesOn}${first ? userNotes(p) : ''}`;
     const userTurn = { role: 'user', content: [{ type: 'text', text: prompt }], question, quote, ts: Date.now() };
     const { block, kind } = context === 'passage' ? excerptBlock(p, quote, excerpt) : await paperBlock(p);
     const messages = [...history, userTurn].map((t, i) => ({
