@@ -2296,9 +2296,15 @@ const Epubify = (() => {
         return Math.max(0, k);
       };
       const spans = [];
+      // (but a line of the column's text that starts that high goes on in the line under it)
+      const mastTop = pg.height * 0.075;
+      const textBelow = (l) => {
+        const h = l.bbox[3] - l.bbox[1];
+        return pg.lines.some((o) => o !== l && horizontal(o) && o.bbox[3] >= mastTop && o.bbox[1] > l.bbox[1] && o.bbox[1] - l.bbox[3] < h * 0.8 && Math.abs(o.bbox[0] - l.bbox[0]) < 3 && Math.abs(o.spans[0].size - l.spans[0].size) < 0.6 && o.spans.map((x) => x.text).join('').trim().length >= 30);
+      };
       for (const l of pg.lines) {
         if (!horizontal(l)) continue;
-        if (pg === pdf.pages[0] && l.bbox[3] < pg.height * 0.075) continue; // masthead on the first page (journal logo, header)
+        if (pg === pdf.pages[0] && l.bbox[3] < mastTop && !textBelow(l)) continue; // masthead on the first page (journal logo, header)
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
           if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l, leaf: twoCol ? inLeaf(s) : 0 });
@@ -2349,13 +2355,19 @@ const Epubify = (() => {
       };
       let leftEdge = -Infinity;
       if (twoCol && firstCols.length) {
+        // (lines of the column's own text size: a page can be set smaller than the rest)
+        const own = pg.lines.filter((l) => horizontal(l) && firstCols.includes(leafOfLine(l)) && l.spans.map((s) => s.text).join('').trim().length >= 20);
+        const sizes = new Counter();
+        for (const l of own) for (const s of l.spans) sizes.add(Math.round(s.size * 2) / 2, s.text.length);
+        const colSize = sizes.mostCommon() ?? bodySize;
         const c = new Counter();
-        for (const l of pg.lines) if (horizontal(l) && firstCols.includes(leafOfLine(l)) && l.spans.map((s) => s.text).join('').trim().length >= 20 && Math.abs(pyRound(l.spans[0].size) - bodySize) <= 1) c.add(pyRound(l.bbox[0] / 5) * 5);
+        for (const l of own) if (Math.abs(Math.max(...l.spans.map((s) => s.size)) - colSize) <= 1.2 || Math.abs(pyRound(l.spans[0].size) - bodySize) <= 1) c.add(pyRound(l.bbox[0] / 5) * 5);
         // (the leftmost edge many lines start at: in a reference list the
         // first line of each entry, not the more numerous hanging lines)
         const total = sum(c.entries().map(([, n]) => n));
         const edges = c.entries().filter(([, n]) => n >= Math.max(3, total * 0.15)).map(([x]) => x);
-        leftEdge = edges.length ? Math.min(...edges) : c.mostCommon() ?? -Infinity;
+        // (from a handful of lines it can't be told: a few hanging lines of a reference list)
+        if (total >= 6) leftEdge = edges.length ? Math.min(...edges) : c.mostCommon() ?? -Infinity;
       }
       if (twoCol && leftEdge > -Infinity) {
         // (a paragraph or section number hanging left of the text, "1  This
@@ -2533,12 +2545,17 @@ const Epubify = (() => {
           if (!solid(row)) return false;
           return rows.some((o) => {
             if (!o.length || o === row || o.col !== rowCol || !(o[0].y > row[0].y) || o[0].y - row[0].y > Math.max(sz, o[0].size) * 2.2) return false;
-            if (Math.max(...o.map((z) => z.size)) < row[0].size - 0.3 || o.every((z) => z.bold || !z.text.trim()) || Math.abs(Math.min(...o.map((z) => z.x0)) - x0) > 3) return false;
+            // (the paragraph starts at its edge, or with a first-line indent)
+            const dx = Math.min(...o.map((z) => z.x0)) - x0;
+            if (Math.max(...o.map((z) => z.size)) < row[0].size - 0.3 || o.every((z) => z.bold || !z.text.trim()) || dx < -3 || dx > sz * 2.5) return false;
             const ot = o.map((z) => z.text).join(' ').trim();
             return ot.split(/\s+/).length >= 6 && (ot.match(/\p{L}/gu) || []).length >= ot.replace(/\s/g, '').length * 0.7 && solid(o);
           });
         };
-        const subhead = allBold && wordy && ((sz >= bodySize - 1.2 && txt.split(/\s+/).length >= 2) || (sz >= bodySize * 0.7 && !/[.,;:]$/.test(txt) && headsText()));
+        // (or in italic, as older journals set their run-in subheadings: "Relevant Predictors")
+        const allItalic = row.every((z) => /italic|oblique/i.test(z.font || '') || !z.text.trim());
+        const heads = (allBold || allItalic) && wordy && sz >= bodySize * 0.7 && !/[.,;:]$/.test(txt) && txt.split(/\s+/).length <= 8 && headsText();
+        const subhead = (allBold && wordy && sz >= bodySize - 1.2 && txt.split(/\s+/).length >= 2) || heads;
         const refsTitle = /^\s*(\d+\.?\s+)?(references|bibliography|literature cited|works cited)\s*$/i.test(txt);
         if (refsTitle) inRefs = true;
         // (in the reference list a line of numbers is the end of a citation,
@@ -2561,13 +2578,13 @@ const Epubify = (() => {
         const sectionName = capsHeading(txt) && sz >= bodySize * 0.75;
         if (!CAPTION.test(txt) && !refsTitle && !sectionName && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead && !refTail && !refLine) || (letters < txt.replace(/\s/g, '').length * 0.4 && !refTail && !inText()))) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
-        const bold = row.every((sp) => sp.bold || !sp.text.trim()) && !boldLeaf.has(rowCol);
+        const bold = (row.every((sp) => sp.bold || !sp.text.trim()) && !boldLeaf.has(rowCol)) || (subhead && allItalic); // (an italic subheading counts as one)
         const fw = new Counter();
         row.forEach((sp) => fw.add(sp.font, sp.text.length));
         const font = fw.mostCommon();
         const styled = fw.get(font) >= 0.9 * sum(row.map((sp) => sp.text.length)) && styles.has(font, row.find((sp) => sp.font === font)?.size ?? sz);
         const minor = styled && styles.minor(font, row.find((sp) => sp.font === font)?.size ?? sz);
-        ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold, Math.max(...row.map((sp) => sp.x1)), styled, minor]);
+        ordered.push([col, row[0].y, txt, sz, Math.min(...row.map((sp) => sp.x0)), bold, Math.max(...row.map((sp) => sp.x1)), styled, minor, false, heads]);
         if (aside && aside.length > 3 && !repeated.has(aside)) pageAsides.push([aside, sz]);
       }
       // the page's blocks in their reading order, each from its top down
@@ -2735,7 +2752,7 @@ const Epubify = (() => {
         if (rest.length && tocish.length >= rest.length * 0.6) ordered = [];
       }
       const emitRows = (list) => {
-      for (let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn] of list) {
+      for (let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn, heads] of list) {
         if (txt.startsWith('\uE000')) {
           const [n, alt, no, em] = txt.slice(1).split('\uE001');
           flushPara();
@@ -2791,10 +2808,12 @@ const Epubify = (() => {
           (styled && nWords <= 4 && SECTION.test(txt) && headingText(txt) && sz >= bodySize - 0.5 && sz < bodySize + 3) ||
           // "1.1 Vision for a new publication culture": decimal-numbered, short, on its own
           // (some layouts mark headings by colour only)
-          (standalone && /^\d{1,2}\.\d{1,2}(?:\.\d{1,2})*\.?\s+\p{Lu}/u.test(txt) && nWords <= 12 && !endsWithAny(txt, '.:;,') && sz >= bodySize - 0.5 && sz < bodySize + 3)
+          (standalone && /^\d{1,2}\.\d{1,2}(?:\.\d{1,2})*\.?\s+\p{Lu}/u.test(txt) && nWords <= 12 && !endsWithAny(txt, '.:;,') && sz >= bodySize - 0.5 && sz < bodySize + 3) ||
+          // (a short bold or italic line right above its paragraph, in the text's own smaller type)
+          (heads && standalone)
         ) {
           flushPara();
-          const tag = minor && !bold ? 'h4' : 'h3';
+          const tag = (minor && !bold) || (heads && sz < bodySize - 1.2) ? 'h4' : 'h3';
           // a heading wrapped onto a second line is one heading
           if (lastSmall && lastSmall.tag === tag && lastSmall.minor === minor && lastSmall.c === c && y > lastSmall.y && y - lastSmall.y < sz * 2.4 && parts.length - 1 === lastSmall.i && !endsWithAny(lastSmall.text, '.') &&
             !NUMBERED.test(txt) && !SECTION_WORD.test(txt) && !(SECTION_WORD.test(lastSmall.text) && lastSmall.text.split(/\s+/).length <= 2)) {
@@ -2873,6 +2892,12 @@ const Epubify = (() => {
         // the line above when that one didn't end a sentence
         const tail = indented && prev && prev.c === c && prev.indented && Math.abs(x0 - prev.x0) <= 1.5 && Math.abs(sz - prev.sz) < 0.5 && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && !endsWithAny(prev.txt.trimEnd(), TERMINAL);
         if (tail) startsPara = false;
+        // a numbered or bulleted item's lines hang under its text, further in
+        // than the number: "1. We present all … / could be recorded in …"
+        const hangs = prev && prev.c === c && paraBuf.length === 1 && /^\s*(\d{1,2}[.)]|\(?[a-z][.)]|[•\u2013-])\s/.test(paraBuf[0]) && x0 > prev.x0 + 3 && x0 - prev.x0 < sz * 3 && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && Math.abs(sz - prev.sz) < 1.5 &&
+          // (not a sub-item: its own marker, "B Group 1 …" with a symbol font's bullet, or under an item ending in a colon)
+          !/^\s*([•\u2013-]|\d{1,2}[.)]|\(?[a-z][.)]|\p{Lu}\s+\p{Lu})/u.test(txt) && !endsWithAny(prev.txt.trimEnd(), ':');
+        if (hangs) startsPara = false;
         if (startsWithAny(txt.trimStart(), ['•', '–', '- ', '* '])) startsPara = true;
         else if (startsPara && paraBuf.length && /^\s*•/.test(paraBuf[0]) && prev && prev.c === c && y > prev.y && y - prev.y < (lineGap.get(c) || sz * 1.4) * 1.6 && Math.abs(sz - prev.sz) < 0.5 && x !== undefined && x0 > x + 3 && !(endsWithAny(prev.txt.trimEnd(), TERMINAL) && y - prev.y > (lineGap.get(c) || sz * 1.4) * 1.15)) startsPara = false;
         // (a word broken at the end of the line above goes on here, whatever
