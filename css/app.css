@@ -375,6 +375,7 @@ main:has(#board) { max-width: none; }
 .sync-btn { background: none; border: 0; color: inherit; cursor: pointer; line-height: 1; }
 .sync-btn.spin { animation: spin 1s linear infinite; }
 .sync-btn.attn { color: var(--accent); }
+.sync-prog { align-self: center; font-size: .72rem; font-variant-numeric: tabular-nums; color: var(--muted, #6b7280); margin-left: -6px; }
 .sync-btn.attn::after { content: '•'; font-size: .8em; vertical-align: super; }
 @keyframes spin { to { transform: rotate(360deg); } }
 ol.steps { padding-left: 1.2em; margin: 8px 0 0; }

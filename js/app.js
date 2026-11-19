@@ -5297,7 +5297,7 @@
       const el = $('#sy-state');
       if (!el) return;
       el.textContent = st.busy
-        ? 'Syncing…'
+        ? syncStep(st)
         : st.error
           ? `Last sync failed: ${st.error}`
           : st.needsSignIn
@@ -5734,6 +5734,10 @@
   // Ask the browser not to evict our data under storage pressure.
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
+  // what a running sync is doing: "Downloading PDFs (3 of 12)"
+  function syncStep(st) {
+    return `${st.step || 'Syncing'}${st.total ? ` (${st.done} of ${st.total})` : ''}…`;
+  }
   // Sync: a top-bar button shows its state; tapping it syncs (and signs in if needed).
   async function showSyncButton() {
     const btn = $('#sync-btn');
@@ -5743,7 +5747,11 @@
     const btn = $('#sync-btn');
     btn.classList.toggle('spin', st.busy);
     btn.classList.toggle('attn', !st.busy && (st.needsSignIn || !!st.error));
-    btn.title = st.busy ? 'Syncing…' : st.error ? `Sync failed: ${st.error}` : st.needsSignIn ? 'Tap to sync' : 'Sync now';
+    // (a count beside it while files go back and forth)
+    const prog = $('#sync-prog');
+    prog.hidden = !(st.busy && st.total);
+    prog.textContent = st.busy && st.total ? `${st.done}/${st.total}` : '';
+    btn.title = st.busy ? `Syncing: ${syncStep(st)}` : st.error ? `Sync failed: ${st.error}` : st.needsSignIn ? 'Tap to sync' : 'Sync now';
   });
   $('#sync-btn').addEventListener('click', () =>
     Sync.run({ interactive: true })

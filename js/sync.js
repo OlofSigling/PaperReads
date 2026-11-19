@@ -25,7 +25,8 @@ const Sync = (() => {
   const TOKEN_KEY = 'paperreads.gdrive-token';
 
   const listeners = new Set();
-  let state = { busy: false, error: null, last: null, needsSignIn: false };
+  // (while busy: what it's doing, and for files how many of how many)
+  let state = { busy: false, error: null, last: null, needsSignIn: false, step: null, done: 0, total: 0 };
   const set = (patch) => {
     state = { ...state, ...patch };
     listeners.forEach((fn) => fn(state));
@@ -339,17 +340,17 @@ const Sync = (() => {
       set({ needsSignIn: true });
       return { skipped: 'needs sign-in' };
     }
-    set({ busy: true, error: null, needsSignIn: false });
+    set({ busy: true, error: null, needsSignIn: false, step: 'Starting', done: 0, total: 0 });
     try {
       const result = await syncOnce();
       const last = Date.now();
       await DB.setSetting('syncLast', last);
-      set({ busy: false, last, error: result.failed ? `${result.failed} file(s) couldn’t be synced; will retry next time` : null });
+      set({ busy: false, step: null, done: 0, total: 0, last, error: result.failed ? `${result.failed} file(s) couldn’t be synced; will retry next time` : null });
       Sync.onApplied && Sync.onApplied(result);
       return result;
     } catch (err) {
-      if (err instanceof AuthError) set({ busy: false, needsSignIn: true, error: null });
-      else set({ busy: false, error: err.message });
+      if (err instanceof AuthError) set({ busy: false, step: null, needsSignIn: true, error: null });
+      else set({ busy: false, step: null, error: err.message });
       throw err;
     }
   }
@@ -357,10 +358,12 @@ const Sync = (() => {
   async function syncOnce() {
     const withFiles = await DB.setting('syncFiles', true);
     await giveLegacyRowsIds();
+    set({ step: 'Checking Drive' });
     const remoteFiles = await listFiles();
     const dataFile = remoteFiles.get(DATA_NAME);
     let remote = { stores: {}, tombstones: {}, files: {} };
     if (dataFile) {
+      set({ step: 'Fetching your library' });
       const r = await download(dataFile, 'json');
       if (r && r.format === FORMAT) remote = r;
     }
@@ -372,6 +375,7 @@ const Sync = (() => {
     for (const k of Object.keys(tomb)) if (tomb[k] < cutoff) delete tomb[k];
     await DB.quietly(() => DB.setSetting('tombstones', tomb));
 
+    set({ step: 'Merging' });
     let changes = await mergeIn(remote, tomb);
 
     // files: newest copy wins; download what this device lacks
@@ -380,6 +384,25 @@ const Sync = (() => {
     let downloaded = 0;
     let uploaded = 0;
     let failed = 0;
+    // (how many files will go each way, for the progress count)
+    let total = 0;
+    let done = 0;
+    if (withFiles) {
+      for (const [store, kind] of Object.entries(FILE_STORES)) {
+        const local = new Map((await DB.all(store)).map((r) => [r.paperId, r]));
+        const fresh = new Set();
+        for (const [key, e] of Object.entries(remote.files || {})) {
+          if (!key.startsWith(kind + ':')) continue;
+          const id = key.slice(kind.length + 1);
+          if (!paperIds.has(id) || (tomb[`${store}:${id}`] || 0) >= e.mtime) continue;
+          const mine = local.get(id);
+          if (remoteFiles.has(`${kind}-${id}`) && (mine ? time(store, mine) : 0) <= e.mtime) fresh.add(id);
+          if ((!mine || time(store, mine) < e.mtime) && remoteFiles.has(`${kind}-${id}`)) total++;
+        }
+        for (const [id, r] of local) if (paperIds.has(id) && (tomb[`${store}:${id}`] || 0) < time(store, r) && !fresh.has(id)) total++;
+      }
+    }
+    const step = (what) => set({ step: what, done: Math.min(done, total), total });
     for (const [store, kind] of Object.entries(FILE_STORES)) {
       const local = new Map((await DB.all(store)).map((r) => [r.paperId, r]));
       // remote entries
@@ -393,6 +416,8 @@ const Sync = (() => {
         const blobFile = remoteFiles.get(`${kind}-${id}`);
         if (!withFiles || !blobFile) continue;
         let blob;
+        step(`Downloading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
+        done++;
         try {
           blob = await download(blobFile, 'blob');
         } catch (err) {
@@ -427,6 +452,8 @@ const Sync = (() => {
         if (kind === 'epub') Object.assign(entry, { source: r.source || '', missingFigures: r.missingFigures || 0, cover: !!r.cover });
         if (have && have.mtime >= t && remoteFiles.has(`${kind}-${id}`)) continue;
         if (!withFiles) continue;
+        step(`Uploading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
+        done++;
         try {
           await upload(remoteFiles.get(`${kind}-${id}`), `${kind}-${id}`, r.blob, { mtime: String(t) });
           if (r.cover) await upload(remoteFiles.get(`cover-${id}`), `cover-${id}`, r.cover, { mtime: String(t) }).catch(() => (entry.cover = false));
@@ -451,6 +478,7 @@ const Sync = (() => {
     if (fixed.length) await DB.quietly(() => DB.putMany('papers', fixed));
 
     // write the merged state back
+    set({ step: 'Saving to Drive', done: 0, total: 0 });
     const data = { format: FORMAT, version: 1, savedAt: new Date().toISOString(), stores: await localStores(), tombstones: tomb, files };
     await upload(dataFile, DATA_NAME, new Blob([JSON.stringify(data)], { type: 'application/json' }));
 
