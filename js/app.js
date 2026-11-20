@@ -1454,7 +1454,7 @@
         return draw();
       }
       const c = counts();
-      const abs = p.abstract ? esc(p.abstract) : '<span class="muted">No abstract.</span>';
+      const abs = p.abstract ? esc(p.abstract) : p.doi && navigator.onLine ? '<span class="muted" id="qs-absnote">Looking for the abstract…</span>' : '<span class="muted">No abstract.</span>';
       main.innerHTML = `<section class="qs">
         <div class="row between"><span class="muted small">📦 ${esc(bundleLabel(name))}</span>${pickWhich}<span class="small"><b>${at + 1}</b> of ${total}</span></div>
         <div class="qs-bar"><span style="width:${Math.round((at / total) * 100)}%"></span></div>
@@ -1471,6 +1471,23 @@
         <p class="muted small qs-keys">Keys: <kbd>1</kbd>–<kbd>9</kbd> send to that sub-bundle · <kbd>N</kbd> new sub-bundle · <kbd>Space</kbd> leave it here · <kbd>Backspace</kbd> undo</p>
       </section>`;
       wireWhich();
+      if (!p.abstract && p.doi && navigator.onLine) {
+        const shown = p.id;
+        Lookup.findAbstract(p.doi)
+          .catch(() => '')
+          .then(async (text) => {
+            const fresh = await DB.get('papers', shown);
+            if (fresh && !fresh.abstract) {
+              if (text) fresh.abstract = text;
+              else fresh.abstractTried = now();
+              await savePaper(fresh);
+            }
+            const note = $('#qs-absnote');
+            if (!note || todo[at] !== shown) return; // (moved on)
+            if (text) note.parentElement.textContent = text;
+            else note.textContent = 'No abstract found.';
+          });
+      }
       $$('.qs-pick').forEach((b) => b.addEventListener('click', () => send(b.dataset.to)));
       $('#qs-new').addEventListener('click', openNew);
       $('#qs-newform').addEventListener('submit', (e) => {
@@ -6097,10 +6114,40 @@
     if (/^(#\/?|#\/(library|queue|stats|collections))?$/.test(location.hash.split('?')[0]) || /^#\/paper\//.test(location.hash)) route();
   };
 
+  // Abstracts for papers that came without one (Crossref often has none):
+  // quietly in the background, one paper at a time, each tried once a fortnight.
+  let fillingAbstracts = false;
+  async function fillAbstracts() {
+    if (fillingAbstracts || !navigator.onLine) return;
+    fillingAbstracts = true;
+    try {
+      const due = (await papers()).filter((p) => p.doi && !p.abstract && !(p.abstractTried > now() - 14 * 864e5));
+      // (the queue first: that's where they're needed for sorting)
+      due.sort((a, b) => (a.status === 'want' ? 0 : 1) - (b.status === 'want' ? 0 : 1) || (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9));
+      let found = 0;
+      for (const p of due.slice(0, 300)) {
+        if (!navigator.onLine) break;
+        const text = await Lookup.findAbstract(p.doi).catch(() => '');
+        const fresh = await DB.get('papers', p.id);
+        if (!fresh || fresh.abstract) continue;
+        if (text) {
+          fresh.abstract = text;
+          found++;
+        } else fresh.abstractTried = now();
+        await savePaper(fresh);
+        await new Promise((r) => setTimeout(r, 800)); // (PubMed asks for at most 3 requests a second)
+      }
+      if (found && /^#\/(library|paper\/)/.test(location.hash)) route();
+    } finally {
+      fillingAbstracts = false;
+    }
+  }
+
   DB.open().then(() => {
     route();
     showSyncButton();
     Sync.start();
+    setTimeout(fillAbstracts, 8000);
     DB.onPapersChange = () => Social.schedule();
     Social.start();
   });

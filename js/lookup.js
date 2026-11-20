@@ -278,7 +278,70 @@ const Lookup = (() => {
         return await byDoi(parent);
       } catch {}
     }
-    return fromCsl(csl);
+    const meta = fromCsl(csl);
+    // (Crossref has an abstract only when the publisher sent one: many don't)
+    if (!meta.abstract) meta.abstract = await findAbstract(meta.doi || doi).catch(() => '');
+    return meta;
+  }
+
+  // A paper's abstract when Crossref has none: OpenAlex, then PubMed (nearly
+  // every clinical paper), Europe PMC, then Semantic Scholar.
+  async function findAbstract(doi) {
+    if (!doi) return '';
+    const words = (a) => {
+      if (!a) return '';
+      const out = [];
+      for (const [t, ps] of Object.entries(a)) for (const i of ps) out[i] = t;
+      return out.filter(Boolean).join(' ');
+    };
+    const long = (t) => (t && t.replace(/\s+/g, ' ').trim().length >= 100 ? t.replace(/\s+/g, ' ').trim() : '');
+    try {
+      const res = await fetchT(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=abstract_inverted_index`, {}, 8000);
+      if (res.ok) {
+        const t = long(words((await res.json()).abstract_inverted_index));
+        if (t) return t;
+      }
+    } catch {}
+    // PubMed itself (NCBI): quick, and the abstract with its sections
+    try {
+      const E = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+      // (it allows 3 requests a second: past that it answers 429, which the
+      // browser can see only as a failed request; wait a moment and ask again)
+      const ncbi = async (url) => {
+        const r = await fetchT(url, {}, 8000).catch(() => null);
+        if (r && r.status !== 429) return r;
+        await pause(1200);
+        return fetchT(url, {}, 8000);
+      };
+      const s = await ncbi(`${E}/esearch.fcgi?db=pubmed&term=${encodeURIComponent(`${doi}[doi]`)}&retmode=json`);
+      const ids = s.ok ? ((await s.json()).esearchresult || {}).idlist || [] : [];
+      if (ids.length === 1) {
+        const f = await ncbi(`${E}/efetch.fcgi?db=pubmed&id=${ids[0]}&rettype=abstract&retmode=xml`);
+        if (f.ok) {
+          const x = new DOMParser().parseFromString(await f.text(), 'text/xml');
+          const ids2 = [...x.querySelectorAll('ArticleIdList ArticleId[IdType="doi"], ELocationID[EIdType="doi"]')].map((e) => e.textContent.trim().toLowerCase());
+          const parts = [...x.querySelectorAll('Abstract > AbstractText')].map((e) => (e.getAttribute('Label') ? `${e.getAttribute('Label')}: ` : '') + e.textContent.trim());
+          const t = ids2.includes(doi.toLowerCase()) && long(parts.join(' '));
+          if (t) return t;
+        }
+      }
+    } catch {}
+    try {
+      const res = await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(`DOI:"${doi}"`)}&format=json&resultType=core&pageSize=1`, {}, 8000);
+      if (res.ok) {
+        const r = (((await res.json()).resultList || {}).result || [])[0];
+        const t = r && (r.doi || '').toLowerCase() === doi.toLowerCase() && long(stripTags(r.abstractText || ''));
+        if (t) return t;
+      }
+    } catch {}
+    try {
+      const res = await fetchT(`https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=abstract`, {}, 8000);
+      if (res.ok) {
+        const t = long((await res.json()).abstract || '');
+        if (t) return t;
+      }
+    } catch {}
+    return '';
   }
 
   // A DOI's paper from OpenAlex (when Crossref is busy, or doesn't know it)
@@ -746,5 +809,5 @@ const Lookup = (() => {
     return null;
   }
 
-  return { parse, doiFromPmc, citations, resolve, search, byDoi, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
+  return { parse, doiFromPmc, citations, resolve, search, byDoi, findAbstract, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
 })();
