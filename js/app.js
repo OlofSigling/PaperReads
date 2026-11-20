@@ -914,7 +914,7 @@
       </section>
       <section>
         <h2 class="section-h">Currently reading</h2>
-        ${reading.length ? readingGroups(all, reading).map(([b, ps]) => `${b ? `<h3 class="bundle-h">📦 ${esc(b)}</h3>` : ''}<ul class="list${b ? ' in-bundle' : ''}">${ps.map((p) => paperRow(p, `<span class="q-actions col">${p.hasEpub ? `<a class="btn small primary" href="#/read/${p.id}">Read</a>` : ''}<button class="btn small" data-quick="${p.id}">Update</button></span>`)).join('')}</ul>`).join('') : '<p class="empty">Nothing in progress. Pick something from your queue.</p>'}
+        ${reading.length ? readingGroups(all, reading).map(([b, ps]) => `${b ? `<h3 class="bundle-h">📦 ${esc(bundleLabel(b))}</h3>` : ''}<ul class="list${b ? ' in-bundle' : ''}">${ps.map((p) => paperRow(p, `<span class="q-actions col">${p.hasEpub ? `<a class="btn small primary" href="#/read/${p.id}">Read</a>` : ''}<button class="btn small" data-quick="${p.id}">Update</button></span>`)).join('')}</ul>`).join('') : '<p class="empty">Nothing in progress. Pick something from your queue.</p>'}
       </section>
       <section>
         <div class="row between"><h2 class="section-h">Next up</h2><a href="#/queue" class="link">Queue →</a></div>
@@ -943,6 +943,17 @@
       return '';
     }
   }
+
+  // Sub-bundles: a bundle's name is its path, "Sepsis / RL" is the bundle RL
+  // inside Sepsis (one string on each paper, so it syncs as it is)
+  const normBundle = (s) => String(s || '').split('/').map((x) => x.trim()).filter(Boolean).join(' / ');
+  const bundleParent = (b) => (b.includes(' / ') ? b.slice(0, b.lastIndexOf(' / ')) : '');
+  const bundleLeaf = (b) => (b.includes(' / ') ? b.slice(b.lastIndexOf(' / ') + 3) : b);
+  const bundleRoot = (b) => b.split(' / ')[0];
+  const bundleLabel = (b) => b.split(' / ').join(' › ');
+  // ("A / B / C" and the bundles it sits in: "A", "A / B")
+  const bundlePath = (b) => b.split(' / ').map((_, i, xs) => xs.slice(0, i + 1).join(' / '));
+  const inBundle = (name, b) => !!b && (b === name || b.startsWith(name + ' / '));
 
   // A paper's bundle: its own, or that of the paper it was found through
   function bundleOf(all, p) {
@@ -1002,17 +1013,24 @@
     const row = (p) => paperRow(p, `<input type="checkbox" class="lib-sel" data-id="${p.id}" aria-label="Select">`);
     const done = new Set();
     const out = [];
+    // a bundle: its own papers, then its sub-bundles (each where its first paper falls)
+    const bundleLi = (name) => {
+      const all = list.filter((x) => inBundle(name, x.bundle));
+      const own = all.filter((x) => x.bundle === name);
+      const subs = [...new Set(all.map((x) => x.bundle).filter((b) => b !== name).map((b) => name + ' / ' + b.slice(name.length + 3).split(' / ')[0]))];
+      return `<li class="lib-bundle"><details data-b="${esc(name)}"${open.has(name) ? ' open' : ''}>
+        <summary><span>📦 <b>${esc(bundleLeaf(name))}</b> <span class="muted small">${all.length} paper${all.length === 1 ? '' : 's'}${subs.length ? ` · ${subs.length} sub-bundle${subs.length === 1 ? '' : 's'}` : ''}</span></span><button type="button" class="btn small icon" data-bmenu="${esc(name)}" aria-label="Bundle options">⋯</button></summary>
+        <ul class="list">${own.map(row).join('')}${subs.map(bundleLi).join('')}</ul></details></li>`;
+    };
     for (const p of list) {
       if (!p.bundle) {
         out.push(row(p));
         continue;
       }
-      if (done.has(p.bundle)) continue;
-      done.add(p.bundle);
-      const members = list.filter((x) => x.bundle === p.bundle);
-      out.push(`<li class="lib-bundle"><details data-b="${esc(p.bundle)}"${open.has(p.bundle) ? ' open' : ''}>
-        <summary><span>📦 <b>${esc(p.bundle)}</b> <span class="muted small">${members.length} paper${members.length === 1 ? '' : 's'}</span></span><button type="button" class="btn small icon" data-bmenu="${esc(p.bundle)}" aria-label="Bundle options">⋯</button></summary>
-        <ul class="list">${members.map(row).join('')}</ul></details></li>`);
+      const top = bundleRoot(p.bundle);
+      if (done.has(top)) continue;
+      done.add(top);
+      out.push(bundleLi(top));
     }
     return out.join('');
   }
@@ -1035,6 +1053,7 @@
     $$('[data-bmenu]', ul).forEach((b) =>
       b.addEventListener('click', async (e) => {
         e.preventDefault(); // (inside the summary: don't fold it)
+        e.stopPropagation();
         if (await bundleMenu(all, b.dataset.bmenu)) route();
       })
     );
@@ -1203,25 +1222,29 @@
   // Bundles: a name on each paper (p.bundle) gathers papers into one flat,
   // collapsible block in the queue and the library. A trail group joins the
   // bundle of its top paper (or of any paper in it).
+  // A sub-bundle sits inside its bundle (after the bundle's own papers), and
+  // a bundle with only sub-bundles still shows, holding them.
   function queueItems(all) {
     const items = [];
     const byName = new Map();
+    const itemOf = (b) => {
+      if (byName.has(b)) return byName.get(b);
+      const it = { bundle: b, groups: [], subs: [] };
+      byName.set(b, it);
+      const up = bundleParent(b);
+      if (up) itemOf(up).subs.push(it);
+      else items.push(it);
+      return it;
+    };
     for (const g of queueGroups(all)) {
       const b = g.root.bundle || (g.want.find((p) => p.bundle) || {}).bundle || '';
-      if (!b) {
-        items.push({ group: g });
-        continue;
-      }
-      if (!byName.has(b)) {
-        const it = { bundle: b, groups: [] };
-        byName.set(b, it);
-        items.push(it);
-      }
-      byName.get(b).groups.push(g);
+      if (!b) items.push({ group: g });
+      else itemOf(b).groups.push(g);
     }
     return items;
   }
-  const queueList = (all) => queueItems(all).flatMap((it) => (it.group ? it.group.flat : it.groups.flatMap((g) => g.flat)));
+  const bundleFlat = (it) => [...it.groups.flatMap((g) => g.flat), ...it.subs.flatMap(bundleFlat)];
+  const queueList = (all) => queueItems(all).flatMap((it) => (it.group ? it.group.flat : bundleFlat(it)));
 
   // Unnest a paper in the queue: the papers found through it head groups of
   // their own, in its place and in the order they had under it. (The trail,
@@ -1299,10 +1322,11 @@
       await savePaper(x);
     }
   }
-  const bundleNames = (all) => [...new Set(all.map((p) => p.bundle).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const bundleNames = (all) => [...new Set(all.map((p) => p.bundle).filter(Boolean).flatMap(bundlePath))].sort((a, b) => a.localeCompare(b));
 
   // Put papers in a bundle (or take them out, with name '').
   async function setBundle(ids, name) {
+    name = normBundle(name);
     for (const id of ids) {
       const p = await DB.get('papers', id);
       if (!p || (p.bundle || '') === name) continue;
@@ -1319,24 +1343,45 @@
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${esc(title)}</h3>
         <label>Name <input name="b" list="bundle-names" value="${esc(value)}" placeholder="e.g. Sepsis RL" autocomplete="off" required></label>
         <datalist id="bundle-names">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-        ${names.length ? `<div class="chips">${names.map((n) => `<button type="button" class="chip" data-pick="${esc(n)}">📦 ${esc(n)}</button>`).join('')}</div>` : ''}
+        <p class="muted small">A / makes a sub-bundle: <i>Sepsis / RL</i> is RL inside Sepsis.${names.length ? ' Tap a bundle to use it, ＋ to start a sub-bundle in it.' : ''}</p>
+        ${names.length ? `<div class="chips">${names.map((n) => `<span class="chip-pair"><button type="button" class="chip" data-pick="${esc(n)}">📦 ${esc(bundleLabel(n))}</button><button type="button" class="chip chip-add" data-sub="${esc(n)}" aria-label="New sub-bundle in ${esc(n)}" title="New sub-bundle in ${esc(n)}">＋</button></span>`).join('')}</div>` : ''}
         <div class="row end"><button value="cancel" class="btn" formnovalidate>Cancel</button><button value="ok" class="btn primary">OK</button></div></form>`;
       $$('[data-pick]', dlg).forEach((b) => b.addEventListener('click', () => ($('[name=b]', dlg).value = b.dataset.pick)));
+      $$('[data-sub]', dlg).forEach((b) =>
+        b.addEventListener('click', () => {
+          const input = $('[name=b]', dlg);
+          input.value = b.dataset.sub + ' / ';
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        })
+      );
       // Enter in the name field means OK (the form's first button is Cancel)
       $('[name=b]', dlg).addEventListener('keydown', (e) => {
         if (e.key !== 'Enter' || e.isComposing) return;
         e.preventDefault();
         if ($('[name=b]', dlg).value.trim()) dlg.close('ok');
       });
-      dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('[name=b]', dlg).value.trim() : null);
+      dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? normBundle($('[name=b]', dlg).value) || null : null);
       dlg.showModal();
     });
+  }
+  // A bundle and its sub-bundles get a new name (or path): "A / B" -> "C / B".
+  // With to '', the bundle is undone and its sub-bundles move up a level.
+  async function renameBundle(all, from, to) {
+    const up = bundleParent(from);
+    for (const p of all) {
+      const b = p.bundle || '';
+      if (!inBundle(from, b)) continue;
+      const rest = b.slice(from.length + 3);
+      const next = b === from ? to : to ? `${to} / ${rest}` : up ? `${up} / ${rest}` : rest;
+      await setBundle([p.id], next);
+    }
   }
   // A bundle's own menu: rename it, or undo it.
   async function bundleMenu(all, name) {
     const dlg = $('#dialog');
-    dlg.innerHTML = `<form method="dialog" class="dlg"><h3>📦 ${esc(name)}</h3>
-      <div class="row wrap end"><button value="sort-recent" class="btn">Sort by recency</button><button value="sort-perYear" class="btn">Sort by citations per year</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
+    dlg.innerHTML = `<form method="dialog" class="dlg"><h3>📦 ${esc(bundleLabel(name))}</h3>
+      <div class="row wrap end"><button value="nest" class="btn">Put inside another bundle</button>${bundleParent(name) ? `<button value="top" class="btn">Move out to the top level</button>` : ''}<button value="sort-recent" class="btn">Sort by recency</button><button value="sort-perYear" class="btn">Sort by citations per year</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
     const choice = await new Promise((resolve) => {
       dlg.onclose = () => resolve(dlg.returnValue);
       dlg.showModal();
@@ -1348,9 +1393,18 @@
     else if (choice === 'sort-epub') await sortWithin(name, 'epub');
     else if (choice === 'rename') {
       const to = await askBundle(all, 'Rename bundle', name);
-      if (to && to !== name) await setBundle(members, to);
-    } else if (choice === 'undo') await setBundle(members, '');
-    else return false;
+      if (to && to !== name) await renameBundle(all, name, to);
+    } else if (choice === 'nest') {
+      const into = await askBundle(all.filter((p) => !inBundle(name, p.bundle)), `Put “${bundleLeaf(name)}” inside`);
+      if (!into || inBundle(name, into)) return false;
+      await renameBundle(all, name, `${into} / ${bundleLeaf(name)}`);
+      toast(`“${bundleLeaf(name)}” is now inside “${bundleLabel(into)}”`);
+    } else if (choice === 'top') await renameBundle(all, name, bundleLeaf(name));
+    else if (choice === 'undo') {
+      await setBundle(members, '');
+      // (its sub-bundles stay, one level up)
+      if (all.some((p) => p.bundle && p.bundle.startsWith(name + ' / '))) await renameBundle(all.filter((p) => p.bundle !== name), name, '');
+    } else return false;
     return true;
   }
 
@@ -1470,12 +1524,17 @@
       main.innerHTML = '<p class="empty">Your queue is empty. Papers marked “Want to read” show up here in priority order.</p>';
       return;
     }
-    const cols = new Map();
+    const byCol = new Map();
     for (const p of flat) {
       const b = bundleOf(all, p);
-      if (!cols.has(b)) cols.set(b, []);
-      cols.get(b).push(p);
+      if (!byCol.has(b)) byCol.set(b, []);
+      byCol.get(b).push(p);
     }
+    // (a sub-bundle's column right after its bundle's: by top-level bundle first)
+    const keys = [...byCol.keys()];
+    const firstOf = new Map();
+    keys.forEach((k, i) => !firstOf.has(bundleRoot(k)) && firstOf.set(bundleRoot(k), i));
+    const cols = new Map(keys.map((k, i) => [k, i]).sort((a, b) => firstOf.get(bundleRoot(a[0])) - firstOf.get(bundleRoot(b[0])) || a[0].split(' / ').length - b[0].split(' / ').length || a[1] - b[1]).map(([k]) => [k, byCol.get(k)]));
     const card = (p) => `<article class="board-card" draggable="true" data-id="${p.id}">
         <input type="checkbox" class="q-sel board-sel" data-id="${p.id}" aria-label="Select">
         <a href="#/paper/${p.id}">${esc(p.title)}</a>
@@ -1483,8 +1542,8 @@
       </article>`;
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Columns are bundles, left to right in priority; cards top to bottom. Drag a card to move it (or into another bundle), or drag a column by its ☰ to reorder the bundles.</p>
         <span class="row"><button class="btn small" id="q-epub">EPUB first</button><button class="btn small" id="q-view">List</button><button class="btn small" id="q-select">Select</button></span></div>
-      <div class="board" id="board">${[...cols.entries()].map(([b, ps]) => `<section class="board-col" data-col="${esc(b)}">
-          <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${esc(b)}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span>${b ? `<button type="button" class="btn small icon" data-colmenu="${esc(b)}" aria-label="Bundle options" title="Sort or rename this bundle">⋯</button>` : ''}</header>
+      <div class="board" id="board">${[...cols.entries()].map(([b, ps]) => `<section class="board-col${bundleParent(b) ? ' board-sub' : ''}" data-col="${esc(b)}">
+          <header class="board-h"><span class="handle" draggable="true" aria-label="Move column">☰</span><b>${b ? `📦 ${bundleParent(b) ? `<span class="muted">${esc(bundleLabel(bundleParent(b)))} ›</span> ` : ''}${esc(bundleLeaf(b))}` : 'Not in a bundle'}</b><span class="muted small">${ps.length}</span>${b ? `<button type="button" class="btn small icon" data-colmenu="${esc(b)}" aria-label="Bundle options" title="Sort or rename this bundle">⋯</button>` : ''}</header>
           <div class="board-body" data-col="${esc(b)}">${ps.map(card).join('')}</div>
         </section>`).join('')}</div>
       <div class="r-selbar q-selbar" id="q-selbar" hidden><span class="small" id="q-selcount">0 selected</span>
@@ -1742,16 +1801,18 @@
         ${kids.length ? `<ul class="q-sub q-sub-top" data-parent="${g.root.id}" ${isOpen ? '' : 'hidden'}>${kids.map((k) => node(g, k)).join('')}</ul>` : ''}
       </li>`;
     };
+    const countOf = (it) => it.groups.reduce((s, g) => s + g.want.length, 0) + it.subs.reduce((s, x) => s + countOf(x), 0);
     const bundleLi = (it, num) => {
       const key = 'b:' + it.bundle;
       const isOpen = open.has(key);
-      const n = it.groups.reduce((s, g) => s + g.want.length, 0);
-      return `<li class="paper-row q-bundle" data-bundle="${esc(it.bundle)}">
+      const n = countOf(it);
+      const subs = it.subs.length ? ` · ${it.subs.length} sub-bundle${it.subs.length === 1 ? '' : 's'}` : '';
+      return `<li class="paper-row q-bundle${num ? '' : ' q-subbundle'}" data-bundle="${esc(it.bundle)}">
         <span class="handle" aria-label="Drag to reorder">☰</span>
-        <span class="q-num">${num}</span>
-        <div class="q-main"><button type="button" class="q-btoggle" data-btoggle="${esc(it.bundle)}" aria-expanded="${isOpen}"><span class="q-arrow">${isOpen ? '▾' : '▸'}</span> 📦 <b>${esc(it.bundle)}</b> <span class="muted small">${n} paper${n === 1 ? '' : 's'}</span></button></div>
+        <span class="q-num">${num || ''}</span>
+        <div class="q-main"><button type="button" class="q-btoggle" data-btoggle="${esc(it.bundle)}" aria-expanded="${isOpen}"><span class="q-arrow">${isOpen ? '▾' : '▸'}</span> 📦 <b>${esc(bundleLeaf(it.bundle))}</b> <span class="muted small">${n} paper${n === 1 ? '' : 's'}${subs}</span></button></div>
         <span class="q-actions"><button class="btn small icon" data-bmenu="${esc(it.bundle)}" aria-label="Bundle options">⋯</button></span>
-        <ul class="list q-bundle-list" data-bundle="${esc(it.bundle)}" ${isOpen ? '' : 'hidden'}>${it.groups.map((g) => groupLi(g, 0)).join('')}</ul>
+        <ul class="list q-bundle-list" data-bundle="${esc(it.bundle)}" ${isOpen ? '' : 'hidden'}>${it.groups.map((g) => groupLi(g, 0)).join('')}${it.subs.map((x) => bundleLi(x, 0)).join('')}</ul>
       </li>`;
     };
     main.innerHTML = `<div class="row between q-head"><p class="muted small">Drag ☰ to reorder. Swipe a paper right to archive it (it stays as Catalogued), left to delete it (kept 30 days in Recently deleted). Papers found through another one sit under it; <b>Select</b> to bundle papers together.</p>
@@ -1771,10 +1832,13 @@
     // the order shown. Saved through savePaper so it syncs.
     const persistAll = async () => {
       const seq = [];
-      for (const li of ul.children) {
-        if (li.classList.contains('q-bundle')) for (const g of $(':scope > .q-bundle-list', li).children) seq.push(g.dataset.id);
-        else if (li.dataset.id) seq.push(li.dataset.id);
-      }
+      const walk = (lis) => {
+        for (const li of lis) {
+          if (li.classList.contains('q-bundle')) walk($(':scope > .q-bundle-list', li).children);
+          else if (li.dataset.id) seq.push(li.dataset.id);
+        }
+      };
+      walk(ul.children);
       for (const [i, id] of seq.entries()) {
         const p = byId.get(id);
         if (!p || p.queueOrder === i + 1) continue;
@@ -1806,7 +1870,7 @@
       const wide = matchMedia('(min-width: 900px) and (hover: hover) and (pointer: fine)').matches;
       const topBar = document.querySelector('.top');
       let y = (topBar ? topBar.getBoundingClientRect().height : 0) + 96;
-      $$('li.q-bundle', ul).forEach((b) => {
+      $$(':scope > li.q-bundle', ul).forEach((b) => {
         if (!on || !wide) {
           b.style.position = b.style.top = b.style.right = b.style.width = b.style.zIndex = '';
           return;
@@ -1878,7 +1942,7 @@
         open.add('b:' + zone);
         saveOpen();
       }
-      toast(zone ? `Moved to “${zone}”` : 'Taken out of its bundle');
+      toast(zone ? `Moved to “${bundleLabel(zone)}”` : 'Taken out of its bundle');
       viewQueue();
     };
     ul.addEventListener('pointerup', end);
@@ -2409,7 +2473,7 @@
       addBtn.disabled = true;
       const status = $('#im-status').value;
       const col = $('#im-col') ? $('#im-col').value : '';
-      const bundle = $('#im-bundle').value.trim();
+      const bundle = normBundle($('#im-bundle').value);
       const wantPdf = $('#im-pdf').checked;
       const wantEpub = $('#im-epub').checked;
       const added = [];
@@ -3422,7 +3486,7 @@
         pdfUrl: pdfLink || null,
         foundVia: viaPaper ? viaPaper.id : null,
       });
-      if (f.bundle && f.bundle.value.trim()) p.bundle = f.bundle.value.trim();
+      if (f.bundle && normBundle(f.bundle.value)) p.bundle = normBundle(f.bundle.value);
       const ctx = viaPaper && q.cites ? citeContextFor(viaPaper.id) : '';
       if (ctx) p.foundContext = ctx;
       await savePaper(p);

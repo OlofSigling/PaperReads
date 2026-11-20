@@ -492,6 +492,12 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .q-btoggle { background: none; border: 0; padding: 4px 0; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
 .q-bundle-list { position: relative; flex-basis: 100%; margin: 6px 0 2px; padding-left: 10px; border-left: 3px solid var(--accent-soft); }
 .q-bundle-list > .q-item { box-shadow: none; }
+.q-bundle-list > .q-subbundle { box-shadow: none; }
+.q-subbundle > .q-num { display: none; }
+.lib-bundle .lib-bundle > details { border-style: dashed; }
+.board-sub .board-h b .muted { font-weight: 400; }
+.chip-pair { display: inline-flex; gap: 2px; }
+.chip-add { padding-inline: 8px; }
 .q-selbar { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 72px); }
 .lib-bundle { list-style: none; }
 .lib-bundle > details { border: 1px solid var(--accent); border-radius: 12px; background: var(--surface); padding: 6px 10px; }
