@@ -5,6 +5,14 @@ const Lookup = (() => {
   const ARXIV_NEW = /(\d{4}\.\d{4,5})(v\d+)?/;
   const ARXIV_OLD = /([a-z-]+(?:\.[A-Z]{2})?\/\d{7})(v\d+)?/;
   const DOI_RE = /10\.\d{4,9}\/[^\s"<>]+/;
+  // Every request gets a time limit: a server that stalls (Europe PMC can sit
+  // on a request for minutes) mustn't hold up everything after it.
+  const fetchT = (url, opts = {}, ms = 20000) => {
+    if (typeof AbortSignal === 'undefined' || !AbortSignal.timeout) return fetch(url, opts);
+    const t = AbortSignal.timeout(ms);
+    return fetch(url, { ...opts, signal: opts.signal ? (AbortSignal.any ? AbortSignal.any([opts.signal, t]) : opts.signal) : t });
+  };
+
 
   function cleanDoi(doi) {
     return decodeURIComponent(doi)
@@ -20,7 +28,7 @@ const Lookup = (() => {
     if ((m = /(?:pubmed\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov\/pubmed)\/(\d+)/i.exec(url))) q = `EXT_ID:${m[1]} AND SRC:MED`;
     else if ((m = /\b(PMC\d+)\b/i.exec(url))) q = `PMCID:${m[1].toUpperCase()}`;
     if (!q) return null;
-    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(q)}&format=json&resultType=lite`);
+    const res = await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(q)}&format=json&resultType=lite`);
     if (!res.ok) return null;
     const hit = ((await res.json()).resultList || {}).result || [];
     return hit[0] && hit[0].doi ? hit[0].doi : null;
@@ -31,7 +39,7 @@ const Lookup = (() => {
   async function pubmedMeta(url) {
     const m = /(?:pubmed\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov\/pubmed)\/(\d+)/i.exec(url) || /^PMID:?\s*(\d+)$/i.exec(url);
     if (!m) return null;
-    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(`EXT_ID:${m[1]} AND SRC:MED`)}&format=json&resultType=core`);
+    const res = await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(`EXT_ID:${m[1]} AND SRC:MED`)}&format=json&resultType=core`);
     if (!res.ok) return null;
     const r = (((await res.json()).resultList || {}).result || [])[0];
     if (!r) return null;
@@ -199,7 +207,7 @@ const Lookup = (() => {
   // (Europe PMC can take most of a minute to answer: give up after 8 s)
   async function doiFromPmc(pmc) {
     try {
-      const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=PMCID:PMC${pmc}&format=json&resultType=lite`, { signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined });
+      const res = await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=PMCID:PMC${pmc}&format=json&resultType=lite`, {}, 8000);
       if (!res.ok) return null;
       const json = await res.json();
       const hit = json.resultList && json.resultList.result && json.resultList.result[0];
@@ -251,7 +259,7 @@ const Lookup = (() => {
     const url = `https://doi.org/${encodeURIComponent(doi).replace(/%2F/g, '/')}`;
     let res = null;
     for (let i = 0; i < 3; i++) {
-      res = await fetch(url, { headers: { Accept: 'application/vnd.citationstyles.csl+json' } }).catch(() => null);
+      res = await fetchT(url, { headers: { Accept: 'application/vnd.citationstyles.csl+json' } }).catch(() => null);
       if (res && res.ok) break;
       if (res && res.status !== 429 && res.status < 500) break; // (a real answer: no such DOI)
       const wait = res && Number(res.headers.get('Retry-After'));
@@ -275,7 +283,7 @@ const Lookup = (() => {
 
   // A DOI's paper from OpenAlex (when Crossref is busy, or doesn't know it)
   async function openAlexByDoi(doi) {
-    const res = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=doi,title,publication_year,authorships,primary_location,abstract_inverted_index,biblio`);
+    const res = await fetchT(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=doi,title,publication_year,authorships,primary_location,abstract_inverted_index,biblio`);
     if (!res.ok) return null;
     const w = await res.json();
     if (!w || !w.title) return null;
@@ -304,7 +312,7 @@ const Lookup = (() => {
   // OpenAlex by title: it also lists papers Crossref doesn't have, such as
   // NeurIPS/ICML proceedings, JMLR and other venues without DOIs.
   async function openAlexSearch(query, norm, variants) {
-    const res = await fetch(`https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=8&select=doi,title,publication_year,authorships,primary_location,locations,abstract_inverted_index,cited_by_count`);
+    const res = await fetchT(`https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=8&select=doi,title,publication_year,authorships,primary_location,locations,abstract_inverted_index,cited_by_count`);
     if (!res.ok) return [];
     const words = (a) => {
       // the abstract comes as word → positions
@@ -348,10 +356,10 @@ const Lookup = (() => {
   // Semantic Scholar's title match (free, but busy at times: one retry).
   async function s2Search(query, norm, variants) {
     const url = `https://api.semanticscholar.org/graph/v1/paper/search/match?query=${encodeURIComponent(query)}&fields=title,year,venue,authors,externalIds,abstract,citationCount`;
-    let res = await fetch(url);
+    let res = await fetchT(url);
     if (res.status === 429) {
       await new Promise((r) => setTimeout(r, 1500));
-      res = await fetch(url);
+      res = await fetchT(url);
     }
     if (!res.ok) return [];
     return ((await res.json()).data || []).map((w) => {
@@ -378,7 +386,7 @@ const Lookup = (() => {
   // Europe PMC by title (life sciences, and anything deposited in PubMed Central).
   async function europePmcSearch(query, norm, variants) {
     const q = `TITLE:"${query.replace(/"/g, '')}"`;
-    const res = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(q)}&format=json&resultType=core&pageSize=5`);
+    const res = await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(q)}&format=json&resultType=core&pageSize=5`);
     if (!res.ok) return [];
     return (((await res.json()).resultList || {}).result || []).map((r) => {
       const title = (r.title || '').replace(/\.$/, '');
@@ -457,7 +465,7 @@ const Lookup = (() => {
     const url = `https://api.crossref.org/works?rows=20&select=DOI,title,author,issued,container-title,publisher,is-referenced-by-count,update-to&query.bibliographic=${encodeURIComponent(query)}`;
     let res = null;
     try {
-      res = await fetch(url);
+      res = await fetchT(url);
     } catch {}
     if (!res || !res.ok) {
       // Crossref down: OpenAlex alone
@@ -543,7 +551,7 @@ const Lookup = (() => {
   async function fetchPdf(url) {
     let res;
     try {
-      res = await fetch(url);
+      res = await fetchT(url, {}, 90000);
     } catch {
       // not allowed from a web page: the laptop helper can, if installed
       if (typeof Helper !== 'undefined' && (await Helper.ready)) return Helper.pdf(url);
@@ -616,11 +624,11 @@ const Lookup = (() => {
     let w = null;
     try {
       if (doi) {
-        const res = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`);
+        const res = await fetchT(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`);
         if (res.ok) w = await res.json();
       }
       if (!w && title && title.length > 15) {
-        const res = await fetch(`https://api.openalex.org/works?search=${encodeURIComponent(title)}&per-page=3`);
+        const res = await fetchT(`https://api.openalex.org/works?search=${encodeURIComponent(title)}&per-page=3`);
         const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
         if (res.ok) w = ((await res.json()).results || []).find((x) => squash(x.title) === squash(title)) || null;
       }
@@ -631,7 +639,7 @@ const Lookup = (() => {
     // Semantic Scholar knows free copies and arXiv versions too
     if (!w && doi) {
       try {
-        const res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=externalIds,openAccessPdf`);
+        const res = await fetchT(`https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=externalIds,openAccessPdf`);
         if (res.ok) {
           const r = await res.json();
           const arxiv = (r.externalIds && r.externalIds.ArXiv) || null;
@@ -695,7 +703,7 @@ const Lookup = (() => {
   }
 
   async function fetchArxivPdf(arxivId) {
-    const res = await fetch(`https://arxiv.org/pdf/${arxivId}`);
+    const res = await fetchT(`https://arxiv.org/pdf/${arxivId}`, {}, 90000);
     if (!res.ok) throw new Error(`PDF download failed (${res.status})`);
     const blob = await res.blob();
     return new File([blob], `${arxivId.replace('/', '_')}.pdf`, { type: 'application/pdf' });
@@ -722,14 +730,14 @@ const Lookup = (() => {
   async function citations(doi) {
     if (!doi) return null;
     try {
-      const res = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}?select=is-referenced-by-count`);
+      const res = await fetchT(`https://api.crossref.org/works/${encodeURIComponent(doi)}?select=is-referenced-by-count`);
       if (res.ok) {
         const n = (await res.json()).message?.['is-referenced-by-count'];
         if (Number.isInteger(n)) return { count: n, source: 'Crossref' };
       }
     } catch {}
     try {
-      const res = await fetch(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=cited_by_count`);
+      const res = await fetchT(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=cited_by_count`);
       if (res.ok) {
         const n = (await res.json()).cited_by_count;
         if (Number.isInteger(n)) return { count: n, source: 'OpenAlex' };

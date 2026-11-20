@@ -5,6 +5,14 @@
 const Supp = (() => {
   const EPMC = 'https://www.ebi.ac.uk/europepmc/webservices/rest';
   const MAX_ZIP = 250e6;
+  // Every request gets a time limit: a server that stalls (Europe PMC can sit
+  // on a request for minutes) mustn't hold up everything after it.
+  const fetchT = (url, opts = {}, ms = 20000) => {
+    if (typeof AbortSignal === 'undefined' || !AbortSignal.timeout) return fetch(url, opts);
+    const t = AbortSignal.timeout(ms);
+    return fetch(url, { ...opts, signal: opts.signal ? (AbortSignal.any ? AbortSignal.any([opts.signal, t]) : opts.signal) : t });
+  };
+
   const TYPES = {
     pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', png: 'image/png', tif: 'image/tiff', tiff: 'image/tiff', svg: 'image/svg+xml',
     csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -57,7 +65,7 @@ const Supp = (() => {
     const pm = /pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)/.exec(p.url || '');
     const q = p.doi ? `DOI:"${p.doi}"` : pm ? `EXT_ID:${pm[1]} AND SRC:MED` : null;
     if (!q) return null;
-    const res = await fetch(`${EPMC}/search?query=${encodeURIComponent(q)}&format=json&resultType=lite`);
+    const res = await fetchT(`${EPMC}/search?query=${encodeURIComponent(q)}&format=json&resultType=lite`);
     if (!res.ok) return null;
     const r = (((await res.json()).resultList || {}).result || [])[0];
     return (r && r.pmcid) || null;
@@ -65,7 +73,7 @@ const Supp = (() => {
 
   // The supplementary items the article lists (labels, captions, file names).
   async function listed(pmcid) {
-    const res = await fetch(`${EPMC}/${pmcid}/fullTextXML`);
+    const res = await fetchT(`${EPMC}/${pmcid}/fullTextXML`, {}, 45000);
     if (!res.ok) return [];
     const xml = new DOMParser().parseFromString(await res.text(), 'application/xml');
     const XL = 'http://www.w3.org/1999/xlink';
@@ -93,7 +101,7 @@ const Supp = (() => {
 
   // Download Europe PMC's bundle of the article's files, with a size cap.
   async function bundle(pmcid, signal, progress) {
-    const res = await fetch(`${EPMC}/${pmcid}/supplementaryFiles`, { signal });
+    const res = await fetchT(`${EPMC}/${pmcid}/supplementaryFiles`, { signal }, 180000);
     if (!res.ok) throw new Error(`Europe PMC answered ${res.status}`);
     const reader = res.body.getReader();
     const parts = [];
@@ -197,6 +205,13 @@ const Supp = (() => {
       });
     }
     return { items: out, pmcid, source: 'Europe PMC' };
+  }
+
+  // How many supplementary files a paper lists, without downloading them
+  // (Europe PMC's bundle can run to hundreds of megabytes)
+  async function count(p) {
+    const pmcid = await pmcidFor(p);
+    return pmcid ? (await listed(pmcid)).length : 0;
   }
 
   // A file added by hand.
@@ -321,5 +336,5 @@ const Supp = (() => {
     return out.generateAsync({ type: 'blob', mimeType: 'application/epub+zip', compression: 'DEFLATE' });
   }
 
-  return { find, fromFile, keysOf, MENTION, icon, typeOf, salvage, addToEpub, MAX_EMBED };
+  return { find, count, fromFile, keysOf, MENTION, icon, typeOf, salvage, addToEpub, MAX_EMBED };
 })();

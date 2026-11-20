@@ -2634,44 +2634,68 @@
       addBtn.hidden = true;
       toast(`Added ${added.length} paper${added.length === 1 ? '' : 's'}`);
       if (!wantPdf && !wantEpub) return;
-      // files one paper at a time, in the background
+      // Files in the background, two papers at a time. Each step has a time
+      // limit, so one slow site can't hold up the rest of the list; the
+      // supplementary files are only counted here (their download can run to
+      // hundreds of megabytes), and fetched from the paper's page.
       let pdfs = 0;
       let epubs = 0;
-      for (const [k, x] of added.entries()) {
-        line.textContent = `Getting files: paper ${k + 1} of ${added.length}…`;
+      let doneCount = 0;
+      const capped = (job, ms) => Promise.race([job, new Promise((_, no) => setTimeout(() => no(new Error('timed out')), ms))]);
+      const steps = new Map(); // paper -> what it's doing
+      const show = () => {
+        if (!document.body.contains(line)) return;
+        const now = [...steps.entries()].map(([k, s]) => `paper ${k + 1}: ${s}`).join(' · ');
+        line.textContent = `Getting files: ${doneCount} of ${added.length} done${now ? ` (${now})` : ''}…`;
+      };
+      const filesFor = async (k) => {
+        const x = added[k];
         const note = [];
+        const step = (s) => (steps.set(k, s), show());
         if (wantPdf) {
+          step('finding a free PDF');
           try {
             const p = await DB.get('papers', x.paperId);
             if (p.arxiv) {
-              await attachPdf(p.id, await Lookup.fetchArxivPdf(p.arxiv));
+              await attachPdf(p.id, await capped(Lookup.fetchArxivPdf(p.arxiv), 120000));
               note.push('PDF from arXiv');
               pdfs++;
             } else {
-              const r = await findFreePdf(p.id);
+              const r = await capped(findFreePdf(p.id), 150000);
               if (r.attached) note.push(`PDF from ${r.from}`), pdfs++;
               else note.push(r.count ? 'free copy to download by hand (see the paper)' : 'no free PDF');
             }
-          } catch {
-            note.push('no PDF');
+          } catch (err) {
+            note.push(err && err.message === 'timed out' ? 'PDF took too long (try from the paper)' : 'no PDF');
           }
         }
         if (wantEpub) {
+          step('making the EPUB');
           try {
-            await makeEpubFor(x.paperId);
+            await capped(makeEpubFor(x.paperId), 240000);
             note.push('EPUB made');
             epubs++;
-          } catch {
-            note.push('no EPUB');
+          } catch (err) {
+            note.push(err && err.message === 'timed out' ? 'EPUB took too long (try “Make EPUB” on the paper)' : 'no EPUB');
           }
         }
+        step('checking for supplementary files');
         try {
-          const r = await findSupps(x.paperId);
-          if (r.items.length) note.push(`${r.items.length} supplementary file${r.items.length > 1 ? 's' : ''}`);
+          const n = await capped(Supp.count(await DB.get('papers', x.paperId)), 30000);
+          if (n) note.push(`${n} supplementary file${n > 1 ? 's' : ''} (get them on the paper)`);
         } catch {}
+        steps.delete(k);
+        doneCount++;
+        show();
         x.note = `<a href="#/paper/${x.paperId}">Added</a> · ${note.join(' · ')}`;
         if (location.hash === '#/import' && document.body.contains(list)) draw();
-      }
+      };
+      let nextFile = 0;
+      const fileWorker = async () => {
+        while (nextFile < added.length) await filesFor(nextFile++);
+      };
+      show();
+      await Promise.all([fileWorker(), fileWorker()]);
       const msg = `Done: ${added.length} added, ${pdfs} PDF${pdfs === 1 ? '' : 's'}, ${epubs} EPUB${epubs === 1 ? '' : 's'}`;
       if (document.body.contains(line)) line.textContent = msg + '.';
       toast(msg);

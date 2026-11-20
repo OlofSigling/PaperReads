@@ -13,6 +13,14 @@
  * sites don't allow cross-origin requests from a web app.
  */
 const Epubify = (() => {
+  // Every request gets a time limit: a server that stalls (Europe PMC can sit
+  // on a request for minutes) mustn't hold up everything after it.
+  const fetchT = (url, opts = {}, ms = 20000) => {
+    if (typeof AbortSignal === 'undefined' || !AbortSignal.timeout) return fetch(url, opts);
+    const t = AbortSignal.timeout(ms);
+    return fetch(url, { ...opts, signal: opts.signal ? (AbortSignal.any ? AbortSignal.any([opts.signal, t]) : opts.signal) : t });
+  };
+
   const XHTML_NS = 'http://www.w3.org/1999/xhtml';
   const base = new URL('.', document.baseURI).href;
 
@@ -3162,7 +3170,7 @@ const Epubify = (() => {
         img,
         i,
         async () => {
-          const res = await fetch(new URL(src, baseUrl).href);
+          const res = await fetchT(new URL(src, baseUrl).href, {}, 30000);
           if (!res.ok) return null;
           return res.blob();
         },
@@ -3844,7 +3852,7 @@ const Epubify = (() => {
     log(`→ fetching arXiv HTML for ${arxivId}`);
     let res;
     try {
-      res = await fetch(`https://arxiv.org/html/${arxivId}`);
+      res = await fetchT(`https://arxiv.org/html/${arxivId}`, {}, 45000);
     } catch {
       throw new Error('could not reach arXiv');
     }
@@ -3872,7 +3880,7 @@ const Epubify = (() => {
   async function fromPubmedCentral(doi, log) {
     log('→ looking for free full text in PubMed Central');
     const q = encodeURIComponent(`DOI:"${doi}"`);
-    const s = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${q}&format=json&resultType=lite`).then((r) => r.json());
+    const s = await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${q}&format=json&resultType=lite`).then((r) => r.json());
     const results = (s.resultList && s.resultList.result) || [];
     const hit = results.find((r) => r.pmcid && r.isOpenAccess === 'Y') || results.find((r) => r.pmcid);
     if (!hit) {
@@ -3888,12 +3896,12 @@ const Epubify = (() => {
     let xml = null;
     let via = 'PubMed Central';
     try {
-      xml = await parse(await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=${pmcid.replace(/^PMC/i, '')}&rettype=xml`));
+      xml = await parse(await fetchT(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=${pmcid.replace(/^PMC/i, '')}&rettype=xml`, {}, 45000));
     } catch {}
     if (!xml) {
       log('  ! NCBI had no full text; trying Europe PMC');
       try {
-        xml = await parse(await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/${pmcid}/fullTextXML`));
+        xml = await parse(await fetchT(`https://www.ebi.ac.uk/europepmc/webservices/rest/${pmcid}/fullTextXML`, {}, 45000));
         via = 'Europe PMC';
       } catch {}
     }
@@ -4220,7 +4228,7 @@ const Epubify = (() => {
   async function fetchPage(url) {
     let res;
     try {
-      res = await fetch(url, { credentials: 'omit' });
+      res = await fetchT(url, { credentials: 'omit' }, 45000);
     } catch {
       throw new Error('this site doesn’t let apps read its pages');
     }
