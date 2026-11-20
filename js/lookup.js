@@ -344,6 +344,51 @@ const Lookup = (() => {
     return '';
   }
 
+  // What was published about a paper: letters and editorials that comment on
+  // it, corrections, retractions, updates. From PubMed's links between
+  // records ("Comment in", "Erratum in"), for papers in PubMed.
+  const REPLY_TYPES = { CommentIn: 'comment', ErratumIn: 'correction', RetractionIn: 'retraction', ExpressionOfConcernIn: 'concern', UpdateIn: 'update', RepublishedIn: 'republished' };
+  async function replies(doi) {
+    const E = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+    const ncbi = async (url) => {
+      const r = await fetchT(url, {}, 10000).catch(() => null);
+      if (r && r.status !== 429) return r;
+      await pause(1200);
+      return fetchT(url, {}, 10000);
+    };
+    const s = await ncbi(`${E}/esearch.fcgi?db=pubmed&term=${encodeURIComponent(`${doi}[doi]`)}&retmode=json`);
+    if (!s.ok) throw new Error(`PubMed answered ${s.status}`);
+    const ids = ((await s.json()).esearchresult || {}).idlist || [];
+    if (ids.length !== 1) return { pmid: null, items: [] }; // (not in PubMed)
+    const pmid = ids[0];
+    const f = await ncbi(`${E}/efetch.fcgi?db=pubmed&id=${pmid}&retmode=xml`);
+    if (!f.ok) throw new Error(`PubMed answered ${f.status}`);
+    const x = new DOMParser().parseFromString(await f.text(), 'text/xml');
+    const links = [...x.querySelectorAll('CommentsCorrectionsList > CommentsCorrections')]
+      .map((c) => ({ type: REPLY_TYPES[c.getAttribute('RefType')], pmid: (c.querySelector('PMID') || {}).textContent || '', source: ((c.querySelector('RefSource') || {}).textContent || '').trim() }))
+      .filter((r) => r.type);
+    const withIds = links.filter((r) => r.pmid);
+    const sum = {};
+    if (withIds.length) {
+      await pause(400);
+      const r = await ncbi(`${E}/esummary.fcgi?db=pubmed&id=${withIds.map((l) => l.pmid).join(',')}&retmode=json`);
+      if (r.ok) Object.assign(sum, (await r.json()).result || {});
+    }
+    const items = links.map((l) => {
+      const m = sum[l.pmid] || {};
+      const doiOf = ((m.articleids || []).find((a) => a.idtype === 'doi') || {}).value || '';
+      return {
+        type: l.type,
+        pmid: l.pmid,
+        title: stripTags(m.title || '').replace(/\.$/, ''),
+        authors: (m.authors || []).map((a) => a.name).filter(Boolean).slice(0, 3),
+        source: m.source ? `${m.source}${m.pubdate ? ` ${String(m.pubdate).slice(0, 4)}` : ''}` : l.source,
+        doi: doiOf,
+      };
+    });
+    return { pmid, items };
+  }
+
   // A DOI's paper from OpenAlex (when Crossref is busy, or doesn't know it)
   async function openAlexByDoi(doi) {
     const res = await fetchT(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=doi,title,publication_year,authorships,primary_location,abstract_inverted_index,biblio`);
@@ -809,5 +854,5 @@ const Lookup = (() => {
     return null;
   }
 
-  return { parse, doiFromPmc, citations, resolve, search, byDoi, findAbstract, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
+  return { parse, doiFromPmc, citations, resolve, search, byDoi, findAbstract, replies, cleanTitle, isPdfUrl, fetchPdf, identifyPdf, fetchArxivPdf, countPdfPages, freeCopies, fetchFreePdf, listItems, resolveItem, refTitle };
 })();

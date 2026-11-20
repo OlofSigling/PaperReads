@@ -348,6 +348,13 @@ main:has(#board) { max-width: none; }
 .note { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--text); }
 
 .badge.s-concern { background: #fde8dc; color: #9a3412; }
+.replies .reply { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; }
+.replies .reply .badge { display: inline-block; margin-bottom: 2px; }
+.replies-jump.warn { color: #9a3412; font-weight: 600; }
+#replies-card { scroll-margin-top: 72px; }
+.replies .reply-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.replies .reply .btn { flex: none; }
+.reply-warn { color: #9a3412; font-weight: 600; margin: 0 0 6px; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .badge.s-concern { background: #3d2318; color: #fdba8c; } }
 .concerns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .concerns li { display: flex; gap: 8px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--border); }

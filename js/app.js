@@ -2802,6 +2802,35 @@
     return { attached: false, count: r.pdfs.length };
   }
 
+  // What was published about a paper (from PubMed): letters and editorials,
+  // and corrections or retractions, which are flagged
+  const REPLY_LABEL = { comment: 'Comment', correction: 'Correction', retraction: 'Retraction', concern: 'Expression of concern', update: 'Updated version', republished: 'Republished' };
+  // (and a line at the top of the page: a retraction shouldn't wait at the bottom)
+  function repliesTop(p) {
+    const items = p.replies || [];
+    if (!items.length) return '';
+    const flag = items.some((r) => r.type === 'retraction') ? '⚠ Retracted' : items.some((r) => r.type === 'concern') ? '⚠ Expression of concern' : items.some((r) => r.type === 'correction') ? 'Corrected' : '';
+    const n = items.filter((r) => r.type === 'comment').length;
+    return `<button type="button" class="link replies-jump${flag.startsWith('⚠') ? ' warn' : ''}" title="Published about this paper (PubMed)">${[flag, n ? `💬 ${n} repl${n === 1 ? 'y' : 'ies'}` : ''].filter(Boolean).join(' · ')}</button>`;
+  }
+  function repliesCard(p, all) {
+    const items = p.replies || [];
+    if (!items.length) return '';
+    const have = new Map(all.filter((x) => x.doi).map((x) => [x.doi.toLowerCase(), x]));
+    const warn = items.filter((r) => r.type === 'retraction' || r.type === 'concern' || r.type === 'correction');
+    const order = { retraction: 0, concern: 1, correction: 2, update: 3, comment: 4, republished: 5 };
+    const li = (r) => {
+      const mine = r.doi && have.get(r.doi.toLowerCase());
+      const href = r.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${r.pmid}/` : r.doi ? `https://doi.org/${r.doi}` : '';
+      return `<li class="reply r-${r.type}"><span class="reply-body"><span><span class="badge${r.type === 'comment' || r.type === 'update' || r.type === 'republished' ? '' : ' s-concern'}">${REPLY_LABEL[r.type] || r.type}</span></span>${href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(r.title || r.source || 'PubMed record')}</a>` : esc(r.title || r.source)}
+        <small class="muted">${esc([r.authors && r.authors.length ? authorsShort(r.authors) : '', r.title ? r.source : ''].filter(Boolean).join(' · '))}</small></span>
+        ${mine ? `<a class="btn small" href="#/paper/${mine.id}">In library</a>` : r.doi ? `<a class="btn small" href="#/add?via=${p.id}&url=${encodeURIComponent(r.doi)}">＋ Add</a>` : ''}</li>`;
+    };
+    return `<section class="card replies" id="replies-card"><h3>Replies and comments <span class="muted small">${items.length} · from PubMed</span></h3>
+      ${warn.some((r) => r.type === 'retraction') ? '<p class="small reply-warn">⚠ This paper has been retracted.</p>' : warn.some((r) => r.type === 'concern') ? '<p class="small reply-warn">⚠ An expression of concern was published about this paper.</p>' : ''}
+      <ul class="list compact">${[...items].sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9)).map(li).join('')}</ul></section>`;
+  }
+
   async function viewPaper(id) {
     const p = await DB.get('papers', id);
     if (!p) {
@@ -2845,6 +2874,7 @@
           ${p.arxiv ? `<a href="https://arxiv.org/abs/${esc(p.arxiv)}" target="_blank" rel="noopener">arXiv: ${esc(p.arxiv)}</a>` : ''}
           ${p.url && !p.arxiv ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">Link</a>` : ''}
           ${p.doi || p.arxiv || p.title ? `<a href="${esc(pubpeerUrl(p))}" target="_blank" rel="noopener" title="Comments on this paper by other researchers">PubPeer</a>` : ''}
+          <span id="replies-top">${repliesTop(p)}</span>
         </p>
 
         <section class="card files">
@@ -2983,6 +3013,7 @@
         </section>
 
         ${p.abstract ? `<section class="card"><details><summary><h3 class="inline">Abstract</h3></summary><p class="abstract">${esc(p.abstract)}</p></details></section>` : ''}
+        <div id="replies-slot">${repliesCard(p, all)}</div>
 
         <div class="row between actions">
           <a class="btn" href="#/edit/${p.id}">Edit details</a>
@@ -2992,6 +3023,25 @@
 
     const rerender = () => viewPaper(id);
 
+    // replies (letters, corrections, retractions): looked up once a week, in the background
+    if (p.doi && navigator.onLine && !(p.repliesAt > now() - 7 * 864e5)) {
+      Lookup.replies(p.doi)
+        .then(async (r) => {
+          const fresh = await DB.get('papers', id);
+          if (!fresh) return;
+          fresh.replies = r.items;
+          fresh.repliesAt = now();
+          if (r.pmid && !fresh.pmid) fresh.pmid = r.pmid;
+          await savePaper(fresh);
+          const slot = $('#replies-slot');
+          if (slot && location.hash.split('?')[0] === `#/paper/${id}`) {
+            slot.innerHTML = repliesCard(fresh, await papers());
+            const top = $('#replies-top');
+            if (top) top.innerHTML = repliesTop(fresh);
+          }
+        })
+        .catch(() => {});
+    }
     $('#bundle-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const name = e.target.b.value.trim();
@@ -6059,6 +6109,11 @@
     nav.hidden = false;
   }
   window.addEventListener('hashchange', showPnav);
+  // the paper page's "💬 3 replies" goes down to the list
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('.replies-jump');
+    if (b) $('#replies-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   showPnav();
   // ← and → on a paper's page, when not typing
   document.addEventListener('keydown', (e) => {
