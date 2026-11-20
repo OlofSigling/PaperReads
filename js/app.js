@@ -5639,6 +5639,24 @@
     showState({ ...Sync.state, last: Sync.state.last || last });
     const unsub = Sync.subscribe(showState);
     teardown = () => unsub();
+    {
+      const nl = navLogHtml();
+      if (nl) {
+        const sec = document.createElement('section');
+        sec.className = 'card';
+        sec.innerHTML = nl;
+        main.appendChild(sec);
+        $('#navlog-copy', sec).addEventListener('click', async () => {
+          const text = $('.navlog', sec).innerText;
+          try {
+            await navigator.clipboard.writeText(text);
+            toast('Copied');
+          } catch {
+            prompt('Copy:', text);
+          }
+        });
+      }
+    }
     if (clientId) Sync.loadGis().catch(() => {}); // ready before the tap, so the sign-in popup isn't blocked
 
     if (invite && !clientId) $('#sy-invited').scrollIntoView({ block: 'center' });
@@ -6112,6 +6130,48 @@
     nav.hidden = false;
   }
   window.addEventListener('hashchange', showPnav);
+
+  // ---------- troubleshooting: how the app got to each page ----------
+  // The last few page changes, each with the key or tap just before it and
+  // what had the focus: shown at the bottom of Settings, to find out why a
+  // page opened that wasn't asked for. Kept on this device only.
+  const NAVLOG = 'paperreads.navlog';
+  const describe = (el) => {
+    if (!el || !el.tagName) return '';
+    const t = (el.getAttribute('aria-label') || el.textContent || el.value || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    return `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.classList && el.classList.length ? '.' + [...el.classList].slice(0, 2).join('.') : ''}${el.getAttribute('href') ? ` href=${el.getAttribute('href')}` : ''}${t ? ` “${t}”` : ''}`;
+  };
+  let lastInput = null;
+  const noteInput = (kind) => (e) => {
+    if (kind === 'key' && !['Enter', 'Tab', ' ', 'ArrowLeft', 'ArrowRight', 'Escape', 'Backspace'].includes(e.key)) return;
+    lastInput = { kind: kind === 'key' ? `key ${e.key === ' ' ? 'Space' : e.key}${e.shiftKey ? '+Shift' : ''}` : 'tap/click', on: describe(e.target), focus: describe(document.activeElement), at: Date.now() };
+  };
+  document.addEventListener('keydown', noteInput('key'), true);
+  document.addEventListener('click', noteInput('click'), true);
+  let lastHash = location.hash;
+  window.addEventListener('hashchange', () => {
+    let log = [];
+    try {
+      log = JSON.parse(sessionStorage.getItem(NAVLOG) || '[]');
+    } catch {}
+    const recent = lastInput && Date.now() - lastInput.at < 3000 ? lastInput : null;
+    log.push({ at: Date.now(), from: lastHash, to: location.hash, by: recent ? `${recent.kind} on ${recent.on}${recent.focus && recent.focus !== recent.on ? ` (focus: ${recent.focus})` : ''}` : 'no key or tap just before (the app itself)' });
+    lastHash = location.hash;
+    try {
+      sessionStorage.setItem(NAVLOG, JSON.stringify(log.slice(-12)));
+    } catch {}
+  });
+  const navLogHtml = () => {
+    let log = [];
+    try {
+      log = JSON.parse(sessionStorage.getItem(NAVLOG) || '[]');
+    } catch {}
+    if (!log.length) return '';
+    return `<details class="small"><summary>Recent page changes (for troubleshooting)</summary><ol class="navlog">${log
+      .reverse()
+      .map((x) => `<li><b>${new Date(x.at).toLocaleTimeString()}</b> ${esc(x.from || '#/')} → ${esc(x.to || '#/')}<br><span class="muted">${esc(x.by)}</span></li>`)
+      .join('')}</ol><button type="button" class="btn small" id="navlog-copy">Copy</button></details>`;
+  };
   // the paper page's "💬 3 replies" goes down to the list
   document.addEventListener('click', (e) => {
     const b = e.target.closest && e.target.closest('.replies-jump');

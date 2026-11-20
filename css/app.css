@@ -278,6 +278,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: .9rem;
   opacity: 0; pointer-events: none; transition: .2s; z-index: 20; max-width: calc(100vw - 32px);
 }
+.navlog { padding-left: 1.2em; overflow-wrap: anywhere; }
+.navlog li { margin: 6px 0; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.has-action.show { pointer-events: auto; display: flex; align-items: center; gap: 12px; }
 .toast button { background: none; border: 0; color: inherit; text-decoration: underline; font: inherit; font-weight: 600; padding: 4px 0; cursor: pointer; }
