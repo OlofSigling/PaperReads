@@ -468,10 +468,13 @@
         span.addEventListener('keydown', (e) => e.key === 'Enter' && edit());
       });
       if (jump) $$('.c-jump', root).forEach((b) => b.addEventListener('click', () => jump((list.find((c) => c.id === byId(b)) || {}).cfi)));
-      $('.c-add', root).addEventListener('submit', (e) => {
+      $('.c-add', root).addEventListener('submit', async (e) => {
         e.preventDefault();
         const text = e.target.t.value.trim();
-        if (text) mutate((cs) => cs.push({ id: uid(), text, done: false, createdAt: now() }));
+        if (!text) return;
+        await mutate((cs) => cs.push({ id: uid(), text, done: false, createdAt: now() }));
+        // (the box is drawn anew: keep typing there, for the next concern)
+        $('.c-add input', root)?.focus();
       });
     }
     draw();
