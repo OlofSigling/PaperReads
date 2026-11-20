@@ -503,6 +503,8 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .chip-pair { display: inline-flex; gap: 2px; }
 /* quick-sort */
 .qs { display: flex; flex-direction: column; gap: 12px; }
+.qs-which { display: flex; flex-direction: row; align-items: center; gap: 6px; margin: 0; }
+.qs-which select { font: inherit; width: auto; padding: 2px 6px; border-radius: 6px; }
 .qs-bar { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
 .qs-bar span { display: block; height: 100%; background: var(--accent); }
 .qs-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
@@ -512,7 +514,7 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .qs-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .qs-picks .btn { justify-content: flex-start; text-align: left; min-height: 44px; }
 .qs kbd { font: .7rem ui-monospace, monospace; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-right: 6px; color: var(--muted); }
-@media (hover: none) { .qs kbd { display: none; } }
+@media (hover: none) { .qs kbd, .qs-keys { display: none; } }
 .chip-add { padding-inline: 8px; }
 .q-selbar { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 72px); }
 .lib-bundle { list-style: none; }

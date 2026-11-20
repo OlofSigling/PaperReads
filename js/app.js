@@ -126,14 +126,24 @@
   // Each field remembers when it last changed (p.ft), so sync can take the
   // newest of each field rather than the newest whole paper: a position read
   // on the phone and a note typed on the laptop both survive.
+  // A copy of a paper read a while ago (before a slow download, say) can
+  // be saved after the paper was changed elsewhere: fields changed since the
+  // copy was read keep their newer value, so the copy can't undo them.
   async function savePaper(p) {
     const t = now();
     const old = await DB.get('papers', p.id);
-    const ft = { ...(old && old.ft), ...p.ft };
+    const ft = { ...(old && old.ft) };
     const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
     for (const k of new Set([...Object.keys(p), ...Object.keys(old || {})])) {
       if (k === 'ft' || k === 'updatedAt') continue;
+      const newer = old && old.ft && p.ft && (old.ft[k] || 0) > (p.ft[k] || 0);
+      if (newer && !same(old[k], p[k])) {
+        if (k in old) p[k] = old[k];
+        else delete p[k];
+        continue;
+      }
       if (!old || !same(old[k], p[k])) ft[k] = t;
+      else if (p.ft && p.ft[k] > (ft[k] || 0)) ft[k] = p.ft[k];
     }
     p.ft = ft;
     p.updatedAt = t;
@@ -1386,17 +1396,40 @@
     setTitle('Quick-sort');
     const all = await papers();
     // (in the queue's order, then the library's newest first)
-    const todo = all
-      .filter((p) => p.bundle === name)
+    // (which papers: Want to read by default, when the bundle has any)
+    const mine = all.filter((p) => p.bundle === name);
+    const byStatus = new Map(Object.keys(STATUS).map((k) => [k, mine.filter((p) => (p.status || 'none') === k).length]));
+    const which = q.s && (q.s === 'all' || STATUS[q.s]) ? q.s : byStatus.get('want') ? 'want' : 'all';
+    const pickWhich = `<label class="small qs-which">Sort <select id="qs-which">${[...byStatus.entries()]
+      .filter(([, n]) => n)
+      .map(([k, n]) => `<option value="${k}"${which === k ? ' selected' : ''}>${STATUS[k]} (${n})</option>`)
+      .join('')}<option value="all"${which === 'all' ? ' selected' : ''}>All (${mine.length})</option></select></label>`;
+    const wireWhich = () => $('#qs-which')?.addEventListener('change', (e) => (location.hash = `#/sort?b=${encodeURIComponent(name)}&s=${e.target.value}`));
+    const todo = mine
+      .filter((p) => which === 'all' || (p.status || 'none') === which)
       .sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9) || (b.addedAt || 0) - (a.addedAt || 0))
       .map((p) => p.id);
     const subsOf = (ps) => [...new Set(ps.map((p) => p.bundle || '').filter((b) => b.startsWith(name + ' / ')).map((b) => name + ' / ' + b.slice(name.length + 3).split(' / ')[0]))];
-    let subs = subsOf(all).sort((a, b) => a.localeCompare(b));
+    // (sub-bundles named here but with no paper in them yet are kept for the bundle)
+    const KEEP = 'paperreads.qsort-new:' + name;
+    let named = [];
+    try {
+      named = JSON.parse(localStorage.getItem(KEEP) || '[]');
+    } catch {}
+    let subs = [...new Set([...subsOf(all), ...named])].sort((a, b) => a.localeCompare(b));
+    const keepName = (to) => {
+      if (!subs.includes(to)) subs = [...subs, to];
+      const empty = subs.filter((s) => !all.some((p) => inBundle(s, p.bundle)) && !done.some((d) => d.to === s));
+      try {
+        localStorage.setItem(KEEP, JSON.stringify(empty));
+      } catch {}
+    };
     const total = todo.length;
     let at = 0;
     const done = []; // [{ id, from, to }] for undo
     if (!name || !total) {
-      main.innerHTML = `<p class="empty">${name ? `No papers left directly in “${esc(bundleLabel(name))}”: they're all in its sub-bundles.` : 'No bundle chosen.'}</p><a class="btn" href="#/queue">Back to the queue</a>`;
+      main.innerHTML = `${mine.length ? `<div class="row between">${pickWhich}</div>` : ''}<p class="empty">${name ? (mine.length ? `No ${esc(STATUS[which] || '').toLowerCase()} papers left directly in “${esc(bundleLabel(name))}”.` : `No papers left directly in “${esc(bundleLabel(name))}”: they're all in its sub-bundles.`) : 'No bundle chosen.'}</p><a class="btn" href="#/queue">Back to the queue</a>`;
+      wireWhich();
       return;
     }
     // (each sub-bundle's size: what it had, and what this round sent it)
@@ -1410,7 +1443,7 @@
       if (at >= total) {
         const moved = done.filter((d) => d.to).length;
         main.innerHTML = `<section class="qs"><h2>Done</h2><p>${moved} of ${total} paper${total === 1 ? '' : 's'} sorted into sub-bundles of “${esc(bundleLabel(name))}”; ${total - moved} left in it.</p>
-          <div class="row wrap">${done.length ? '<button class="btn" id="qs-undo">↶ Undo last</button>' : ''}<a class="btn primary" href="#/queue">Back to the queue</a><a class="btn" href="#/sort?b=${encodeURIComponent(name)}">Go through the rest again</a></div></section>`;
+          <div class="row wrap">${done.length ? '<button class="btn" id="qs-undo">↶ Undo last</button>' : ''}<a class="btn primary" href="#/queue">Back to the queue</a><a class="btn" href="#/sort?b=${encodeURIComponent(name)}&s=${which}">Go through the rest again</a></div></section>`;
         $('#qs-undo')?.addEventListener('click', undo);
         return;
       }
@@ -1423,7 +1456,7 @@
       const c = counts();
       const abs = p.abstract ? esc(p.abstract) : '<span class="muted">No abstract.</span>';
       main.innerHTML = `<section class="qs">
-        <div class="row between"><span class="muted small">📦 ${esc(bundleLabel(name))}</span><span class="small"><b>${at + 1}</b> of ${total}</span></div>
+        <div class="row between"><span class="muted small">📦 ${esc(bundleLabel(name))}</span>${pickWhich}<span class="small"><b>${at + 1}</b> of ${total}</span></div>
         <div class="qs-bar"><span style="width:${Math.round((at / total) * 100)}%"></span></div>
         <article class="qs-card">
           <h3>${esc(p.title)}</h3>
@@ -1434,8 +1467,10 @@
         <div class="qs-picks">${subs.map((s, i) => `<button class="btn qs-pick" data-to="${esc(s)}">${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}${esc(bundleLeaf(s))} <span class="muted small">${c.get(s) || ''}</span></button>`).join('')}
           <button class="btn qs-new" id="qs-new"><kbd>N</kbd>＋ New sub-bundle</button></div>
         <form class="row qs-newform" id="qs-newform" hidden><input name="n" placeholder="Sub-bundle name" autocomplete="off" aria-label="New sub-bundle name"><button class="btn primary">Add</button></form>
-        <div class="row between"><button class="btn small" id="qs-back" ${done.length ? '' : 'disabled'}><kbd>⌫</kbd> Undo</button><button class="btn small" id="qs-leave"><kbd>␣</kbd> Leave in ${esc(bundleLeaf(name))}</button></div>
+        <div class="row between"><button class="btn small" id="qs-back" ${done.length ? '' : 'disabled'}><kbd>Backspace</kbd>Undo</button><button class="btn small" id="qs-leave"><kbd>Space</kbd>Leave in ${esc(bundleLeaf(name))}</button></div>
+        <p class="muted small qs-keys">Keys: <kbd>1</kbd>–<kbd>9</kbd> send to that sub-bundle · <kbd>N</kbd> new sub-bundle · <kbd>Space</kbd> leave it here · <kbd>Backspace</kbd> undo</p>
       </section>`;
+      wireWhich();
       $$('.qs-pick').forEach((b) => b.addEventListener('click', () => send(b.dataset.to)));
       $('#qs-new').addEventListener('click', openNew);
       $('#qs-newform').addEventListener('submit', (e) => {
@@ -1443,8 +1478,20 @@
         const leaf = normBundle(e.target.n.value);
         if (!leaf) return;
         const to = `${name} / ${leaf}`;
-        if (!subs.includes(to)) subs = [...subs, to];
+        keepName(to);
         send(to);
+      });
+      // (a name typed and left without Add still becomes a button)
+      $('#qs-newform').n.addEventListener('blur', (e) => {
+        const leaf = normBundle(e.target.value);
+        setTimeout(() => {
+          if (!leaf || !document.body.contains(e.target)) return; // (Add was pressed: the card moved on)
+          const to = `${name} / ${leaf}`;
+          if (subs.includes(to)) return;
+          keepName(to);
+          draw();
+          toast(`“${leaf}” added: tap it to send a paper there`);
+        }, 150);
       });
       $('#qs-back').addEventListener('click', undo);
       $('#qs-leave').addEventListener('click', () => send(''));
@@ -1459,6 +1506,7 @@
       const id = todo[at];
       if (to) await setBundle([id], to);
       done.push({ id, from: name, to });
+      if (to) keepName(to);
       at++;
       draw();
     };
