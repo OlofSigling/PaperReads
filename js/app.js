@@ -5790,6 +5790,76 @@
 
   // ---------- boot ----------
   window.addEventListener('hashchange', route);
+
+  // ---------- previous / next through the list a paper was opened from ----------
+  // Opening a paper from any list (queue, board, library, search, a bundle)
+  // remembers that list's papers in the order shown; the paper's page then
+  // has ‹ Prev · 3 of 12 · Next › above it, and ← → step through.
+  const PNAV_KEY = 'paperreads.paper-list';
+  const PAPER_HREF = /^#\/paper\/([^/?#]+)$/;
+  const readPnav = () => {
+    try {
+      return JSON.parse(sessionStorage.getItem(PNAV_KEY) || 'null');
+    } catch {
+      return null;
+    }
+  };
+  document.addEventListener(
+    'click',
+    (e) => {
+      const a = e.target.closest && e.target.closest('a[href^="#/paper/"]');
+      if (!a || !main.contains(a)) return;
+      const m = PAPER_HREF.exec(a.getAttribute('href'));
+      if (!m) return;
+      const id = decodeURIComponent(m[1]);
+      const cur = readPnav();
+      // (from a paper's own page, a paper of the same list keeps the list)
+      if (PAPER_HREF.test(location.hash.split('?')[0]) && cur && cur.ids.includes(id)) return;
+      const ids = [];
+      for (const x of $$('a[href^="#/paper/"]', main)) {
+        const k = PAPER_HREF.exec(x.getAttribute('href'));
+        if (k && !ids.includes(decodeURIComponent(k[1]))) ids.push(decodeURIComponent(k[1]));
+      }
+      if (ids.length < 2) return;
+      try {
+        sessionStorage.setItem(PNAV_KEY, JSON.stringify({ ids, from: location.hash || '#/', title: $('#page-title').textContent }));
+      } catch {}
+    },
+    true
+  );
+  async function showPnav() {
+    const nav = $('#pnav');
+    const m = PAPER_HREF.exec(location.hash.split('?')[0]);
+    const ctx = m && readPnav();
+    const i = ctx ? ctx.ids.indexOf(decodeURIComponent(m[1])) : -1;
+    if (i < 0) {
+      nav.hidden = true;
+      nav.innerHTML = '';
+      return;
+    }
+    // (papers deleted since are skipped)
+    const have = new Set((await papers()).map((p) => p.id));
+    const ids = ctx.ids.filter((x) => have.has(x) || x === ctx.ids[i]);
+    const at = ids.indexOf(ctx.ids[i]);
+    const prev = ids[at - 1];
+    const next = ids[at + 1];
+    const link = (pid, label, rel) => (pid ? `<a class="btn small" href="#/paper/${encodeURIComponent(pid)}" rel="${rel}" data-pnav="${rel}">${label}</a>` : `<span class="btn small" aria-disabled="true">${label}</span>`);
+    nav.innerHTML = `${link(prev, '‹ Prev', 'prev')}<a class="pnav-mid small" href="${esc(ctx.from)}" title="Back to the list">${at + 1} of ${ids.length}${ctx.title ? ` · ${esc(ctx.title)}` : ''}</a>${link(next, 'Next ›', 'next')}`;
+    nav.hidden = false;
+  }
+  window.addEventListener('hashchange', showPnav);
+  showPnav();
+  // ← and → on a paper's page, when not typing
+  document.addEventListener('keydown', (e) => {
+    if ($('#pnav').hidden || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return;
+    if ($('#dialog') && $('#dialog').open) return;
+    const a = $(`#pnav [data-pnav="${e.key === 'ArrowLeft' ? 'prev' : e.key === 'ArrowRight' ? 'next' : ''}"]`);
+    if (a) {
+      e.preventDefault();
+      location.hash = a.getAttribute('href');
+    }
+  });
   window.addEventListener('online', () => $('#offline').hidden = true);
   window.addEventListener('offline', () => $('#offline').hidden = false);
   $('#offline').hidden = navigator.onLine;
