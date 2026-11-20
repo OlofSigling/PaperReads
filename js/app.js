@@ -836,6 +836,7 @@
     [/^#\/edit\/(.+)$/, (q, id) => viewEdit(id, q)],
     [/^#\/paper\/(.+)$/, (q, id) => viewPaper(id)],
     [/^#\/read\/(.+)$/, (q, id) => viewReader(id, q)],
+    [/^#\/sort$/, viewSort],
   ];
 
   // Views that hold resources (the EPUB reader) register a cleanup here.
@@ -1377,16 +1378,137 @@
       await setBundle([p.id], next);
     }
   }
+  // Quick-sort: a bundle's papers one at a time, each sent to a sub-bundle
+  // with one tap (or key: 1–9 a sub-bundle, N a new one, Space leaves it
+  // where it is, Backspace undoes the last one).
+  async function viewSort(q) {
+    const name = normBundle(q.b || '');
+    setTitle('Quick-sort');
+    const all = await papers();
+    // (in the queue's order, then the library's newest first)
+    const todo = all
+      .filter((p) => p.bundle === name)
+      .sort((a, b) => (a.queueOrder ?? 1e9) - (b.queueOrder ?? 1e9) || (b.addedAt || 0) - (a.addedAt || 0))
+      .map((p) => p.id);
+    const subsOf = (ps) => [...new Set(ps.map((p) => p.bundle || '').filter((b) => b.startsWith(name + ' / ')).map((b) => name + ' / ' + b.slice(name.length + 3).split(' / ')[0]))];
+    let subs = subsOf(all).sort((a, b) => a.localeCompare(b));
+    const total = todo.length;
+    let at = 0;
+    const done = []; // [{ id, from, to }] for undo
+    if (!name || !total) {
+      main.innerHTML = `<p class="empty">${name ? `No papers left directly in “${esc(bundleLabel(name))}”: they're all in its sub-bundles.` : 'No bundle chosen.'}</p><a class="btn" href="#/queue">Back to the queue</a>`;
+      return;
+    }
+    // (each sub-bundle's size: what it had, and what this round sent it)
+    const had = new Map(subs.map((s) => [s, all.filter((p) => inBundle(s, p.bundle)).length]));
+    const counts = () => {
+      const c = new Map(subs.map((s) => [s, had.get(s) || 0]));
+      for (const d of done) if (d.to && c.has(d.to)) c.set(d.to, c.get(d.to) + 1);
+      return c;
+    };
+    const draw = async () => {
+      if (at >= total) {
+        const moved = done.filter((d) => d.to).length;
+        main.innerHTML = `<section class="qs"><h2>Done</h2><p>${moved} of ${total} paper${total === 1 ? '' : 's'} sorted into sub-bundles of “${esc(bundleLabel(name))}”; ${total - moved} left in it.</p>
+          <div class="row wrap">${done.length ? '<button class="btn" id="qs-undo">↶ Undo last</button>' : ''}<a class="btn primary" href="#/queue">Back to the queue</a><a class="btn" href="#/sort?b=${encodeURIComponent(name)}">Go through the rest again</a></div></section>`;
+        $('#qs-undo')?.addEventListener('click', undo);
+        return;
+      }
+      const p = await DB.get('papers', todo[at]);
+      if (!p || p.bundle !== name) {
+        // (gone, or moved elsewhere meanwhile)
+        at++;
+        return draw();
+      }
+      const c = counts();
+      const abs = p.abstract ? esc(p.abstract) : '<span class="muted">No abstract.</span>';
+      main.innerHTML = `<section class="qs">
+        <div class="row between"><span class="muted small">📦 ${esc(bundleLabel(name))}</span><span class="small"><b>${at + 1}</b> of ${total}</span></div>
+        <div class="qs-bar"><span style="width:${Math.round((at / total) * 100)}%"></span></div>
+        <article class="qs-card">
+          <h3>${esc(p.title)}</h3>
+          <p class="muted small">${esc(authorsShort(p.authors))}${p.year ? ` · ${p.year}` : ''}${p.venue ? ` · ${esc(p.venue)}` : ''}</p>
+          ${(p.tags || []).length ? `<p class="small">${p.tags.map((t) => `#${esc(t)}`).join(' ')}</p>` : ''}
+          <p class="qs-abs">${abs}</p>
+        </article>
+        <div class="qs-picks">${subs.map((s, i) => `<button class="btn qs-pick" data-to="${esc(s)}">${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}${esc(bundleLeaf(s))} <span class="muted small">${c.get(s) || ''}</span></button>`).join('')}
+          <button class="btn qs-new" id="qs-new"><kbd>N</kbd>＋ New sub-bundle</button></div>
+        <form class="row qs-newform" id="qs-newform" hidden><input name="n" placeholder="Sub-bundle name" autocomplete="off" aria-label="New sub-bundle name"><button class="btn primary">Add</button></form>
+        <div class="row between"><button class="btn small" id="qs-back" ${done.length ? '' : 'disabled'}><kbd>⌫</kbd> Undo</button><button class="btn small" id="qs-leave"><kbd>␣</kbd> Leave in ${esc(bundleLeaf(name))}</button></div>
+      </section>`;
+      $$('.qs-pick').forEach((b) => b.addEventListener('click', () => send(b.dataset.to)));
+      $('#qs-new').addEventListener('click', openNew);
+      $('#qs-newform').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const leaf = normBundle(e.target.n.value);
+        if (!leaf) return;
+        const to = `${name} / ${leaf}`;
+        if (!subs.includes(to)) subs = [...subs, to];
+        send(to);
+      });
+      $('#qs-back').addEventListener('click', undo);
+      $('#qs-leave').addEventListener('click', () => send(''));
+    };
+    const openNew = () => {
+      const f = $('#qs-newform');
+      if (!f) return;
+      f.hidden = false;
+      f.n.focus();
+    };
+    const send = async (to) => {
+      const id = todo[at];
+      if (to) await setBundle([id], to);
+      done.push({ id, from: name, to });
+      at++;
+      draw();
+    };
+    async function undo() {
+      const d = done.pop();
+      if (!d) return;
+      if (d.to) await setBundle([d.id], d.from);
+      at = todo.indexOf(d.id);
+      draw();
+    }
+    const onKey = (e) => {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.target.closest && e.target.closest('input, textarea, select')) {
+        if (e.key === 'Escape') $('#qs-newform').hidden = true;
+        return;
+      }
+      if ($('#dialog') && $('#dialog').open) return;
+      if (/^[1-9]$/.test(e.key) && at < total) {
+        const s = subs[Number(e.key) - 1];
+        if (s) (e.preventDefault(), send(s));
+      } else if ((e.key === 'n' || e.key === 'N') && at < total) {
+        e.preventDefault();
+        openNew();
+      } else if (e.key === ' ' && at < total) {
+        e.preventDefault();
+        send('');
+      } else if (e.key === 'Backspace' || ((e.key === 'z' || e.key === 'Z') && done.length)) {
+        e.preventDefault();
+        undo();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    teardown = () => document.removeEventListener('keydown', onKey);
+    draw();
+  }
+
   // A bundle's own menu: rename it, or undo it.
   async function bundleMenu(all, name) {
     const dlg = $('#dialog');
     dlg.innerHTML = `<form method="dialog" class="dlg"><h3>📦 ${esc(bundleLabel(name))}</h3>
-      <div class="row wrap end"><button value="nest" class="btn">Put inside another bundle</button>${bundleParent(name) ? `<button value="top" class="btn">Move out to the top level</button>` : ''}<button value="sort-recent" class="btn">Sort by recency</button><button value="sort-perYear" class="btn">Sort by citations per year</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
+      <div class="row wrap end">${all.some((p) => p.bundle === name) ? '<button value="qsort" class="btn primary">Quick-sort into sub-bundles</button>' : ''}<button value="nest" class="btn">Put inside another bundle</button>${bundleParent(name) ? `<button value="top" class="btn">Move out to the top level</button>` : ''}<button value="sort-recent" class="btn">Sort by recency</button><button value="sort-perYear" class="btn">Sort by citations per year</button><button value="sort-cites" class="btn">Sort by citations</button><button value="sort-epub" class="btn">EPUB first</button><button value="rename" class="btn">Rename</button><button value="undo" class="btn danger-ghost">Unbundle</button><button value="cancel" class="btn primary">Close</button></div></form>`;
     const choice = await new Promise((resolve) => {
       dlg.onclose = () => resolve(dlg.returnValue);
       dlg.showModal();
     });
     const members = all.filter((p) => p.bundle === name).map((p) => p.id);
+    if (choice === 'qsort') {
+      location.hash = `#/sort?b=${encodeURIComponent(name)}`;
+      return false;
+    }
     if (choice === 'sort-cites') await sortWithin(name, 'citations');
     else if (choice === 'sort-recent') await sortWithin(name, 'recent');
     else if (choice === 'sort-perYear') await sortWithin(name, 'perYear');
