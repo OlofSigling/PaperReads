@@ -706,7 +706,21 @@ const Epubify = (() => {
       const nextCap = Math.min(H, ...caps.filter((c) => c !== cap && c.bbox[1] > top[1] && c.bbox[0] < top[2] && c.bbox[2] > top[0]).map((c) => c.bbox[1]));
       const same = rs.filter((r) => r !== top && r[1] > top[1] + 4 && r[1] < nextCap && Math.abs(r[0] - top[0]) < 8 && Math.abs(r[2] - top[2]) < 8);
       if (!same.length) continue;
-      const bottom = same[same.length - 1];
+      // (rules further down, past lines of running text, are the page's, not
+      // the table's: the rule over the references under the article's last columns)
+      // (a column of it: many lines of words, few figures, starting at one edge, narrower than the table)
+      const wordy = (l, r) => text(l).split(/\s+/).length >= 6 && (text(l).match(/\d/g) || []).length < text(l).length * 0.1 && l.bbox[2] - l.bbox[0] < (r[2] - r[0]) * 0.6;
+      const column = (ls) => {
+        const at = new Counter();
+        ls.forEach((l) => at.add(Math.round(l.bbox[0] / 3)));
+        return ls.length && at.get(at.mostCommon()) >= 6;
+      };
+      let bottom = top;
+      for (const r of same) {
+        if (column(flat.filter((l) => (l.bbox[1] + l.bbox[3]) / 2 > bottom[1] && (l.bbox[1] + l.bbox[3]) / 2 < r[1] && l.bbox[0] < r[2] && l.bbox[2] > r[0] && wordy(l, r)))) break;
+        bottom = r;
+      }
+      if (bottom === top) continue;
       // header rows can sit above the first rule (BMJ, BMC): the table starts
       // where the caption (and its title, aligned with it) ends
       let start = top[1] - 2;
@@ -2437,6 +2451,8 @@ const Epubify = (() => {
         const restSize = rest[0].size;
         const differs = head.size >= restSize + 2 || (head.bold && !rest.some((sp) => sp.bold) && SECTION_WORD.test(head.text.trim()));
         if (!differs || rest.some((sp) => Math.abs(sp.size - restSize) > 1)) continue;
+        // (in small print, "Acknowledgment: The authors thank…", the label stays in its line)
+        if (head.size < restSize + 2 && restSize < bodySize - 0.5) continue;
         const a = [head];
         const b = rest;
         a.col = b.col = rows[i].col;
