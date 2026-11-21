@@ -631,7 +631,7 @@ const Sync = (() => {
     const rt = await DB.setting('googleRefreshToken', '');
     if (rt) fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(rt)}`, { method: 'POST' }).catch(() => {});
     await DB.setSetting('googleRefreshToken', '');
-    await DB.setSetting('googleClientSecret', '');
+    // (the client secret stays: it is synced, and clearing it here would clear it on every device)
     forgetToken();
     await DB.setSetting('syncConnected', false);
     await DB.setSetting('googleClientId', '');

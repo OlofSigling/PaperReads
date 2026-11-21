@@ -5492,6 +5492,7 @@
         <p class="muted small">Ask about papers on the paper page or in the reader (💬). Uses your own key from
           <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>: pay-as-you-go, billed separately from a Claude subscription.
           A question costs a few cents. The key stays on this device; questions send the paper’s text to Anthropic.</p>
+        <p class="muted small">With sync on, your key is kept with your library in your Google Drive, so your other devices (and this one, if its data is ever cleared) get it back when they sign in.</p>
         <form id="ai-form" class="stack">
           <label>API key <input type="password" name="key" autocomplete="off" placeholder="sk-ant-…" value="${esc(key)}"></label>
           <label>Model <select name="model">${Object.entries(Ask.MODELS).map(([id, m]) => `<option value="${id}"${id === model ? ' selected' : ''}>${m.label} (${m.note})</option>`).join('')}</select></label>
@@ -5501,7 +5502,9 @@
       </section>
       <section class="card stack">
         <h3>Sync with Google Drive</h3>
-        <p class="muted small">Keeps this device and your others (phone, laptop) in step through a hidden app folder in your own Google Drive.
+        <p class="small note" id="sy-persist" hidden></p>
+        <p class="muted small">Keeps this device and your others (phone, laptop) in step through a hidden app folder in your own Google Drive. The client secret, your Anthropic key and the Friends setup travel with it, so a device only needs the client ID and a sign-in.</p>
+        <p class="muted small">
           It syncs when the app opens and shortly after changes. Free: it uses your Drive storage.</p>
         ${invite && !clientId ? '<p class="note small" id="sy-invited">You’ve been invited to sync. Everything is filled in: tap <b>Connect and sync</b> and sign in with <b>your own</b> Google account. Your library goes to your own Drive; nobody else sees it.</p>' : ''}
         <p id="sy-state" class="small"></p>
@@ -5636,6 +5639,13 @@
                 ? 'Not synced yet.'
                 : '';
     };
+    // (a browser can clear an app's data under storage pressure unless it agreed not to)
+    navigator.storage?.persisted?.().then((ok) => {
+      const el = $('#sy-persist');
+      if (!el || ok) return;
+      el.hidden = false;
+      el.textContent = 'This browser hasn’t agreed to keep the app’s data on this device, so it may clear it when space runs low. Installing the app (Add to Home screen / Install app) usually fixes that. With sync on, nothing is lost: sign in again and it all comes back.';
+    });
     showState({ ...Sync.state, last: Sync.state.last || last });
     const unsub = Sync.subscribe(showState);
     teardown = () => unsub();

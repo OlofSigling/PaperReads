@@ -70,7 +70,10 @@
   // can travel to other devices.
   const ROW_STORES = new Set(['progress', 'highlights', 'links']);
   const SYNCED = new Set(['papers', 'progress', 'highlights', 'links', 'collections', 'pdfs', 'epubs', 'settings']);
-  const SYNCED_SETTING = /^goal:/;
+  // (reading goals, and the keys a device needs: a device whose data was
+  // cleared gets them back from Drive with the library. Not the Google client
+  // ID: disconnecting one device mustn't disconnect the others)
+  const SYNCED_SETTING = /^(goal:|anthropicKey$|claudeModel$|googleClientSecret$|firebaseConfig$)/;
   const newSid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   const syncKey = (store, r) => (ROW_STORES.has(store) ? r.sid : r[STORES[store].keyPath]);
   const isSynced = (store, r) => SYNCED.has(store) && (store !== 'settings' || SYNCED_SETTING.test(r.key));
