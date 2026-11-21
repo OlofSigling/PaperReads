@@ -6199,7 +6199,7 @@
 
   // what a running sync is doing: "Downloading PDFs (3 of 12)"
   function syncStep(st) {
-    return `${st.step || 'Syncing'}${st.total ? ` (${st.done} of ${st.total})` : ''}…`;
+    return `${st.step || 'Syncing'}${st.total ? ` (${st.done} of ${st.total} files; your other changes are already saved)` : ''}…`;
   }
   // Sync: a top-bar button shows its state; tapping it syncs (and signs in if needed).
   async function showSyncButton() {
@@ -6213,7 +6213,7 @@
     // (a count beside it while files go back and forth)
     const prog = $('#sync-prog');
     prog.hidden = !(st.busy && st.total);
-    prog.textContent = st.busy && st.total ? `${st.done}/${st.total}` : '';
+    prog.textContent = st.busy && st.total ? `${st.done}/${st.total} files` : '';
     btn.title = st.busy ? `Syncing: ${syncStep(st)}` : st.error ? `Sync failed: ${st.error}` : st.needsSignIn ? 'Tap to sync' : 'Sync now';
   });
   $('#sync-btn').addEventListener('click', () =>

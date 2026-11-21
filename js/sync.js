@@ -360,7 +360,7 @@ const Sync = (() => {
     await giveLegacyRowsIds();
     set({ step: 'Checking Drive' });
     const remoteFiles = await listFiles();
-    const dataFile = remoteFiles.get(DATA_NAME);
+    let dataFile = remoteFiles.get(DATA_NAME);
     let remote = { stores: {}, tombstones: {}, files: {} };
     if (dataFile) {
       set({ step: 'Fetching your library' });
@@ -377,6 +377,31 @@ const Sync = (() => {
 
     set({ step: 'Merging' });
     let changes = await mergeIn(remote, tomb);
+
+    // The papers' own changes (bundles, notes, statuses) go to Drive now,
+    // before the files, which can take minutes: with the files as Drive
+    // lists them. The full list is written again once the files are through.
+    const STORE_OF = Object.fromEntries(Object.entries(FILE_STORES).map(([s, k]) => [k, s]));
+    {
+      set({ step: 'Saving your changes' });
+      const ids = new Set((await DB.all('papers')).map((p) => p.id));
+      const early = {};
+      for (const [key, e] of Object.entries(remote.files || {})) {
+        const i = key.indexOf(':');
+        const id = key.slice(i + 1);
+        if (ids.has(id) && (tomb[`${STORE_OF[key.slice(0, i)]}:${id}`] || 0) < e.mtime) early[key] = e;
+      }
+      const data = { format: FORMAT, version: 1, savedAt: new Date().toISOString(), stores: await localStores(), tombstones: tomb, files: early };
+      const made = await upload(dataFile, DATA_NAME, new Blob([JSON.stringify(data)], { type: 'application/json' }));
+      if (!dataFile && made && made.id) dataFile = made; // (the first sync made it: write to that one again)
+    }
+    // (three files at a time: one by one, a phone takes ages over a hundred PDFs)
+    const pool = async (jobs, n = 3) => {
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(n, jobs.length) }, async () => {
+        while (next < jobs.length) await jobs[next++]();
+      }));
+    };
 
     // files: newest copy wins; download what this device lacks
     const paperIds = new Set((await DB.all('papers')).map((p) => p.id));
@@ -406,6 +431,7 @@ const Sync = (() => {
     for (const [store, kind] of Object.entries(FILE_STORES)) {
       const local = new Map((await DB.all(store)).map((r) => [r.paperId, r]));
       // remote entries
+      const downloads = [];
       for (const [key, e] of Object.entries(remote.files || {})) {
         if (!key.startsWith(kind + ':')) continue;
         const id = key.slice(kind.length + 1);
@@ -415,26 +441,31 @@ const Sync = (() => {
         if (mine && time(store, mine) >= e.mtime) continue;
         const blobFile = remoteFiles.get(`${kind}-${id}`);
         if (!withFiles || !blobFile) continue;
-        let blob;
-        step(`Downloading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
-        done++;
-        try {
-          blob = await download(blobFile, 'blob');
-        } catch (err) {
-          if (err instanceof AuthError) throw err;
-          failed++; // one file shouldn't stop the rest; next sync retries it
-          continue;
-        }
-        const type = kind === 'pdf' ? 'application/pdf' : 'application/epub+zip';
-        const rec = { paperId: id, blob: new File([blob], e.name, { type }), name: e.name, size: blob.size, addedAt: e.addedAt, mtime: e.mtime };
-        if (kind === 'epub') {
-          const coverFile = e.cover && remoteFiles.get(`cover-${id}`);
-          Object.assign(rec, { source: e.source, missingFigures: e.missingFigures || 0, cover: coverFile ? await download(coverFile, 'blob').catch(() => null) : null });
-        }
-        await DB.quietly(() => DB.put(store, rec));
-        local.set(id, rec);
-        downloaded++;
+        downloads.push(async () => {
+          let blob;
+          step(`Downloading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
+          try {
+            blob = await download(blobFile, 'blob');
+          } catch (err) {
+            if (err instanceof AuthError) throw err;
+            failed++; // one file shouldn't stop the rest; next sync retries it
+            return;
+          } finally {
+            done++;
+            step(`Downloading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
+          }
+          const type = kind === 'pdf' ? 'application/pdf' : 'application/epub+zip';
+          const rec = { paperId: id, blob: new File([blob], e.name, { type }), name: e.name, size: blob.size, addedAt: e.addedAt, mtime: e.mtime };
+          if (kind === 'epub') {
+            const coverFile = e.cover && remoteFiles.get(`cover-${id}`);
+            Object.assign(rec, { source: e.source, missingFigures: e.missingFigures || 0, cover: coverFile ? await download(coverFile, 'blob').catch(() => null) : null });
+          }
+          await DB.quietly(() => DB.put(store, rec));
+          local.set(id, rec);
+          downloaded++;
+        });
       }
+      await pool(downloads);
       // files deleted elsewhere
       for (const [id, r] of local) {
         if ((tomb[`${store}:${id}`] || 0) >= time(store, r) || !paperIds.has(id)) {
@@ -444,6 +475,7 @@ const Sync = (() => {
         }
       }
       // this device's files that Drive lacks or has older
+      const uploads = [];
       for (const [id, r] of local) {
         const key = `${kind}:${id}`;
         const t = time(store, r);
@@ -452,18 +484,23 @@ const Sync = (() => {
         if (kind === 'epub') Object.assign(entry, { source: r.source || '', missingFigures: r.missingFigures || 0, cover: !!r.cover });
         if (have && have.mtime >= t && remoteFiles.has(`${kind}-${id}`)) continue;
         if (!withFiles) continue;
-        step(`Uploading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
-        done++;
-        try {
-          await upload(remoteFiles.get(`${kind}-${id}`), `${kind}-${id}`, r.blob, { mtime: String(t) });
-          if (r.cover) await upload(remoteFiles.get(`cover-${id}`), `cover-${id}`, r.cover, { mtime: String(t) }).catch(() => (entry.cover = false));
-          files[key] = entry;
-          uploaded++;
-        } catch (err) {
-          if (err instanceof AuthError) throw err;
-          failed++; // keep whatever Drive had; next sync retries
-        }
+        uploads.push(async () => {
+          step(`Uploading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
+          try {
+            await upload(remoteFiles.get(`${kind}-${id}`), `${kind}-${id}`, r.blob, { mtime: String(t) });
+            if (r.cover) await upload(remoteFiles.get(`cover-${id}`), `cover-${id}`, r.cover, { mtime: String(t) }).catch(() => (entry.cover = false));
+            files[key] = entry;
+            uploaded++;
+          } catch (err) {
+            if (err instanceof AuthError) throw err;
+            failed++; // keep whatever Drive had; next sync retries
+          } finally {
+            done++;
+            step(`Uploading ${kind === 'pdf' ? 'PDFs' : 'EPUBs'}`);
+          }
+        });
       }
+      await pool(uploads);
     }
     changes += downloaded;
 
