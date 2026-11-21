@@ -584,3 +584,6 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 
 .dlg-keys { margin: -4px 0 0; }
 @media (hover: none) { .dlg-keys { display: none; } }
+
+.mark-pick { justify-content: flex-start; text-align: left; width: 100%; }
+.concerns li.flash { background: var(--accent-soft); transition: background .3s; }

@@ -4407,9 +4407,72 @@
         }) || null
       );
     }
+    // A passage can carry a highlight, a Claude thread and a concern at once:
+    // their marks overlap and only the top one gets the tap. So a tap first
+    // looks for every mark at that spot, and offers a choice when there are several.
+    const rangeOf = async (cfi) => {
+      try {
+        return await book.getRange(cfi);
+      } catch {
+        return null;
+      }
+    };
+    const overlaps = (a, b) => {
+      try {
+        return !!a && !!b && a.compareBoundaryPoints(Range.START_TO_END, b) > 0 && a.compareBoundaryPoints(Range.END_TO_START, b) < 0;
+      } catch {
+        return false; // (another chapter's page)
+      }
+    };
+    const openMark = {
+      hl: (x) => openHighlight(x.id),
+      thread: (x) => {
+        tocPanel.hidden = concernsPanel.hidden = true;
+        askPanel.hidden = false;
+        ask.openThread(x.id);
+      },
+      concern: (x) => {
+        tocPanel.hidden = askPanel.hidden = true;
+        concernsPanel.hidden = false;
+        const li = $(`li[data-id="${x.id}"]`, concernsPanel);
+        if (li) {
+          li.scrollIntoView({ block: 'nearest' });
+          li.classList.add('flash');
+          setTimeout(() => li.classList.remove('flash'), 1500);
+        }
+      },
+    };
+    async function tapMark(cfi, kind, item) {
+      const fresh = await DB.get('papers', id);
+      const here = await rangeOf(cfi);
+      const cands = [
+        ...(await DB.byIndex('highlights', 'paperId', id)).filter((h) => h.cfi).map((h) => ({ kind: 'hl', cfi: h.cfi, item: h })),
+        ...((fresh && fresh.threads) || []).filter((t) => t.cfi).map((t) => ({ kind: 'thread', cfi: t.cfi, item: t })),
+        ...((fresh && fresh.concerns) || []).filter((c) => c.cfi).map((c) => ({ kind: 'concern', cfi: c.cfi, item: c })),
+      ];
+      const at = [];
+      for (const c of cands) if ((c.kind === kind && c.item.id === item.id) || overlaps(here, await rangeOf(c.cfi))) at.push(c);
+      if (at.length <= 1) return openMark[kind](item);
+      const short = (t, n = 70) => (t && t.length > n ? t.slice(0, n) + '…' : t || '');
+      const label = (c) =>
+        c.kind === 'hl'
+          ? `🖍 Highlight (${HL_KINDS[hlKind(c.item)].label})${c.item.note ? `: ${short(c.item.note)}` : ''}`
+          : c.kind === 'thread'
+            ? `💬 Claude: ${short(((c.item.chat || []).find((x) => x.role === 'user') || {}).question || c.item.quote)}`
+            : `⚠ Concern: ${short(c.item.text || c.item.quote)}`;
+      const dlg = $('#dialog');
+      dlg.innerHTML = `<form method="dialog" class="dlg"><h3>On this passage</h3>
+        <div class="stack">${at.map((c, i) => `<button value="${i}" class="btn mark-pick">${esc(label(c))}</button>`).join('')}</div>
+        <div class="row end"><button value="cancel" class="btn" formnovalidate>Close</button></div></form>`;
+      dlg.onclose = () => {
+        const c = at[Number(dlg.returnValue)];
+        if (c) openMark[c.kind](c.item);
+      };
+      dlg.showModal();
+    }
     const drawHighlight = (h) => {
       try {
-        rendition.annotations.highlight(h.cfi, { id: h.id }, () => openHighlight(h.id), 'pr-hl', hlStyle(h));
+        rendition.annotations.highlight(h.cfi, { id: h.id }, () => tapMark(h.cfi, 'hl', h), 'pr-hl', hlStyle(h));
       } catch {} // e.g. a highlight made in an earlier version of this EPUB
     };
     const pageOf = (cfi) => {
@@ -4943,10 +5006,7 @@
     const CONCERN_STYLE = { fill: CONCERN_COLOR, 'fill-opacity': '0.24', 'mix-blend-mode': 'multiply' };
     const drawConcern = (c) => {
       try {
-        rendition.annotations.highlight(c.cfi, { id: c.id }, () => {
-          tocPanel.hidden = askPanel.hidden = true;
-          concernsPanel.hidden = false;
-        }, 'pr-concern', CONCERN_STYLE);
+        rendition.annotations.highlight(c.cfi, { id: c.id }, () => tapMark(c.cfi, 'concern', c), 'pr-concern', CONCERN_STYLE);
       } catch {}
     };
     const setCount = (paper) => {
@@ -5003,11 +5063,7 @@
         if (!t.cfi) continue;
         const mark = await markOf(t.cfi);
         try {
-          rendition.annotations.highlight(mark, { thread: t.id }, () => {
-            tocPanel.hidden = concernsPanel.hidden = true;
-            askPanel.hidden = false;
-            ask.openThread(t.id);
-          }, 'pr-thread', THREAD_STYLE);
+          rendition.annotations.highlight(mark, { thread: t.id }, () => tapMark(mark, 'thread', t), 'pr-thread', THREAD_STYLE);
           threadMarks.push(mark);
         } catch {}
       }
