@@ -581,3 +581,6 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 .office-tbl table { border-collapse: collapse; font-size: .8rem; }
 .office-tbl td, .office-tbl th { border: 1px solid var(--border); padding: 2px 6px; vertical-align: top; }
 .office-tbl td p { margin: 0; }
+
+.dlg-keys { margin: -4px 0 0; }
+@media (hover: none) { .dlg-keys { display: none; } }

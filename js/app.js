@@ -490,8 +490,16 @@
       const dlg = $('#dialog');
       dlg.innerHTML = `<form method="dialog" class="dlg"><h3>${esc(title)}</h3>
         <textarea name="note" rows="4" placeholder="Your note">${esc(initial)}</textarea>
+        <p class="muted small dlg-keys">Enter saves · Shift+Enter for a new line</p>
         <div class="row end"><button value="cancel" class="btn" formnovalidate>Cancel</button><button value="ok" class="btn primary">Save</button></div></form>`;
       dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('[name=note]', dlg).value.trim() : null);
+      $('[name=note]', dlg).addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.isComposing) return;
+        if (e.ctrlKey || e.metaKey || (matchMedia('(hover: hover) and (pointer: fine)').matches && !e.shiftKey)) {
+          e.preventDefault();
+          dlg.close('ok');
+        }
+      });
       dlg.showModal();
       $('[name=note]', dlg).focus();
     });
@@ -728,6 +736,13 @@
       chatEl.scrollTop = chatEl.scrollHeight;
     }
 
+    // (the panel is drawn anew: the cursor goes back to the box, so what's
+    // typed next lands there and not on the page)
+    const keepTyping = () => {
+      const a = document.activeElement;
+      if (a && a !== document.body && root.contains(a) === false && a.matches && a.matches('input, textarea, select, [contenteditable]')) return;
+      if (!root.closest('[hidden]')) $('.ask-form textarea', root)?.focus({ preventScroll: true });
+    };
     async function send(question) {
       if (busy) return;
       busy = true;
@@ -785,9 +800,11 @@
         }
         busy = false;
         await draw();
+        keepTyping();
       } catch (e) {
         busy = false;
         await draw();
+        keepTyping();
         const box = $('.ask-form', root);
         if (box) box.q.value = question;
         const errEl = $('#ask-err', root);
@@ -4919,6 +4936,8 @@
           openFind();
         }
       });
+      contents.document.addEventListener('keydown', noQuickFind, true);
+      contents.document.addEventListener('keypress', noQuickFind, true);
     });
     // Concerns: same list as the paper page, in a side panel
     const CONCERN_STYLE = { fill: CONCERN_COLOR, 'fill-opacity': '0.24', 'mix-blend-mode': 'multiply' };
@@ -6147,6 +6166,18 @@
     nav.hidden = false;
   }
   window.addEventListener('hashchange', showPnav);
+
+  // Firefox's Quick Find: an ' or / typed while the cursor isn't in a text
+  // box starts searching the page's links, and the Enter after it opens the
+  // link found: another paper. Not in this app (it has its own find).
+  const noQuickFind = (e) => {
+    if ((e.key !== "'" && e.key !== '/') || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t && t.closest && t.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return;
+    e.preventDefault();
+  };
+  document.addEventListener('keydown', noQuickFind, true);
+  document.addEventListener('keypress', noQuickFind, true);
 
   // Tab from the last box of a form goes to the form's button (Ask, Add):
   // Safari, and Chrome on a Mac, skip buttons when tabbing, so Tab and then
