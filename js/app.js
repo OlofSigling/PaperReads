@@ -655,8 +655,15 @@
         const q = form.q.value.trim();
         if (q) send(q);
       });
+      // Enter sends, on a computer (Shift+Enter: a new line); on a phone the
+      // keyboard's Enter is a new line and the Ask button sends
       form.q.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) form.requestSubmit();
+        if (e.key !== 'Enter' || e.isComposing) return;
+        const desk = matchMedia('(hover: hover) and (pointer: fine)').matches;
+        if (e.ctrlKey || e.metaKey || (desk && !e.shiftKey)) {
+          e.preventDefault();
+          form.requestSubmit();
+        }
       });
       $$('[data-suggest]', root).forEach((b) => b.addEventListener('click', () => send(b.textContent)));
       $$('[data-thread]', root).forEach((b) => b.addEventListener('click', () => api.openThread(b.dataset.thread)));
@@ -6140,6 +6147,29 @@
     nav.hidden = false;
   }
   window.addEventListener('hashchange', showPnav);
+
+  // Tab from the last box of a form goes to the form's button (Ask, Add):
+  // Safari, and Chrome on a Mac, skip buttons when tabbing, so Tab and then
+  // Enter landed on whatever link came next (another paper)
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.key !== 'Tab' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+      const box = e.target;
+      if (!box || !box.matches || !box.matches('input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea')) return;
+      const form = box.form;
+      if (!form) return;
+      const after = (el) => box.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING;
+      const visible = (el) => !el.disabled && el.offsetParent !== null;
+      // (only from the last box: in a longer form Tab goes on to the next field)
+      if ([...form.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea, select')].some((el) => el !== box && after(el) && visible(el))) return;
+      const btn = [...form.querySelectorAll('button:not([type=button]), input[type=submit]')].find((el) => after(el) && visible(el) && el.value !== 'cancel');
+      if (!btn) return;
+      e.preventDefault();
+      btn.focus();
+    },
+    true
+  );
 
   // ---------- troubleshooting: how the app got to each page ----------
   // The last few page changes, each with the key or tap just before it and
