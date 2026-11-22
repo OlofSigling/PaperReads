@@ -2599,6 +2599,41 @@
 
   // ---------- add many papers at once ----------
   const IMPORT_KEY = 'paperreads.import';
+  // Files handed to the list page (several chosen on the Add page)
+  let pendingFiles = null;
+  // Which paper a file is: a PDF by the DOI, arXiv number or title on its
+  // first page, an EPUB by its own details; then the details looked up.
+  async function identifyFile(file) {
+    let info = { doi: null, arxiv: null, title: '' };
+    if (isEpub(file)) {
+      try {
+        const ePub = await Epubify.epubjs();
+        const book = ePub(await file.arrayBuffer());
+        const md = await book.loaded.metadata;
+        const idm = /10\.\d{4,9}\/[^\s"<>]+/.exec([md.identifier, md.description, md.source].filter(Boolean).join(' '));
+        info = { doi: idm ? idm[0].replace(/[.,;)\]]+$/, '') : null, arxiv: null, title: (md.title || '').trim(), authors: md.creator ? [md.creator] : [] };
+        // (closed only once it has finished opening, or it trips over itself)
+        book.ready.then(() => book.destroy()).catch(() => {});
+      } catch {}
+    } else {
+      info = await Lookup.identifyPdf(file).catch(() => info);
+    }
+    if (navigator.onLine && (info.doi || info.arxiv)) {
+      const r = await Lookup.resolve(info.doi || `arXiv:${info.arxiv}`).catch(() => null);
+      if (r && r.meta) return { meta: r.meta, how: 'found from the file' };
+    }
+    if (navigator.onLine && info.title) {
+      const results = await Lookup.search(info.title).catch(() => []);
+      if (results.length && results[0].confident) {
+        const m = results[0].doi ? await Lookup.byDoi(results[0].doi).catch(() => results[0]) : results[0];
+        return { meta: m, how: 'matched by its title' };
+      }
+    }
+    // (not identified: added under its own title, or the file's name)
+    const name = file.name.replace(/\.(pdf|epub)$/i, '').replace(/[_]+/g, ' ').trim();
+    return { meta: { title: info.title || name, authors: info.authors || [] }, how: 'not identified: added under its ' + (info.title ? 'title' : 'file name') + ', edit it later', weak: true };
+  }
+
   async function viewImport() {
     setTitle('Add a list');
     let text = '';
@@ -2617,7 +2652,8 @@
         </div>
         <label class="check"><input type="checkbox" id="im-pdf" checked> Get the PDFs (arXiv, or a free copy when there is one)</label>
         <label class="check"><input type="checkbox" id="im-epub" checked> Make EPUBs to read</label>
-        <div class="row"><button class="btn primary" id="im-find">Find papers</button><label class="btn">Open a file…<input type="file" id="im-file" accept=".csv,.tsv,.txt,.nbib,text/csv,text/plain" hidden></label></div>
+        <div class="row wrap"><button class="btn primary" id="im-find">Find papers</button><label class="btn">Open a list file…<input type="file" id="im-file" accept=".csv,.tsv,.txt,.nbib,text/csv,text/plain" hidden></label><label class="btn">Open PDFs or EPUBs…<input type="file" id="im-docs" multiple accept=".pdf,.epub,application/pdf,application/epub+zip" hidden></label></div>
+        <p class="muted small">Or drop PDF and EPUB files here: each becomes a paper with its file.</p>
         <p class="muted small" id="im-status-line"></p>
       </section>
       <section class="card" id="im-results" hidden><ul class="list compact" id="im-list"></ul>
@@ -2627,10 +2663,10 @@
     const list = $('#im-list');
     const addBtn = $('#im-add');
     const rowHtml = (x, i) => `<li class="im-row" data-i="${i}">
-        ${x.meta && !x.dupe ? `<input type="checkbox" class="im-pick" data-i="${i}" checked aria-label="Add this one">` : '<span class="im-mark">•</span>'}
+        ${x.meta && (!x.dupe || x.attach) ? `<input type="checkbox" class="im-pick" data-i="${i}" checked aria-label="Add this one">` : '<span class="im-mark">•</span>'}
         <div class="im-main"><span class="pr-title">${esc(x.meta ? x.meta.title : x.item.label || x.item.tokens[0])}</span>
         <span class="pr-meta">${x.meta ? esc([authorsShort(x.meta.authors), x.meta.year, x.meta.venue].filter(Boolean).join(' · ')) : ''}${x.meta && x.meta.arxiv ? ' · arXiv' : ''}</span>
-        <span class="small im-note">${x.state === 'looking' ? 'Looking up…' : x.dupe ? `Already in your library: <a href="#/paper/${x.dupe.id}">open</a>` : !x.meta ? '<span class="danger">Not found</span>' : x.note || ''}</span></div></li>`;
+        <span class="small im-note">${x.file ? `📄 ${esc(x.file.name)} · ` : ''}${x.state === 'looking' ? (x.file ? 'Reading the file…' : 'Looking up…') : x.dupe ? `Already in your library: <a href="#/paper/${x.dupe.id}">open</a>${x.attach ? ` · the ${fileKind(x.file)} will be added to it` : ''}` : !x.meta ? '<span class="danger">Not found</span>' : x.note || ''}</span></div></li>`;
     const draw = () => {
       list.innerHTML = found.map(rowHtml).join('');
       const n = $$('.im-pick:checked', list).length;
@@ -2644,6 +2680,59 @@
       }));
       $$('.im-pick', list).forEach((c) => (c.checked = !found[+c.dataset.i].skip));
     };
+    const takeFiles = async (files) => {
+      files = [...files].filter((f) => isEpub(f) || /pdf/i.test(f.type) || /\.pdf$/i.test(f.name));
+      if (!files.length) return (line.textContent = 'Those aren’t PDF or EPUB files.');
+      const all = await papers();
+      const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      const dupeOf = (m) => all.find((x) => (m.doi && (x.doi || '').toLowerCase() === m.doi.toLowerCase()) || (m.arxiv && (x.arxiv || '').replace(/v\d+$/, '') === (m.arxiv || '').replace(/v\d+$/, '')) || (squash(m.title).length > 10 && squash(x.title) === squash(m.title)));
+      const start = found.length;
+      found = [...found, ...files.map((file) => ({ item: { label: file.name, tokens: [file.name] }, file, state: 'looking' }))];
+      $('#im-results').hidden = false;
+      draw();
+      line.textContent = `Reading ${files.length} file${files.length === 1 ? '' : 's'}…`;
+      let next = start;
+      const worker = async () => {
+        while (next < found.length) {
+          const x = found[next++];
+          const r = await identifyFile(x.file).catch(() => null);
+          x.state = 'done';
+          if (r) {
+            x.meta = r.meta;
+            x.note = r.how;
+            const d = !r.weak ? dupeOf(r.meta) : null;
+            if (d) {
+              x.dupe = d;
+              // (a paper already here gets the file, if it has none of that kind)
+              x.attach = isEpub(x.file) ? !d.hasEpub : !d.hasPdf;
+              if (!x.attach) x.skip = true;
+            }
+          }
+          draw();
+        }
+      };
+      await Promise.all([worker(), worker()]);
+      const ok = found.filter((x) => x.meta && !x.dupe).length;
+      const att = found.filter((x) => x.attach).length;
+      line.textContent = `${ok} to add${att ? `, ${att} file${att === 1 ? '' : 's'} for papers already here` : ''}. Check them, then Add.`;
+      draw();
+    };
+    $('#im-docs').addEventListener('change', (e) => {
+      const fs = [...e.target.files];
+      e.target.value = '';
+      takeFiles(fs);
+    });
+    const dropZone = main.querySelector('section.card');
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('drop-target');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drop-target'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drop-target');
+      if (e.dataTransfer && e.dataTransfer.files.length) takeFiles(e.dataTransfer.files);
+    });
     $('#im-file').addEventListener('change', async (e) => {
       const f = e.target.files[0];
       if (!f) return;
@@ -2658,12 +2747,13 @@
       const all = await papers();
       const squash = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
       const dupeOf = (m) => all.find((x) => (m.doi && (x.doi || '').toLowerCase() === m.doi.toLowerCase()) || (m.arxiv && (x.arxiv || '').replace(/v\d+$/, '') === m.arxiv.replace(/v\d+$/, '')) || (squash(m.title).length > 10 && squash(x.title) === squash(m.title)));
-      found = items.map((item) => ({ item, state: 'looking' }));
+      const start = found.filter((x) => x.file).length;
+      found = [...found.filter((x) => x.file), ...items.map((item) => ({ item, state: 'looking' }))];
       $('#im-results').hidden = false;
       draw();
       line.textContent = `Looking up ${items.length} paper${items.length === 1 ? '' : 's'}…`;
       // a few at a time
-      let next = 0;
+      let next = start;
       const worker = async () => {
         while (next < found.length) {
           const x = found[next++];
@@ -2692,6 +2782,16 @@
       const wantEpub = $('#im-epub').checked;
       const added = [];
       for (const x of found) {
+        if (x.file && x.dupe && x.attach && !x.skip) {
+          try {
+            if (isEpub(x.file)) await attachEpub(x.dupe.id, x.file, { source: 'Imported' });
+            else await attachPdf(x.dupe.id, x.file);
+            x.note = `<a href="#/paper/${x.dupe.id}">${fileKind(x.file)} added</a>`;
+          } catch {
+            x.note = 'Couldn’t add the file';
+          }
+          continue;
+        }
         if (!x.meta || x.dupe || x.skip) continue;
         const m = x.meta;
         const p = {
@@ -2717,6 +2817,12 @@
         };
         await savePaper(p);
         await setStatus(p, status); // in list order, so the queue keeps it
+        if (x.file) {
+          try {
+            if (isEpub(x.file)) await attachEpub(p.id, x.file, { source: 'Imported' });
+            else await attachPdf(p.id, x.file);
+          } catch {}
+        }
         x.paperId = p.id;
         x.note = 'Added';
         added.push(x);
@@ -2744,7 +2850,11 @@
         const x = added[k];
         const note = [];
         const step = (s) => (steps.set(k, s), show());
-        if (wantPdf) {
+        const own = x.file ? (isEpub(x.file) ? 'epub' : 'pdf') : null;
+        if (own) note.push(`${own === 'epub' ? 'EPUB' : 'PDF'} from your file`);
+        if (own === 'pdf') pdfs++;
+        if (own === 'epub') epubs++;
+        if (wantPdf && !own) {
           step('finding a free PDF');
           try {
             const p = await DB.get('papers', x.paperId);
@@ -2761,7 +2871,7 @@
             note.push(err && err.message === 'timed out' ? 'PDF took too long (try from the paper)' : 'no PDF');
           }
         }
-        if (wantEpub) {
+        if (wantEpub && own !== 'epub') {
           step('making the EPUB');
           try {
             await capped(makeEpubFor(x.paperId), 240000);
@@ -2793,6 +2903,11 @@
       toast(msg);
     });
     if (text) $('#im-find').click();
+    if (pendingFiles) {
+      const fs = pendingFiles;
+      pendingFiles = null;
+      takeFiles(fs);
+    }
   }
 
   // Free copies the app found but isn't allowed to download itself: one tap
@@ -3417,7 +3532,7 @@
           <label>DOI, arXiv ID, link or title
             <input name="q" placeholder="e.g. 10.1038/nature14539 or arxiv.org/abs/1706.03762" value="${esc(shared || '')}" autocomplete="off">
           </label>
-          <div class="row wrap"><button class="btn primary">Look up</button><a class="btn" href="#/import">Paste a list…</a><label class="btn">Open a file…<input type="file" id="add-file" accept=".pdf,.epub,.mhtml,.mht,.html,.htm,application/pdf,application/epub+zip,multipart/related,text/html" hidden></label></div>
+          <div class="row wrap"><button class="btn primary">Look up</button><a class="btn" href="#/import">Paste a list…</a><label class="btn">Open files…<input type="file" id="add-file" multiple accept=".pdf,.epub,.mhtml,.mht,.html,.htm,application/pdf,application/epub+zip,multipart/related,text/html" hidden></label></div>
           <p class="muted small" id="lookup-status">${inbox && inbox.file ? `Shared ${fileKind(inbox.file)}: ${esc(inbox.file.name)}. ${isWebFile(inbox.file) ? 'It will be made into an EPUB' : 'It will be attached'} when you save.` : 'Fills in the details automatically (needs internet).'}</p>
           <ul class="list compact" id="results"></ul>
         </form>
@@ -3451,6 +3566,13 @@
     $('#add-file')?.addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
+      // several at once: each its own paper, on the list page
+      const many = [...e.target.files].filter((f) => isEpub(f) || /pdf/i.test(f.type) || /\.pdf$/i.test(f.name));
+      if (e.target.files.length > 1 && many.length) {
+        pendingFiles = many;
+        location.hash = '#/import';
+        return;
+      }
       const id = await DB.put('inbox', { title: '', text: '', url: '', file, receivedAt: now() });
       location.hash = `#/add?inbox=${id}`;
     });

@@ -587,3 +587,5 @@ pre.rules { max-height: 260px; overflow: auto; white-space: pre; font-size: 11px
 
 .mark-pick { justify-content: flex-start; text-align: left; width: 100%; }
 .concerns li.flash { background: var(--accent-soft); transition: background .3s; }
+
+section.card.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; }
