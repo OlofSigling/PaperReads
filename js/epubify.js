@@ -3818,7 +3818,11 @@ const Epubify = (() => {
       // superscripts in the title/author block are affiliations, not citations
       const supLinked = [];
       const heads = [...root.querySelectorAll('h2, h3, h4')].filter((h) => !h.closest('header'));
-      const bodyStart = heads.find((h) => /^\s*(\d+\.?\s*)?(abstract|summary|introduction|background|methods?|rationale|objectives?)\b/i.test(h.textContent)) || heads[0];
+      // (only where the article starts: a "Background" late in the paper, an
+      // example's own sections, isn't it, or nothing before it would link)
+      const blocks = [...root.querySelectorAll('h1, h2, h3, h4, p, li')];
+      const early = (h) => blocks.indexOf(h) <= blocks.length * 0.25;
+      const bodyStart = heads.find((h) => /^\s*(\d+\.?\s*)?(abstract|summary|introduction|background|methods?|rationale|objectives?)\b/i.test(h.textContent) && early(h)) || heads[0];
       for (const sup of root.querySelectorAll('sup')) {
         if (sup.closest('a, .refs, h1, h2, h3, h4, math')) continue;
         if (bodyStart && sup.compareDocumentPosition(bodyStart) & Node.DOCUMENT_POSITION_FOLLOWING) continue;
