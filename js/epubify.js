@@ -611,6 +611,22 @@ const Epubify = (() => {
       box.vector = true;
       out.push(box);
     }
+    // A page with a lot of sideways text (a table printed sideways): all of
+    // it is the table, its caption and headers too. Its columns of numbers
+    // sit further apart than the clustering bridges, so the pieces alone
+    // left most of it out.
+    for (const rot of [90, -90]) {
+      const all = boxes.filter((x) => x.rot === rot);
+      if (all.length < 40) continue;
+      const box = [Math.max(0, Math.min(...all.map((x) => x.b[0])) - 3), Math.max(0, Math.min(...all.map((x) => x.b[1])) - 3), Math.min(W, Math.max(...all.map((x) => x.b[2])) + 3), Math.min(H, Math.max(...all.map((x) => x.b[3])) + 3)];
+      // (unless a drawing already holds it: a chart with sideways labels)
+      const area = (r) => Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+      const inter = (a, c) => area([Math.max(a[0], c[0]), Math.max(a[1], c[1]), Math.min(a[2], c[2]), Math.min(a[3], c[3])]);
+      if (out.some((r) => !r.rotate && inter(r, box) >= area(box) * 0.7)) continue;
+      const cap = all.map((x) => x.text).find((t) => CAPTION.test(t));
+      Object.assign(box, { rotate: rot, vector: true, caption: cap ? ws(cap).trim() : undefined });
+      out.push(box);
+    }
     // sideways pieces turned the same way are one sideways table (its rows
     // can sit further apart than the clustering bridges)
     for (const rot of [90, -90]) {
