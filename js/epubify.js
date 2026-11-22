@@ -589,6 +589,7 @@ const Epubify = (() => {
       groups.get(k).push(bx);
     });
     const out = [];
+    const small = []; // (pieces too small to be a drawing: maybe a chart's axis title)
     for (const g of groups.values()) {
       const r = [Infinity, Infinity, -Infinity, -Infinity];
       for (const { b } of g) r.splice(0, 4, Math.min(r[0], b[0]), Math.min(r[1], b[1]), Math.max(r[2], b[2]), Math.max(r[3], b[3]));
@@ -598,7 +599,10 @@ const Epubify = (() => {
       const h = r[3] - r[1];
       const drawn = weight >= 15 && w >= 80 && h >= 50;
       const sideways = rotated.length >= 6 && w >= 60 && h >= 60;
-      if (!drawn && !sideways) continue;
+      if (!drawn && !sideways) {
+        if (!g.some((x) => x.text)) small.push(r);
+        continue;
+      }
       const box = [Math.max(0, r[0] - 3), Math.max(0, r[1] - 3), Math.min(W, r[2] + 3), Math.min(H, r[3] + 3)];
       if (sideways && rotated.length * 2 > weight * 0.4) {
         const rot = new Counter();
@@ -611,6 +615,42 @@ const Epubify = (() => {
       box.vector = true;
       out.push(box);
     }
+    // A chart drawn in outlines: its axis title (letters drawn as shapes,
+    // turned on their side) sits further from the tick numbers than the
+    // clustering bridges. Small pieces right beside a drawing, within its
+    // height, belong to it.
+    const fit = (r, box) => {
+      const w = r[2] - r[0];
+      const h = r[3] - r[1];
+      // (a y-axis title: tall and narrow, beside the chart, best on its left)
+      if (h >= 15 && h >= w * 2) {
+        const overlapY = Math.min(r[3], box[3]) - Math.max(r[1], box[1]);
+        const left = box[0] - r[2];
+        const right = r[0] - box[2];
+        if (overlapY >= h * 0.6 && left >= -2 && left <= 24) return Math.max(0, left);
+        if (overlapY >= h * 0.6 && right >= -2 && right <= 24) return Math.max(0, right) + 20;
+      }
+      // (an x-axis title: wide and short, just under the chart)
+      if (w >= h * 2 && h <= 20) {
+        const overlapX = Math.min(r[2], box[2]) - Math.max(r[0], box[0]);
+        const below = r[1] - box[3];
+        if (overlapX >= w * 0.8 && below >= -2 && below <= 16) return Math.max(0, below);
+      }
+      return Infinity;
+    };
+    // (one pass, against the drawings as found: no chaining from piece to piece)
+    const grow = [];
+    for (const r of small) {
+      let best = null;
+      let bestD = Infinity;
+      for (const box of out) {
+        if (box.rotate) continue;
+        const d = fit(r, box);
+        if (d < bestD) (best = box), (bestD = d);
+      }
+      if (best) grow.push([best, r]);
+    }
+    for (const [best, r] of grow) best.splice(0, 4, Math.max(0, Math.min(best[0], r[0] - 3)), Math.max(0, Math.min(best[1], r[1] - 3)), Math.min(W, Math.max(best[2], r[2] + 3)), Math.min(H, Math.max(best[3], r[3] + 3)));
     // A page with a lot of sideways text (a table printed sideways): all of
     // it is the table, its caption and headers too. Its columns of numbers
     // sit further apart than the clustering bridges, so the pieces alone
