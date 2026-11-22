@@ -2473,6 +2473,14 @@ const Epubify = (() => {
         }
         close();
       }
+      // A block that starts "Box 2 …" (a boxed insert set apart from the
+      // columns): it waits until the page's text is through, so a sentence
+      // that runs from one column to the next past it stays whole
+      const boxLeaf = leaves.map((f) => {
+        const first = f.items.find((it) => it.box && it.box.text.trim());
+        // (one block apart from the columns: a box running in the columns themselves, over two of them, reads where it stands)
+        return !f.col && !!first && f.items.filter((it) => it.box).length >= 4 && /^\s*Box\s+\d{1,2}\b/.test(first.box.text);
+      });
       // a narrow column of words beside the body: its own kind of note
       const sideNote = leaves.map((f) => {
         if (!f.col || f.x1 - f.x0 >= pg.width * 0.2 || leaves.length < 2) return false;
@@ -2487,6 +2495,7 @@ const Epubify = (() => {
         if (kind === 'margin' && sp.x1 <= leftEdge + 6) return -2;
         if (kind === 'box' && sp.x0 < leftEdge - 6) return -3;
         if (sideNote[sp.leaf]) return -2;
+        if (boxLeaf[sp.leaf]) return -3;
         return sp.leaf;
       };
       const rows = [];
@@ -3069,12 +3078,22 @@ const Epubify = (() => {
           if (buf.length) emit(`<p>${escRich(joinWrapped(buf))}</p>`);
           buf = [];
         };
+        let head = null; // (a box's title wrapped onto a second line is one title)
         boxRows.forEach((r, i) => {
-          if (r.bold && r.txt.split(/\s+/).length <= 10 && !CAPTION.test(r.txt)) {
+          if (r.bold && r.txt.split(/\s+/).length <= (/^Box\s+\d/.test(r.txt) ? 20 : 10) && !CAPTION.test(r.txt)) {
+            const prev = boxRows[i - 1];
+            if (head && prev && prev.bold && r.y > prev.y && r.y - prev.y < r.sz * 1.8 && !buf.length) {
+              head.text += ' ' + r.txt;
+              head.list[head.i] = `<h4>${escRich(headingCase(head.text))}</h4>`;
+              return;
+            }
             out();
+            const list = paraBuf.length ? pending : parts; // (where emit puts it)
             emit(`<h4>${escRich(headingCase(r.txt))}</h4>`);
+            head = { list, i: list.length - 1, text: r.txt };
             return;
           }
+          head = null;
           buf.push(r.txt);
           const next = boxRows[i + 1];
           if (r.x1 < right - 40 || !next || next.bold) out();
@@ -3596,16 +3615,27 @@ const Epubify = (() => {
     }
     // no title at all: a closing run of paragraphs that mostly start "12 Surname AB" / "[12]"
     if (!refHead) {
-      const ps = [...root.children].filter((e) => e.localName === 'p');
+      // (one unbroken run from the end: it stops at a heading, or after a few
+      // paragraphs in a row that aren't references; a numbered list in the
+      // text, "1. Create many bootstrap samples", isn't the reference list)
+      const kids = [...root.children];
       const starts = (e) => /^\[?\d{1,3}[\].]?\s+[\p{Lu}][\p{L}'’-]+/u.test(e.textContent.trim());
-      let i = ps.length - 1;
       let hits = 0;
+      let gap = 0;
       let first = null;
-      for (; i >= 0 && ps.length - i <= 400; i--) {
-        if (starts(ps[i])) {
+      for (let i = kids.length - 1, seen = 0; i >= 0 && seen <= 400; i--) {
+        const e = kids[i];
+        if (/^h[1-6]$/.test(e.localName)) {
+          if (hits) break;
+          continue;
+        }
+        if (e.localName !== 'p') continue;
+        seen++;
+        if (starts(e)) {
           hits++;
-          first = ps[i];
-        } else if (ps.length - i > 6 && hits < (ps.length - i) * 0.5) break;
+          gap = 0;
+          first = e;
+        } else if (++gap > 3 || (seen > 6 && hits < seen * 0.5)) break;
       }
       if (first && hits >= 5) {
         refHead = doc.createElement('h2');
