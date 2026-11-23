@@ -2305,6 +2305,29 @@ const Epubify = (() => {
     if (!pdf.pages.length) throw new Error('PDF has no pages');
     const pageW = pdf.pages[0].width;
     const images = [];
+    // A ligature the font gives no letters for ("a?er", "de?ned": a private
+    // or control character where "ft" or "fi" stands): the letters that make
+    // a word the paper uses elsewhere
+    {
+      const ODD = /[\u0080-\u009F\uE000-\uF8FF]/u;
+      const vocab = new Set();
+      const all = pdf.pages.flatMap((pg) => pg.lines.flatMap((l) => l.spans));
+      for (const sp of all) for (const w of sp.text.toLowerCase().match(/\p{L}{3,}/gu) || []) vocab.add(w);
+      const LIGS = ['ft', 'fi', 'fl', 'ff', 'ffi', 'ffl', 'tt', 'th', 'f'];
+      const chosen = new Map(); // (one character is one ligature throughout)
+      for (const sp of all) {
+        if (!ODD.test(sp.text)) continue;
+        sp.text = sp.text.replace(/(\p{L}*)([\u0080-\u009F\uE000-\uF8FF])(\p{L}*)/gu, (m, a, ch, b) => {
+          if (!a && !b) return m;
+          let lig = chosen.get(ch);
+          if (!lig) {
+            lig = LIGS.find((x) => vocab.has((a + x + b).toLowerCase()));
+            if (lig && (a + b).length >= 2) chosen.set(ch, lig);
+          }
+          return lig ? a + lig + b : m;
+        });
+      }
+    }
 
     // dominant body font size across the document
     const sizes = new Counter();
@@ -2436,8 +2459,11 @@ const Epubify = (() => {
       }
       const txt = resolveHat(ws(joinSpans(main)).trim());
       const asideTxt = resolveHat(ws(joinSpans(asides)).trim());
+      // (the line's type, not its superscripts: "models.³⁸ ⁶⁵ ⁶⁶ ⁶⁸" is in body type)
+      const big = Math.max(...main.map((m) => m.size));
+      const sized = main.filter((m) => !(m.size < big * 0.8 && /^[\d\s,–\-−*†‡§¶]+$/.test(m.text)));
       const c = new Counter();
-      main.forEach((m) => c.add(pyRound(m.size), m.text.length));
+      (sized.length ? sized : main).forEach((m) => c.add(pyRound(m.size), m.text.length));
       return [txt, asideTxt, c.mostCommon()];
     };
     const joinSorted = (sps) => resolveHat(ws(joinSpans([...sps].sort((a, b) => a.x0 - b.x0))).trim());
@@ -2625,8 +2651,38 @@ const Epubify = (() => {
         const letters = f.items.reduce((n, it) => n + (it.box ? (it.box.text.match(/\p{L}/gu) || []).length : 0), 0);
         return letters >= 60;
       });
+      // A shaded box of running text with a column beside it ("Summary
+      // points", "Box 1" set over the margin and the first column): a boxed
+      // insert, read after the page's text, not line by line with the column
+      const shadeBoxes = twoCol && !leaves.some((f) => f.shade !== undefined)
+        ? (pg.shades || []).filter((s) => {
+            const mid = (l) => [(l.bbox[0] + l.bbox[2]) / 2, (l.bbox[1] + l.bbox[3]) / 2];
+            const within = (l) => {
+              const [cx, cy] = mid(l);
+              return cx > s[0] && cx < s[2] && cy > s[1] && cy < s[3];
+            };
+            const inside = pg.lines.filter((l) => horizontal(l) && within(l));
+            if (inside.length < 6) return false;
+            const text = (l) => l.spans.map((x) => x.text).join(' ').trim();
+            if (inside.some((l) => CAPTION.test(text(l)))) return false;
+            const words = inside.map((l) => text(l).split(/\s+/).length);
+            if (words.filter((n) => n >= 6).length < 5) return false;
+            // (no line runs out of it: a box, not a tint behind the columns)
+            if (pg.lines.some((l) => !within(l) && horizontal(l) && l.bbox[2] > s[0] + 4 && l.bbox[0] < s[2] - 4 && l.bbox[3] > s[1] + 3 && l.bbox[1] < s[3] - 3)) return false;
+            // (with text beside it, at its height: else it reads where it stands)
+            return pg.lines.some((l) => horizontal(l) && (l.bbox[0] >= s[2] - 2 || l.bbox[2] <= s[0] + 2) && l.bbox[1] < s[3] && l.bbox[3] > s[1] && text(l).split(/\s+/).length >= 5);
+          })
+        : [];
+      const inShadeBox = new Set();
+      for (const s of shadeBoxes)
+        for (const l of pg.lines) {
+          const cx = (l.bbox[0] + l.bbox[2]) / 2;
+          const cy = (l.bbox[1] + l.bbox[3]) / 2;
+          if (cx > s[0] && cx < s[2] && cy > s[1] && cy < s[3]) inShadeBox.add(l);
+        }
       const colOf = (sp) => {
         if (!twoCol) return 0;
+        if (inShadeBox.has(sp.line)) return -3;
         const kind = lineKind.get(sp.line);
         // (only the part of the line left of the first column: a line can
         // run on to the next column's text at the same height)
@@ -2695,6 +2751,7 @@ const Epubify = (() => {
       const leftBlockRows = [];
       for (let row of rows) {
         const rowCol = row.col; // (row gets replaced by filtered copies below)
+        const row0 = row;
         if (row.eq) {
           ordered.push([twoCol ? rowCol : 0, row[0].y, row[0].text, bodySize, row[0].x0, false, row[0].x1, false, false]);
           continue;
@@ -2801,9 +2858,30 @@ const Epubify = (() => {
             return ot.split(/\s+/).length >= 6 && (ot.match(/\p{L}/gu) || []).length >= ot.replace(/\s/g, '').length * 0.6;
           });
         };
+        // (nor is a line within a block of running text in its type, lines at
+        // one edge and close together, three of them sentences: "where",
+        // "LP = −4.37 − 0.33 (HTN) + …" in a box that explains a model)
+        const inBlock = () => {
+          const x0 = Math.min(...row.map((z) => z.x0));
+          const same = rows
+            .filter((o) => o.length && o.col === rowCol && Math.abs(Math.max(...o.map((z) => z.size)) - Math.max(...row0.map((z) => z.size))) <= 0.6 && Math.abs(Math.min(...o.map((z) => z.x0)) - x0) <= 4)
+            .map((o) => [Math.max(...o.map((z) => z.y)), o])
+            .sort((a, b) => a[0] - b[0]);
+          const i = same.findIndex((e) => e[1] === row0);
+          if (i < 0) return false;
+          let lo = i;
+          let hi = i;
+          while (lo > 0 && same[lo][0] - same[lo - 1][0] <= sz * 2.5) lo--;
+          while (hi < same.length - 1 && same[hi + 1][0] - same[hi][0] <= sz * 2.5) hi++;
+          const wordyLine = (o) => {
+            const ot = o.map((z) => z.text).join(' ').trim();
+            return ot.split(/\s+/).length >= 8 && (ot.match(/\p{L}/gu) || []).length >= ot.replace(/\s/g, '').length * 0.55 && /[.;:,]/.test(ot);
+          };
+          return same.slice(lo, hi + 1).filter((e) => wordyLine(e[1])).length >= 3;
+        };
         // (nor is a section's name in capitals, set a little smaller: "DISCUSSION" in small caps)
         const sectionName = capsHeading(txt) && sz >= bodySize * 0.75;
-        if (!CAPTION.test(txt) && !refsTitle && !sectionName && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead && !refTail && !refLine) || (letters < txt.replace(/\s/g, '').length * 0.4 && !refTail && !inText()))) continue;
+        if (!CAPTION.test(txt) && !refsTitle && !sectionName && ((sz < bodySize - 0.5 && txt.split(/\s+/).length <= 4 && !continues() && !subhead && !refTail && !refLine) || (letters < txt.replace(/\s/g, '').length * 0.4 && !refTail && !inText())) && ((/^\s*[*†‡§¶]/.test(txt) && letters < txt.replace(/\s/g, '').length * 0.5) || !inBlock())) continue;
         const col = !twoCol ? 0 : rowCol === undefined ? 0 : rowCol;
         const bold = (row.every((sp) => sp.bold || !sp.text.trim()) && !boldLeaf.has(rowCol)) || (subhead && allItalic); // (an italic subheading counts as one)
         const fw = new Counter();
@@ -2979,7 +3057,8 @@ const Epubify = (() => {
         if (rest.length && tocish.length >= rest.length * 0.6) ordered = [];
       }
       const emitRows = (list) => {
-      for (let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn, heads] of list) {
+      for (let k = 0; k < list.length; k++) {
+        let [c, y, txt, sz, x0, bold, x1, styled, minor, runsOn, heads] = list[k];
         if (txt.startsWith('\uE000')) {
           const [n, alt, no, em] = txt.slice(1).split('\uE001');
           flushPara();
@@ -3025,7 +3104,8 @@ const Epubify = (() => {
         }
         // bold, body-sized, short and numbered (or a standard name): a section heading
         const nWords = txt.split(/\s+/).length;
-        const standalone = !paraBuf.length || endsWithAny(paraBuf.at(-1).trimEnd(), TERMINAL);
+        // (a sentence ends before its citation numbers: "…new models.³⁸ ⁶⁵")
+        const standalone = !paraBuf.length || endsWithAny(paraBuf.at(-1).trimEnd().replace(/([.!?])\s?\d{1,3}(?:[\s,–-]+\d{1,3})*$/, '$1'), TERMINAL);
         if (
           (bold && sz >= bodySize - 1.2 && sz < bodySize + 3 && !endsWithAny(txt, ',;') &&
             ((nWords <= 12 && SECTION.test(txt)) || (nWords <= 8 && standalone && !endsWithAny(txt, '.:') && /^\p{Lu}/u.test(txt)))) ||
@@ -3066,7 +3146,19 @@ const Epubify = (() => {
         const bigText0 = txt.split(/\s+/).length > 14 || (lastHeading && (lastHeading.text + ' ' + txt).split(/\s+/).length > 24) || (/^\p{Ll}+(?:\s|$)/u.test(txt) && !wrapsTitle) ||
           /[.!?]\s+\p{Lu}|,$/u.test(txt.replace(/^\s*\d{1,2}(\.\d{1,2})*\.?\s+/, '')) || // sentences: running text (after any section number)
           (lastHeading && lastHeading.sz >= sz * 1.5 && txt.split(/\s+/).length >= 5) || // the paragraph under a title, in much smaller type
-          (lastLead && lastLead.c === c && Math.abs(lastLead.sz - sz) < 0.5 && y > lastLead.y && y - lastLead.y < sz * 1.8);
+          (lastLead && lastLead.c === c && Math.abs(lastLead.sz - sz) < 0.5 && y > lastLead.y && y - lastLead.y < sz * 1.8) ||
+          // (the first lines of a lead paragraph: five lines or more run on in this size)
+          (!(title === null && sz >= bodySize + 6) &&
+            (() => {
+              let n = 1;
+              for (let j = k + 1, py = y; j < list.length && n < 5; j++) {
+                const t = list[j];
+                if (t[0] !== c || Math.abs(t[3] - sz) >= 0.5 || t[1] <= py || t[1] - py >= sz * 1.8) break;
+                py = t[1];
+                n++;
+              }
+              return n >= 5;
+            })());
         // (a bold numbered subheading is a heading, whatever follows: "1.1 To which activities does this Code apply?")
         const bigText = bigText0 && !(bold && /^\d{1,2}\.\d{1,2}\.?\s+\p{Lu}/u.test(txt) && txt.split(/\s+/).length <= 14 && !/[.!?]\s+\p{Lu}/u.test(txt));
         if (sz >= bodySize + 3 && bigText) lastLead = { c, y, sz };
@@ -3217,12 +3309,19 @@ const Epubify = (() => {
           buf = [];
         };
         let head = null; // (a box's title wrapped onto a second line is one title)
+        // (items set a little further apart than their lines: "Summary points"
+        // without bullets)
+        const steps = boxRows.slice(1).map((r, i) => r.y - boxRows[i].y).filter((d) => d > 0 && d < boxRows[0].sz * 2);
+        const step = steps.length >= 6 ? steps.sort((a, b) => a - b)[steps.length >> 1] : 0;
         boxRows.forEach((r, i) => {
-          if (r.bold && r.txt.split(/\s+/).length <= (/^Box\s+\d/.test(r.txt) ? 20 : 10) && !CAPTION.test(r.txt)) {
-            const prev = boxRows[i - 1];
+          const prev = boxRows[i - 1];
+          // (a "Box 1: …" title runs on for a line or two)
+          const titleGoesOn = head && /^Box\s+\d/.test(head.text) && prev && prev.bold && r.bold && !buf.length && r.y > prev.y && r.y - prev.y < r.sz * 1.8 && !/[.?!]\s*$/.test(prev.txt) && !/[:]\s*$/.test(r.txt);
+          if (titleGoesOn || (r.bold && r.txt.split(/\s+/).length <= (/^Box\s+\d/.test(r.txt) ? 20 : 10) && !CAPTION.test(r.txt))) {
             if (head && prev && prev.bold && r.y > prev.y && r.y - prev.y < r.sz * 1.8 && !buf.length) {
               head.text += ' ' + r.txt;
-              head.list[head.i] = `<h4>${escRich(headingCase(head.text))}</h4>`;
+              // (a long title is a sentence already: its capitals are names)
+              head.list[head.i] = `<h4>${escRich(head.text.split(/\s+/).length > 12 ? head.text : headingCase(head.text))}</h4>`;
               return;
             }
             out();
@@ -3234,7 +3333,10 @@ const Epubify = (() => {
           head = null;
           buf.push(r.txt);
           const next = boxRows[i + 1];
-          if (r.x1 < right - 40 || !next || next.bold) out();
+          // (a short line ends an item, and a bullet starts one)
+          // (but not before a line that goes on in lowercase: a long word wrapped)
+          const apart = step && next && Math.abs(next.sz - r.sz) < 0.3 && next.y - r.y > step * 1.07 && next.y - r.y > step + 0.7 && next.y - r.y < step * 1.6 && /^\s*[\p{Lu}\d]/u.test(next.txt);
+          if (apart || (r.x1 < right - 40 && !(next && /^\s*\p{Ll}/u.test(next.txt) && !/[.?!:;]\s*$/.test(r.txt))) || !next || next.bold || /^\s*[•▪■◦‣●]/.test(next.txt)) out();
         });
         out();
       }
