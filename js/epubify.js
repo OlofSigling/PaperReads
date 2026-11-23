@@ -651,6 +651,94 @@ const Epubify = (() => {
       if (best) grow.push([best, r]);
     }
     for (const [best, r] of grow) best.splice(0, 4, Math.max(0, Math.min(best[0], r[0] - 3)), Math.max(0, Math.min(best[1], r[1] - 3)), Math.min(W, Math.max(best[2], r[2] + 3)), Math.min(H, Math.max(best[3], r[3] + 3)));
+    // A chart's tick numbers and axis titles set as text just outside its
+    // lines ("0.2 0.4 0.6", "Predicted risk"): short label-like lines at its
+    // edges, lined up with it, are part of it (two passes: the numbers, then
+    // the title beyond them)
+    {
+      const flatL = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01);
+      const lineText = (l) => ws(l.spans.map((x) => x.text).join('')).trim();
+      const labelish = (t) => t && t.length <= 40 && t.split(/\s+/).length <= 6 && !CAPTION.test(t) && !/[.!?]\s+\p{Lu}/u.test(t);
+      const orig = out.map((b) => [...b]);
+      const dist = (r, l) => Math.max(r[0] - l[2], l[0] - r[2], 0) + Math.max(r[1] - l[3], l[1] - r[3], 0);
+      for (const [bi, box] of out.entries()) {
+        if (box.rotate || (box[2] - box[0]) < 60 || (box[3] - box[1]) < 50) continue;
+        // (never more than 36 pt past the drawing's own edge: labels, not the next panel)
+        const o = orig[bi];
+        const lim = [o[0] - 36, o[1] - 20, o[2] + 36, o[3] + 36];
+        for (let pass = 0; pass < 2; pass++) {
+          let grew = false;
+          for (const l of flatL) {
+            const [x0, y0, x1, y1] = l.bbox;
+            if (x0 >= box[0] && x1 <= box[2] && y0 >= box[1] && y1 <= box[3]) continue; // (inside already)
+            const t = lineText(l);
+            if (!labelish(t)) continue;
+            const h = y1 - y0;
+            const overlapY = Math.min(y1, box[3]) - Math.max(y0, box[1]);
+            const overlapX = Math.min(x1, box[2]) - Math.max(x0, box[0]);
+            const left = box[0] - x1;
+            const right = x0 - box[2];
+            const below = y0 - box[3];
+            const above = box[1] - y1;
+            const beside = overlapY >= h * 0.6 && ((left >= -2 && left <= 30) || (right >= -2 && right <= 30));
+            const under = overlapX >= (x1 - x0) * 0.8 && below >= -2 && below <= 22;
+            const over = overlapX >= (x1 - x0) * 0.8 && above >= -2 && above <= 14 && h < 14;
+            if (!beside && !under && !over) continue;
+            if (x0 < lim[0] || y0 < lim[1] || x1 > lim[2] || y1 > lim[3]) continue;
+            // (a label nearer another drawing is that one's)
+            if (orig.some((r, j) => j !== bi && dist(r, l.bbox) < dist(o, l.bbox))) continue;
+            box.splice(0, 4, Math.max(0, Math.min(box[0], x0 - 2)), Math.max(0, Math.min(box[1], y0 - 2)), Math.min(W, Math.max(box[2], x1 + 2)), Math.min(H, Math.max(box[3], y1 + 2)));
+            grew = true;
+          }
+          if (!grew) break;
+        }
+      }
+    }
+    // A figure is everything between the text above it and its caption: the
+    // drawings just over a "Fig N" caption, with the labels, numbers and
+    // panel statistics around them (drawn as shapes or set as text), become
+    // one picture as wide as what lies in that zone
+    {
+      const flatZ = lines.filter((l) => Math.abs(l.dir[0] - 1) <= 0.01);
+      const tx = (l) => ws(l.spans.map((x) => x.text).join('')).trim();
+      // (a boundary: running text, or another caption)
+      const proseLine = (l) => {
+        const t = tx(l);
+        return CAPTION.test(t) || (t.split(/\s+/).length >= 6 && (t.match(/\p{Ll}/gu) || []).length > t.length * 0.5);
+      };
+      for (const cap of flatZ.filter((l) => /^\s*(fig(ure)?\.?)\s*\d/i.test(tx(l)))) {
+        const [c0, ctop, c1] = cap.bbox;
+        const above = out.filter((r) => !r.rotate && r[3] <= ctop + 4 && ctop - r[3] < 40 && r[0] < c1 && r[2] > c0);
+        // (or a frame right over the caption: a panel of text and equations, Fig 1 as a box)
+        const fr = frames.filter((f) => f[3] <= ctop + 4 && ctop - f[3] < 30 && f[0] >= c0 - 8 && f[2] <= c1 + 8 && f[2] - f[0] > (c1 - c0) * 0.4 && !(f[2] - f[0] > W * 0.97 && f[3] - f[1] > H * 0.97));
+        const frameOnly = !above.length && fr.length;
+        if (!above.length && !fr.length) continue;
+        if (frameOnly) above.push(Object.assign([...fr.sort((a, b) => (b[2] - b[0]) * (b[3] - b[1]) - (a[2] - a[0]) * (a[3] - a[1]))[0]], { vector: true }));
+        const rTop = Math.min(...above.map((r) => r[1]));
+        // (up to the last line of running text above the drawings, across the caption's width)
+        const prose = flatZ.filter((l) => l !== cap && proseLine(l) && l.bbox[3] <= rTop + 2 && l.bbox[0] < c1 && l.bbox[2] > c0 && !above.some((r) => l.bbox[1] >= r[1] && l.bbox[3] <= r[3]));
+        // (not the page's header band; and only near the drawings, not all of the
+        // caption's width: a table can sit beside a figure)
+        // (nor into another picture above: a figure's upper row of panels)
+        const upper = out.filter((r) => !above.includes(r) && r[3] <= rTop + 2 && r[0] < c1 && r[2] > c0).map((r) => r[3] + 1);
+        const top = Math.max(rTop - 60, H * 0.065, ...upper, ...prose.map((l) => l.bbox[3] + 2));
+        const zx0 = Math.max(c0 - 8, Math.min(...above.map((r) => r[0])) - 40);
+        const zx1 = Math.min(c1 + 8, Math.max(...above.map((r) => r[2])) + 40);
+        const inZone = (b) => b[1] >= top - 1 && b[3] <= ctop + 1 && b[0] >= zx0 && b[2] <= zx1;
+        // (labels in any direction: "Density" up the side; short ones)
+        const parts = frameOnly ? [...above] : [...above, ...small.filter(inZone), ...lines.filter((l) => l !== cap && !proseLine(l) && tx(l).split(/\s+/).length <= 8 && inZone(l.bbox)).map((l) => l.bbox)];
+        const box = [Math.max(0, Math.min(...parts.map((b) => b[0])) - 2), Math.max(0, Math.min(...parts.map((b) => b[1])) - 2), Math.min(W, Math.max(...parts.map((b) => b[2])) + 2), Math.min(H, Math.max(...parts.map((b) => b[3])) + 2)];
+        if (box[3] > ctop) box[3] = ctop - 1;
+        Object.assign(box, { vector: true });
+        for (const r of above) if (out.includes(r)) out.splice(out.indexOf(r), 1);
+        // (a picture that another one already holds, most of it, isn't a second one)
+        const area = (r) => Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+        const inter = (a, c) => area([Math.max(a[0], c[0]), Math.max(a[1], c[1]), Math.min(a[2], c[2]), Math.min(a[3], c[3])]);
+        const holder = out.find((r) => inter(r, box) >= area(box) * 0.85);
+        if (holder) holder.splice(0, 4, Math.min(holder[0], box[0]), Math.min(holder[1], box[1]), Math.max(holder[2], box[2]), Math.max(holder[3], box[3]));
+        else out.push(box);
+      }
+    }
     // A page with a lot of sideways text (a table printed sideways): all of
     // it is the table, its caption and headers too. Its columns of numbers
     // sit further apart than the clustering bridges, so the pieces alone
