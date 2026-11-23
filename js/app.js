@@ -129,7 +129,16 @@
   // A copy of a paper read a while ago (before a slow download, say) can
   // be saved after the paper was changed elsewhere: fields changed since the
   // copy was read keep their newer value, so the copy can't undo them.
-  async function savePaper(p) {
+  // Saves run one at a time: each reads the stored paper and writes it back,
+  // so two at once (leaving the reader saves the position while the notes
+  // save) let the later write undo the earlier one
+  let saving = Promise.resolve();
+  function savePaper(p) {
+    const run = saving.then(() => savePaperNow(p));
+    saving = run.catch(() => {});
+    return run;
+  }
+  async function savePaperNow(p) {
     const t = now();
     const old = await DB.get('papers', p.id);
     const ft = { ...(old && old.ft) };
@@ -3984,6 +3993,7 @@
         <button class="r-btn" id="r-bigger" aria-label="Larger text">A+</button>
         <button class="r-btn" id="r-find" aria-label="Find in paper">🔍</button>
         ${Speech.supported ? '<button class="r-btn" id="r-tts" aria-label="Read aloud">🔊</button>' : ''}
+        <button class="r-btn" id="r-notes" aria-label="Notes">📝</button>
         <button class="r-btn" id="r-ask" aria-label="Ask Claude">💬</button>
         <button class="r-btn" id="r-supp" aria-label="Supplementary material">📎<span class="r-count" id="r-scount"></span></button>
         <button class="r-btn" id="r-concerns" aria-label="Concerns">⚠<span class="r-count" id="r-ccount"></span></button>
@@ -4023,6 +4033,7 @@
       <section class="r-toc r-concerns" id="r-concerns-panel" hidden></section>
       <section class="r-toc r-concerns r-ask" id="r-ask-panel" hidden></section>
       <section class="r-toc r-concerns r-supp" id="r-supp-panel" hidden></section>
+      <section class="r-toc r-concerns r-notes" id="r-notes-panel" hidden></section>
     </div>`;
 
     const ePub = await Epubify.epubjs();
@@ -4896,8 +4907,9 @@
     const askPanel = $('#r-ask-panel');
     const suppPanel = $('#r-supp-panel');
     // one side panel at a time
+    const notesPanel = $('#r-notes-panel');
     const showPanel = (panel) => {
-      for (const x of [tocPanel, concernsPanel, askPanel, suppPanel]) x.hidden = x !== panel || !x.hidden;
+      for (const x of [tocPanel, concernsPanel, askPanel, suppPanel, notesPanel]) x.hidden = x !== panel || !x.hidden;
     };
     // Supplementary material: a panel, and mentions in the text ("Fig. S3",
     // "Additional file 1") that open the file. Mentions are marked with a
@@ -5151,6 +5163,54 @@
     });
     setCount(p);
     $('#r-concerns').addEventListener('click', () => showPanel(concernsPanel));
+    // Notes while reading, not tied to a highlight: the paper's own notes (the
+    // same as on its page), saved as they're typed; ＋ puts in the page you're on
+    let notesTimer = null;
+    let notesDirty = false;
+    const saveNotes = async () => {
+      clearTimeout(notesTimer);
+      const ta = $('#rn-text', notesPanel);
+      if (!notesDirty || !ta) return;
+      notesDirty = false;
+      const fresh = await DB.get('papers', id);
+      if (!fresh || (fresh.notes || '') === ta.value) return;
+      fresh.notes = ta.value;
+      await savePaper(fresh);
+      const st = $('#rn-state', notesPanel);
+      if (st) st.textContent = 'Saved';
+    };
+    const drawNotes = async () => {
+      const fresh = await DB.get('papers', id);
+      notesPanel.innerHTML = `<h3>Notes</h3>
+        <p class="muted small">Your notes on this paper (the same as on its page). They save as you type.</p>
+        <textarea id="rn-text" rows="14" placeholder="Write anything: thoughts, questions, what to check…">${esc((fresh && fresh.notes) || '')}</textarea>
+        <div class="row between"><button type="button" class="btn small" id="rn-page">＋ ${p.totalPages ? 'Page' : 'Position'} here</button><span class="muted small" id="rn-state"></span></div>`;
+      const ta = $('#rn-text', notesPanel);
+      ta.addEventListener('input', () => {
+        notesDirty = true;
+        $('#rn-state', notesPanel).textContent = '…';
+        clearTimeout(notesTimer);
+        notesTimer = setTimeout(saveNotes, 700);
+      });
+      ta.addEventListener('blur', saveNotes);
+      $('#rn-page', notesPanel).addEventListener('click', () => {
+        const where = p.totalPages ? `p. ${Math.min(p.totalPages, Math.max(1, Math.round(lastPct * p.totalPages)))}` : `${Math.round(lastPct * 100)}%`;
+        const at = ta.selectionStart ?? ta.value.length;
+        const before = ta.value.slice(0, at);
+        const add = `${before && !before.endsWith('\n') ? '\n' : ''}[${where}] `;
+        ta.value = before + add + ta.value.slice(ta.selectionEnd ?? at);
+        ta.focus();
+        ta.setSelectionRange(at + add.length, at + add.length);
+        ta.dispatchEvent(new Event('input'));
+      });
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    };
+    $('#r-notes').addEventListener('click', async () => {
+      if (!notesPanel.hidden) await saveNotes();
+      showPanel(notesPanel);
+      if (!notesPanel.hidden) drawNotes();
+    });
     // Passages with a chat thread: only their last word is marked, with a
     // soft grey tint (an underline under the whole passage got in the way of
     // reading). Tapping it reopens the thread.
@@ -5301,6 +5361,7 @@
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('pagehide', commit);
     teardown = async () => {
+      await saveNotes().catch(() => {});
       if (tts.on) stopTts();
       window.removeEventListener('scroll', onWinScroll);
       if (strip()) strip().removeEventListener('scroll', onStripScroll);
