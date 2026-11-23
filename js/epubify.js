@@ -722,7 +722,11 @@ const Epubify = (() => {
       if (f[0] < -2 || f[2] > W + 2 || f[1] < -2 || f[3] > H + 2) continue; // (a fill running off the page is a chart's, not a frame)
       // (the caption starts at the frame's left edge, and is no wider than it)
       const across = (l) => Math.abs(l.bbox[0] - f[0]) < 12 && l.bbox[2] < f[2] + 10;
-      const foot = caps.find((l) => across(l) && l.bbox[1] > f[1] + (f[3] - f[1]) * 0.5 && l.bbox[1] < f[3] + 14);
+      // (under the frame, a caption can also start left of it and run wider:
+      // an indented figure over a caption the column's width, as BMJ sets them)
+      // (not much wider than the frame, though: a caption under two charts side by side belongs to both)
+      const under = (l) => across(l) || (l.bbox[0] >= f[0] - 60 && l.bbox[0] <= f[0] + 12 && l.bbox[2] >= f[0] + (f[2] - f[0]) * 0.6 && l.bbox[2] - l.bbox[0] <= (f[2] - f[0]) * 1.8);
+      const foot = caps.find((l) => under(l) && l.bbox[1] > f[1] + (f[3] - f[1]) * 0.5 && l.bbox[1] < f[3] + 14);
       const head = !foot && caps.find((l) => across(l) && l.bbox[1] >= f[1] - 2 && l.bbox[3] < f[1] + (f[3] - f[1]) * 0.25);
       if (!foot && !head) continue;
       // (a caption at the head can run on over a few lines)
@@ -1880,7 +1884,7 @@ const Epubify = (() => {
       if (prev) {
         const gap = s.x0 - prev.x1;
         const script = text.startsWith(SUP[0]) || text.startsWith(SUB[0]);
-        if (!script && (gap > 0.12 * Math.min(prev.size, s.size) || /\s$/.test(out) || /^\s/.test(text))) out += ' ';
+        if (!script && (gap > 0.12 * Math.min(prev.size, s.size) || (s.sp && gap > -0.2 * s.size) || /\s$/.test(out) || /^\s/.test(text))) out += ' ';
         else if (script && gap > 0.5 * s.size) out += ' ';
       }
       out += text;
@@ -2256,6 +2260,29 @@ const Epubify = (() => {
     }
     log(twoCol ? '  layout in columns' : '  layout with a side-margin column');
 
+    // Whether this PDF's own spaces can be trusted: some mark spaces inside
+    // words too (kerning, "ex tubation"), and then many of them are narrow
+    let narrow = 0;
+    let marked = 0;
+    for (const pg of pdf.pages)
+      for (const l of pg.lines) {
+        let prev = null;
+        let blank = false;
+        for (const s of l.spans) {
+          if (!s.text.trim()) {
+            blank = true;
+            continue;
+          }
+          if (prev && blank) {
+            const g = (s.bbox[0] - prev.bbox[2]) / s.size;
+            marked++;
+            if (g > 0.005 && g < 0.07) narrow++;
+          }
+          prev = s;
+          blank = false;
+        }
+      }
+    const trustSpaces = marked >= 20 && narrow < marked * 0.12; // (Epstein 1997: 20%; well-made PDFs under 8%)
     // repeated running headers/footers
     const ph = pdf.pages[0].height;
     // (digits normalised so "page 3" and "page 4" match, and a third of the
@@ -2383,10 +2410,33 @@ const Epubify = (() => {
       for (const l of pg.lines) {
         if (!horizontal(l)) continue;
         if (pg === pdf.pages[0] && l.bbox[3] < mastTop && !textBelow(l)) continue; // masthead on the first page (journal logo, header)
+        let blank = false;
+        const own = [];
         for (const s of l.spans) {
           const t = fixGlyphs(s.text, s.font);
-          if (t.trim()) spans.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l, leaf: twoCol ? inLeaf(s) : 0 });
+          // (a space the PDF itself put between two words is kept, however
+          // tight the justified line: "develop a prediction model")
+          if (!t.trim()) {
+            if (t) blank = true;
+            continue;
+          }
+          own.push({ text: t, x0: s.bbox[0], x1: s.bbox[2], y: (s.bbox[1] + s.bbox[3]) / 2, size: s.size, font: s.font, bold: !!(s.flags & 16), line: l, leaf: twoCol ? inLeaf(s) : 0, ...(blank && trustSpaces ? { sp: true } : {}) });
+          blank = /\s$/.test(t);
         }
+        // (but some PDFs mark spaces inside words too, for kerning: "ex tubation",
+        // under 0.07 em wide, where a word space in the tightest justified line
+        // is 0.09 em or more; and none goes before closing punctuation or
+        // beside a dash: "f/VT)", "4—Predictors", "61–67")
+        // (and at least half the line's usual word space: a 0.08 em gap on a line
+        // whose words stand 0.3 em apart is kerning too)
+        const wide = own.map((x, i) => (x.sp && i ? (x.x0 - own[i - 1].x1) / x.size : 0)).filter((g) => g >= 0.08).sort((a, c) => a - c);
+        const usual = wide.length ? wide[wide.length >> 1] : 0;
+        own.forEach((x, i) => {
+          if (!x.sp || !i) return;
+          const g = (x.x0 - own[i - 1].x1) / x.size;
+          if (g < 0.08 || g < usual * 0.5 || /^[)\]},.;:!?%’”—–-]/.test(x.text) || /[(\[{—–-]$/.test(own[i - 1].text)) delete x.sp;
+        });
+        spans.push(...own);
       }
       if (!spans.length && !pg.images.length) continue;
       if (!spans.length) {
