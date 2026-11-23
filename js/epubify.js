@@ -3619,7 +3619,12 @@ const Epubify = (() => {
       // paragraphs in a row that aren't references; a numbered list in the
       // text, "1. Create many bootstrap samples", isn't the reference list)
       const kids = [...root.children];
-      const starts = (e) => /^\[?\d{1,3}[\].]?\s+[\p{Lu}][\p{L}'’-]+/u.test(e.textContent.trim());
+      // (a surname can start with a particle: "1 van Smeden M", "4 de Jong PA")
+      const PARTICLE = "(?:(?:van|von|de|der|den|del|della|di|da|du|dos|le|la|ten|ter|el|al)\\s+)*";
+      const starts = (e) => new RegExp(`^\\[?\\d{1,3}[\\].]?\\s+${PARTICLE}[\\p{Lu}][\\p{L}'’-]+`, 'u').test(e.textContent.trim());
+      // (a piece of a reference broken off at a column end: "models (part 2): …
+      // BMJ 2023;383:e074820. doi:…": it carries on the list, it doesn't break it)
+      const refPiece = (e) => /\bdoi[:.]\s*10\.|\b(?:1[89]|20)\d\d;\s*\d+|\bet al\b|(?:^|\s)\d{1,3}\s[\p{Lu}][\p{L}'’-]+\s[\p{Lu}]{1,3}[,.]/u.test(e.textContent);
       let hits = 0;
       let gap = 0;
       let first = null;
@@ -3635,7 +3640,8 @@ const Epubify = (() => {
           hits++;
           gap = 0;
           first = e;
-        } else if (++gap > 3 || (seen > 6 && hits < seen * 0.5)) break;
+        } else if (refPiece(e)) gap = 0;
+        else if (++gap > 3 || (seen > 6 && hits < seen * 0.4)) break;
       }
       if (first && hits >= 5) {
         refHead = doc.createElement('h2');
@@ -3726,14 +3732,16 @@ const Epubify = (() => {
       const isStart = (t) => /^\[?\d{1,3}[\].]?\s/.test(t);
       // an entry that ran on into the next one ("… Jan 10. 3. Canada: …"):
       // split where the next number in sequence starts
-      if (out.filter(isStart).length >= 3) {
+      const splitRunOns = () => {
+        if (out.filter(isStart).length < 3) return;
         const split = [];
         for (let t of out) {
           for (;;) {
             const m = /^\[?(\d{1,3})[\].]?\s/.exec(t);
             if (!m) break;
             const next = +m[1] + 1;
-            const at = new RegExp(`(?<=[.)]\\s)\\[?${next}[\\].]\\s+(?=[\\p{Lu}])`, 'u').exec(t);
+            // ("8." or "[8]"; or a bare "8" before a name with initials, as BMJ numbers them: "…bmj.l5358 8 Damen JAAG, …")
+            const at = new RegExp(`(?<=[.)]\\s)\\[?${next}[\\].]\\s+(?=[\\p{Lu}])|(?<=[.)\\d]\\s)${next}\\s+(?=(?:(?:van|von|de|der|den|del|di|da|du|le|la|ten|ter)\\s+)*[\\p{Lu}][\\p{L}'’-]+(?:[ -][\\p{Lu}][\\p{L}'’-]+)?\\s[\\p{Lu}](?:-?[\\p{Lu}]){0,3}(?:Jr|Sr)?[,.\\s])`, 'u').exec(t);
             if (!at) break;
             split.push(t.slice(0, at.index).trim());
             t = t.slice(at.index);
@@ -3741,7 +3749,8 @@ const Epubify = (() => {
           split.push(t);
         }
         out.splice(0, out.length, ...split);
-      }
+      };
+      splitRunOns();
       if (out.filter(isStart).length >= Math.max(3, out.length * 0.2)) {
         const merged = [];
         // "3Department of …": an affiliation (marker glued to the word) from a side column
@@ -3750,6 +3759,9 @@ const Epubify = (() => {
           else merged.at(-1).push(t);
         }
         out.splice(0, out.length, ...merged.map((lines) => joinWrapped(lines)));
+        // (and again once lines are joined: "…doi:10.1136/bmj.l5358 8 Damen JAAG, …"
+        // sat inside a line that didn't start an entry)
+        splitRunOns();
       } else {
         // author–year lists: an entry starts "Surname, …" or "Surname AB"; other lines continue the one above
         const startsEntry = (t) => /^[\p{Lu}][\p{L}'’-]+(?:[ -][\p{Lu}][\p{L}'’-]+)?(?:,\s|\s[\p{Lu}]{1,3}[,.\s])/u.test(t);
@@ -3822,14 +3834,78 @@ const Epubify = (() => {
       // example's own sections, isn't it, or nothing before it would link)
       const blocks = [...root.querySelectorAll('h1, h2, h3, h4, p, li')];
       const early = (h) => blocks.indexOf(h) <= blocks.length * 0.25;
-      const bodyStart = heads.find((h) => /^\s*(\d+\.?\s*)?(abstract|summary|introduction|background|methods?|rationale|objectives?)\b/i.test(h.textContent) && early(h)) || heads[0];
+      const named = heads.find((h) => /^\s*(\d+\.?\s*)?(abstract|summary|introduction|background|methods?|rationale|objectives?)\b/i.test(h.textContent) && early(h));
+      // (or the first paragraph of running text, when it comes before any such
+      // heading: an article that opens without one, its first section untitled)
+      // (running text is mostly lowercase words; an author list, "Xingdong
+      // Chen1,2, Jeffrey Gole4, …", is mostly names)
+      const prose = (b) => {
+        const ws = b.textContent.trim().split(/\s+/);
+        return ws.length >= 40 && ws.filter((w) => /^\p{Ll}/u.test(w)).length >= ws.length * 0.5;
+      };
+      const firstProse = blocks.find((b) => b.localName === 'p' && !b.closest('.refs, figure, table') && prose(b));
+      const cand = [named || heads[0], firstProse].filter(Boolean);
+      const bodyStart = cand.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))[0];
+      // A citation broken over two lines comes as two superscripts, "20 21 24-"
+      // and "32": one again
+      for (const sup of [...root.querySelectorAll('sup')]) {
+        if (!sup.parentNode || !/[-\u2010-\u2015\u2212]\s*$/.test(sup.textContent)) continue; // (any hyphen or dash: BMJ sets U+2011)
+        let n = sup.nextSibling;
+        while (n && n.nodeType === 3 && !n.data.trim()) n = n.nextSibling;
+        // (or its end came out as plain text: "24-" then " 26 and …")
+        const plain = sup.nextSibling && sup.nextSibling.nodeType === 3 ? /^\s?(\d{1,3})(?!\d)/.exec(sup.nextSibling.data) : null;
+        if (plain && !(n && n.nodeType === 1 && n.localName === 'sup')) {
+          sup.textContent = sup.textContent.trimEnd() + plain[1];
+          sup.nextSibling.data = sup.nextSibling.data.slice(plain[0].length);
+          continue;
+        }
+        if (n && n.nodeType === 1 && n.localName === 'sup' && /^\s*\d/.test(n.textContent)) {
+          sup.textContent = sup.textContent.trimEnd() + n.textContent.trim();
+          for (let k = sup.nextSibling; k && k !== n; ) {
+            const nx = k.nextSibling;
+            k.remove();
+            k = nx;
+          }
+          n.remove();
+        }
+      }
+      const maxRef = Math.max(0, ...byNumber.keys());
       for (const sup of root.querySelectorAll('sup')) {
         if (sup.closest('a, .refs, h1, h2, h3, h4, math')) continue;
         if (bodyStart && sup.compareDocumentPosition(bodyStart) & Node.DOCUMENT_POSITION_FOLLOWING) continue;
-        const t = sup.textContent.trim();
-        if (!/^\d{1,3}(?:\s*[-–,]\s*\d{1,3})*$/.test(t) && !/^\d{1,3}(?:\s+\d{1,3})+$/.test(t)) continue;
+        let t = sup.textContent.trim();
+        // two numbers that lost the space between them, "5455": 54 and 55
+        if (/^\d{3,4}$/.test(t) && +t > maxRef) {
+          for (let k = 1; k < t.length; k++) {
+            const [a, b] = [+t.slice(0, k), +t.slice(k)];
+            if (t[k] !== '0' && a >= 1 && b > a && b - a <= 9 && byNumber.has(a) && byNumber.has(b)) {
+              t = `${a} ${b}`;
+              break;
+            }
+          }
+        }
+        if (!/^\d{1,3}(?:\s*[-\u2010-\u2015\u2212,]\s*\d{1,3})*$/.test(t) && !/^\d{1,3}(?:\s+\d{1,3})+$/.test(t) && !/^\d{1,3}(?:[\s,]+\d{1,3})*(?:\s*[-\u2010-\u2015\u2212]\s*\d{1,3})(?:[\s,]+\d{1,3})*$/.test(t)) continue;
         const prevText = sup.previousSibling && sup.previousSibling.nodeType === 3 ? sup.previousSibling.data : '';
-        if (/\d\s*$/.test(prevText)) continue; // 10⁶ is a power, not a citation
+        // 10⁶ or 2×10³ is a power, not a citation ("(part 2¹⁰" is one)
+        if (/(?:^|[^\d.])10\s*$|[×x]\s*\d+\s*$|\d\s*\^\s*$/.test(prevText)) continue;
+        // (glued to the word after it, "²Institute of …", it marks an affiliation:
+        // a citation is followed by a space or punctuation)
+        const nextText = sup.nextSibling && sup.nextSibling.nodeType === 3 ? sup.nextSibling.data : '';
+        if (/^\p{L}/u.test(nextText)) continue;
+        // (one opening a paragraph marks an affiliation, "¹ Centre for …", never a citation)
+        const block = sup.closest('p, li');
+        // (and so do those in a list of affiliations: "…Shanghai, China. ² Taizhou
+        // Institute of Health Sciences, …", mostly capitalised names and places)
+        if (block) {
+          const ws = block.textContent.trim().split(/\s+/);
+          if (ws.length >= 8 && ws.filter((w) => /^\p{Ll}/u.test(w)).length < ws.length * 0.3) continue;
+        }
+        if (block) {
+          const r = doc.createRange();
+          r.setStart(block, 0);
+          r.setEndBefore(sup);
+          if (!r.toString().trim()) continue;
+        }
         const inner = linkNums(t, doc);
         if (!inner) continue;
         sup.replaceChildren(...inner);
