@@ -3865,6 +3865,8 @@ const Epubify = (() => {
       // (a piece of a reference broken off at a column end: "models (part 2): …
       // BMJ 2023;383:e074820. doi:…": it carries on the list, it doesn't break it)
       const refPiece = (e) => /\bdoi[:.]\s*10\.|\b(?:1[89]|20)\d\d;\s*\d+|\bet al\b|(?:^|\s)\d{1,3}\s[\p{Lu}][\p{L}'’-]+\s[\p{Lu}]{1,3}[,.]/u.test(e.textContent);
+      // (entries run on inside a paragraph count too: "…doi:10.1136/x 5 Collins GS, …")
+      const inner = (e) => [...e.textContent.matchAll(new RegExp(`\\s\\d{1,3}\\s+${PARTICLE}[\\p{Lu}][\\p{L}'’-]+\\s[\\p{Lu}]{1,4}(?:Jr|Sr)?[,.]`, 'gu'))].length;
       let hits = 0;
       let gap = 0;
       let first = null;
@@ -3877,10 +3879,13 @@ const Epubify = (() => {
         if (e.localName !== 'p') continue;
         seen++;
         if (starts(e)) {
-          hits++;
+          hits += 1 + inner(e);
           gap = 0;
           first = e;
-        } else if (refPiece(e)) gap = 0;
+        } else if (refPiece(e)) {
+          gap = 0;
+          hits += inner(e);
+        }
         else if (++gap > 3 || (seen > 6 && hits < seen * 0.4)) break;
       }
       if (first && hits >= 5) {
