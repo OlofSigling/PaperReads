@@ -1148,6 +1148,35 @@
     });
   }
 
+  // One person however a paper writes their name ("Richard D Riley", "Riley RD",
+  // "Riley, R. D."): surname and first initial
+  const PARTICLES = new Set(['van', 'von', 'de', 'der', 'den', 'del', 'della', 'di', 'da', 'du', 'dos', 'le', 'la', 'ten', 'ter', 'el', 'al', 'bin', 'ibn']);
+  function authorKey(name) {
+    let t = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+    if (!t) return '';
+    let surname, given;
+    if (t.includes(',')) {
+      [surname, given] = t.split(/,\s*/);
+    } else {
+      const w = t.split(' ').filter((x) => !/^(jr|sr|ii|iii|iv)\.?$/i.test(x));
+      const last = (w.at(-1) || '').replace(/(?:Jr|Sr)\.?$/, '');
+      if (w.length > 1 && /^(?:[A-Z]\.?-?){1,4}$/.test(last)) {
+        // "Riley RD", "van Smeden M"
+        surname = w.slice(0, -1).join(' ');
+        given = last;
+      } else {
+        // "Richard D Riley", "Maarten van Smeden"
+        let k = w.length - 1;
+        while (k > 1 && PARTICLES.has(w[k - 1].toLowerCase())) k--;
+        surname = w.slice(k).join(' ');
+        given = w.slice(0, k).join(' ');
+      }
+    }
+    const sur = (surname || '').toLowerCase().replace(/[^a-z]/g, '');
+    const ini = ((given || '').match(/[A-Za-z]/) || [''])[0].toLowerCase();
+    return sur ? `${sur}|${ini}` : '';
+  }
+
   async function viewLibrary(q) {
     setTitle('Library');
     const all = await papers();
@@ -1161,6 +1190,7 @@
       if (status && p.status !== status) return false;
       if (q.col && !(p.collections || []).includes(q.col)) return false;
       if (q.tag && !(p.tags || []).includes(q.tag)) return false;
+      if (q.author && !(p.authors || []).some((a) => authorKey(a) === authorKey(q.author))) return false;
       if (term) {
         const hay = [p.title, (p.authors || []).join(' '), p.venue, p.year, p.doi, p.arxiv, (p.tags || []).join(' '), p.notes, p.abstract, p.bundle].join(' ').toLowerCase();
         if (!term.split(/\s+/).every((w) => hay.includes(w))) return false;
@@ -1196,6 +1226,7 @@
           ${[['added', 'Recently added'], ['title', 'Title'], ['year', 'Year'], ['rating', 'Rating'], ['finished', 'Recently finished']].map(([v, l]) => `<option value="${v}"${sort === v ? ' selected' : ''}>${l}</option>`).join('')}
         </select>
       </div>
+      ${q.author ? `<nav class="chips" aria-label="Author"><a class="chip on" href="${link({ author: '' })}" title="Show all authors">✍ ${esc(q.author)} ✕</a></nav>` : ''}
       <div class="row between"><p class="muted count">${list.length} paper${list.length === 1 ? '' : 's'}</p><span class="row">${q.tag && all.some((p) => (p.tags || []).includes(q.tag)) ? `<button class="btn small" id="lib-tagbundle">📦 Bundle all #${esc(q.tag)}</button>` : ''}${list.length ? '<button class="btn small" id="lib-select">Select</button>' : ''}</span></div>
       ${list.length ? `<ul class="list" id="lib-list">${libraryRows(list)}</ul>` : '<p class="empty">No papers match.</p>'}
       <div class="r-selbar q-selbar" id="lib-selbar" hidden><span class="small" id="lib-selcount">0 selected</span>
@@ -2982,6 +3013,29 @@
       <ul class="list compact">${[...items].sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9)).map(li).join('')}</ul></section>`;
   }
 
+  // The paper's authors, each with how many other papers in the library they're on
+  function authorsWithCounts(p, all) {
+    const names = p.authors || [];
+    if (!names.length) return 'Unknown authors';
+    const others = new Map();
+    for (const x of all) {
+      if (x.id === p.id || x.deletedAt) continue;
+      for (const k of new Set((x.authors || []).map(authorKey))) {
+        if (!k) continue;
+        if (!others.has(k)) others.set(k, []);
+        others.get(k).push(x.title || 'Untitled');
+      }
+    }
+    return names
+      .map((a) => {
+        const on = others.get(authorKey(a)) || [];
+        if (!on.length) return esc(a);
+        const tip = `On ${on.length} other paper${on.length === 1 ? '' : 's'} in your library:\n${on.slice(0, 8).map((t) => '• ' + t).join('\n')}${on.length > 8 ? '\n…' : ''}`;
+        return `${esc(a)}<a class="au-n" href="#/library?author=${encodeURIComponent(a)}" title="${esc(tip)}" aria-label="${esc(`${a}: ${on.length} other paper${on.length === 1 ? '' : 's'}`)}">${on.length}</a>`;
+      })
+      .join(', ');
+  }
+
   async function viewPaper(id) {
     const p = await DB.get('papers', id);
     if (!p) {
@@ -3017,7 +3071,7 @@
     main.innerHTML = `
       <article class="paper">
         <h2 class="p-title">${esc(p.title)}</h2>
-        <p class="p-authors">${esc((p.authors || []).join(', ') || 'Unknown authors')}</p>
+        <p class="p-authors">${authorsWithCounts(p, all)}</p>
         <p class="muted">${[p.year, esc(p.venue)].filter(Boolean).join(' · ')}</p>
         ${p.citations != null ? `<p class="small muted" title="How many papers cite it">Cited by ${p.citations} (${esc(p.citationsFrom || '')}, ${new Date(p.citationsAt || 0).toLocaleDateString()})</p>` : ''}
         <p class="ids">
